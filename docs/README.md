@@ -1,8 +1,5 @@
 # 文档目录
 
-在此放置架构设计、时序图、数据模型和运维方案。建议至少包含：
+[`design/README.md`](./design/README.md) 是多租户、多节点服务设计的入口。该目录中的文档定义本仓库的规范性架构、跨组件契约、实现阶段和验收门禁。
 
-- 系统架构图：Gateway、Worker、Channel Adapter、Storage Adapter、Plugin / Guardrail、Telemetry
-- 核心时序图：IM 消息 → Runner 执行 → Tool 调用 → Session / Memory 写入 → IM 回复
-- 数据模型与多后端适配说明
-- 风险清单
+设计以 `trpc-agent-service` 为独立服务边界，只依赖 `trpc-agent-go` 的公共 API；任何设计不得依赖另一个 Go module 的 `internal` 包。
