@@ -31,6 +31,9 @@ func (r *Repository) Create(ctx context.Context, in agentapp.CreateInput) (agent
 	if err := ctx.Err(); err != nil {
 		return agentapp.AgentApp{}, err
 	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
+		return agentapp.AgentApp{}, err
+	}
 	a := in.App
 	if a.TenantID == "" || a.AgentAppID == "" || a.AgentAppKey == "" || a.DisplayName == "" {
 		return agentapp.AgentApp{}, agentapp.ErrInvalid
@@ -73,6 +76,9 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 	if err := ctx.Err(); err != nil {
 		return agentapp.Revision{}, err
 	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
+		return agentapp.Revision{}, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ak := appKey{in.TenantID, in.AgentAppID}
@@ -109,6 +115,9 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 
 func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInput) (agentapp.Revision, error) {
 	if err := ctx.Err(); err != nil {
+		return agentapp.Revision{}, err
+	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
 		return agentapp.Revision{}, err
 	}
 	r.mu.Lock()
@@ -152,6 +161,9 @@ func (r *Repository) GetRevision(ctx context.Context, tenantID, appID string, re
 
 func (r *Repository) Publish(ctx context.Context, in agentapp.PublishInput) (agentapp.PublishResult, error) {
 	if err := ctx.Err(); err != nil {
+		return agentapp.PublishResult{}, err
+	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
 		return agentapp.PublishResult{}, err
 	}
 	r.mu.Lock()
@@ -202,6 +214,9 @@ func (r *Repository) Rollback(ctx context.Context, in agentapp.RollbackInput) (a
 	if err := ctx.Err(); err != nil {
 		return agentapp.RollbackResult{}, err
 	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
+		return agentapp.RollbackResult{}, err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ak := appKey{in.TenantID, in.AgentAppID}
@@ -225,6 +240,9 @@ func (r *Repository) Rollback(ctx context.Context, in agentapp.RollbackInput) (a
 
 func (r *Repository) TransitionStatus(ctx context.Context, in agentapp.TransitionStatusInput) (agentapp.ChangeResult, error) {
 	if err := ctx.Err(); err != nil {
+		return agentapp.ChangeResult{}, err
+	}
+	if err := in.ChangeMetadata.Validate(); err != nil {
 		return agentapp.ChangeResult{}, err
 	}
 	r.mu.Lock()

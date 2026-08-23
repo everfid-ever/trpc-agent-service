@@ -14,7 +14,14 @@ var (
 )
 
 type ChangeMetadata struct {
-	ActorID, Reason, CorrelationID, TraceID string
+	ActorType, ActorID, Reason, CorrelationID, TraceID string
+}
+
+func (m ChangeMetadata) Validate() error {
+	if m.ActorType == "" || m.ActorID == "" || m.Reason == "" || m.CorrelationID == "" || m.TraceID == "" {
+		return ErrInvalid
+	}
+	return nil
 }
 
 type CreateInput struct {

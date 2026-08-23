@@ -4,8 +4,8 @@ package secrets
 import "context"
 
 type SecretRef struct {
-	Ref     string
-	Version int64
+	Ref     string `json:"ref"`
+	Version int64  `json:"version"`
 }
 type SecretValue struct {
 	Bytes   []byte
