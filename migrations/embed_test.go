@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 {
+	if len(all) != 2 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -43,11 +43,51 @@ func TestMigrationFunctionBodiesArePaired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	up := all[0].Up
-	if strings.Count(up, "AS $$") != strings.Count(up, "$$;") {
-		t.Fatalf("unpaired function bodies: opens=%d closes=%d", strings.Count(up, "AS $$"), strings.Count(up, "$$;"))
+	for _, migration := range all {
+		up := migration.Up
+		if strings.Count(up, "AS $$") != strings.Count(up, "$$;") {
+			t.Fatalf("%s has unpaired function bodies: opens=%d closes=%d", migration.Name, strings.Count(up, "AS $$"), strings.Count(up, "$$;"))
+		}
+		if !strings.HasPrefix(strings.TrimSpace(up), "BEGIN;") || !strings.HasSuffix(strings.TrimSpace(up), "COMMIT;") {
+			t.Fatalf("%s must be transaction wrapped", migration.Name)
+		}
 	}
-	if !strings.HasPrefix(strings.TrimSpace(up), "BEGIN;") || !strings.HasSuffix(strings.TrimSpace(up), "COMMIT;") {
-		t.Fatal("migration must be transaction wrapped")
+}
+
+func TestRuntimeConsistencyMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeMigration := all[1]
+	if runtimeMigration.Version != "000002" || runtimeMigration.Name != "runtime_consistency" {
+		t.Fatalf("migration=%#v", runtimeMigration)
+	}
+	for _, clause := range []string{
+		"CREATE TABLE session_head (", "CREATE TABLE session_event (", "CREATE TABLE session_commit (",
+		"CREATE UNIQUE INDEX session_commit_terminal_input_idx", "CREATE TABLE inbox (",
+		"CREATE TABLE execution_record (", "CREATE TABLE delivery_ledger (",
+		"CREATE OR REPLACE FUNCTION claim_inbox(", "CREATE OR REPLACE FUNCTION prepare_dispatch(",
+		"CREATE OR REPLACE FUNCTION commit_turn(", "FOR UPDATE", "ON CONFLICT", "REVOKE ALL ON FUNCTION",
+		"CREATE OR REPLACE FUNCTION request_cancel_execution(", "CREATE OR REPLACE FUNCTION park_execution(",
+	} {
+		if !strings.Contains(runtimeMigration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	for _, clause := range []string{
+		"PRIMARY KEY (tenant_id, agent_app_id, session_id)",
+		"UNIQUE (tenant_id, request_id, event_seq)",
+		"UNIQUE (tenant_id, kind, idempotency_key)",
+		"FOREIGN KEY (tenant_id, request_id)",
+	} {
+		combined := all[0].Up + runtimeMigration.Up
+		if !strings.Contains(combined, clause) {
+			t.Errorf("missing tenant-leading runtime constraint %q", clause)
+		}
+	}
+	if !strings.Contains(runtimeMigration.Down, "DROP TABLE IF EXISTS session_head;") ||
+		!strings.Contains(runtimeMigration.Down, "DROP FUNCTION IF EXISTS commit_turn(") {
+		t.Fatal("runtime down migration is incomplete")
 	}
 }

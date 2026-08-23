@@ -31,6 +31,9 @@ func (d LocalDispatcher) Dispatch(ctx context.Context, in DispatchRequest) (Exec
 	if err != nil {
 		return ExecutionHandle{}, err
 	}
+	if !prepared.Accepted {
+		return ExecutionHandle{RequestID: in.RequestID, Status: string(runtime.OutcomeDenied)}, nil
+	}
 	if err := d.Executor.Execute(ctx, prepared.Envelope); err != nil {
 		return ExecutionHandle{}, err
 	}

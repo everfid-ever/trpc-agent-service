@@ -45,7 +45,7 @@ func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispa
 		if !reflect.DeepEqual(existing.Envelope, candidate) {
 			return gateway.PreparedDispatch{}, runtime.ErrCommitConflict
 		}
-		return gateway.PreparedDispatch{Envelope: existing.Envelope}, nil
+		return gateway.PreparedDispatch{Envelope: existing.Envelope, Accepted: true}, nil
 	}
 	sk := sessionKey{in.Tenant.TenantID, in.Tenant.AgentAppID, in.SessionID}
 	seq := s.nextInput[sk]
@@ -58,7 +58,7 @@ func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispa
 		return gateway.PreparedDispatch{}, err
 	}
 	s.executions[ek] = gateway.ExecutionStatus{Envelope: e, Outcome: runtime.OutcomeQueued}
-	return gateway.PreparedDispatch{Envelope: e}, nil
+	return gateway.PreparedDispatch{Envelope: e, Accepted: true}, nil
 }
 
 func envelope(in gateway.PrepareDispatchRequest, seq uint64, createdAt time.Time) runtime.ExecutionEnvelope {

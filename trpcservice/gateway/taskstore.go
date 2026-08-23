@@ -17,7 +17,11 @@ type PrepareDispatchRequest struct {
 	TraceParent string
 }
 
-type PreparedDispatch struct{ Envelope runtime.ExecutionEnvelope }
+type PreparedDispatch struct {
+	Envelope       runtime.ExecutionEnvelope
+	Accepted       bool
+	TerminalReason string
+}
 type ExecutionKey struct{ TenantID, RequestID string }
 type ExecutionStatus struct {
 	Envelope  runtime.ExecutionEnvelope

@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
@@ -25,11 +26,21 @@ type SessionHead struct {
 	LastFence, LastSessionSeq, NextInputSeq uint64
 	State                                   map[string]any
 }
-type BufferedEvent struct{ EventID, EventType, PayloadRef string }
+type BufferedEvent struct {
+	EventID, EventType, PayloadRef string
+	EventSeq                       uint64
+}
 type StateDelta map[string]any
 type SummaryCandidate struct {
+	SummaryID      string
 	BaseSessionSeq uint64
+	LastEventID    string
+	CutoffAt       time.Time
 	ContentRef     string
+}
+type OutboxEvent struct {
+	Kind, IdempotencyKey, PayloadRef, TraceParent string
+	EventSeq                                      uint64
 }
 type CommitTurnRequest struct {
 	SessionKey
@@ -41,10 +52,12 @@ type CommitTurnRequest struct {
 	StateDelta                 StateDelta
 	SummaryCandidate           *SummaryCandidate
 	ResultRef, ReplyCursor     string
+	Outbox                     []OutboxEvent
 }
 type CommitTurnResult struct {
 	CommitID               string
 	Outcome                runtime.Outcome
+	InputSeq               uint64
 	SessionVersion         int64
 	ResultRef, ReplyCursor string
 }

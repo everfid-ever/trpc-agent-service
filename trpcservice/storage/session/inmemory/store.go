@@ -3,7 +3,6 @@ package inmemory
 
 import (
 	"context"
-	"reflect"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -14,12 +13,20 @@ type Store struct {
 	mu       sync.Mutex
 	heads    map[sessionstore.SessionKey]sessionstore.SessionHead
 	commits  map[string]sessionstore.CommitTurnRequest
+	digests  map[string]string
 	results  map[string]sessionstore.CommitTurnResult
 	terminal map[sessionstore.TerminalKey]sessionstore.CommitTurnResult
+	events   map[sessionstore.SessionKey][]sessionstore.BufferedEvent
+	outboxes map[sessionstore.SessionKey][]sessionstore.OutboxEvent
+	summary  map[sessionstore.SessionKey]sessionstore.SummaryCandidate
 }
 
 func New() *Store {
-	return &Store{heads: make(map[sessionstore.SessionKey]sessionstore.SessionHead), commits: make(map[string]sessionstore.CommitTurnRequest), results: make(map[string]sessionstore.CommitTurnResult), terminal: make(map[sessionstore.TerminalKey]sessionstore.CommitTurnResult)}
+	return &Store{
+		heads: make(map[sessionstore.SessionKey]sessionstore.SessionHead), commits: make(map[string]sessionstore.CommitTurnRequest),
+		digests: make(map[string]string), results: make(map[string]sessionstore.CommitTurnResult), terminal: make(map[sessionstore.TerminalKey]sessionstore.CommitTurnResult),
+		events: make(map[sessionstore.SessionKey][]sessionstore.BufferedEvent), outboxes: make(map[sessionstore.SessionKey][]sessionstore.OutboxEvent), summary: make(map[sessionstore.SessionKey]sessionstore.SummaryCandidate),
+	}
 }
 func commitKey(k sessionstore.SessionKey, id string) string {
 	return k.TenantID + "\x00" + k.AgentAppID + "\x00" + k.SessionID + "\x00" + id
@@ -31,6 +38,9 @@ func (s *Store) OpenForRun(ctx context.Context, in sessionstore.OpenForRunReques
 	}
 	if in.TenantID == "" || in.AgentAppID == "" || in.SessionID == "" {
 		return sessionstore.SessionHead{}, runtime.ErrTenantScope
+	}
+	if in.RequestID == "" || in.InputSeq < 1 || in.Fence < 1 {
+		return sessionstore.SessionHead{}, runtime.ErrCommitConflict
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,11 +65,18 @@ func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnReques
 	if err := ctx.Err(); err != nil {
 		return sessionstore.CommitTurnResult{}, err
 	}
+	if err := sessionstore.ValidateCommit(in); err != nil {
+		return sessionstore.CommitTurnResult{}, err
+	}
+	digest, err := sessionstore.CommitDigest(in)
+	if err != nil {
+		return sessionstore.CommitTurnResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ck := commitKey(in.SessionKey, in.CommitID)
-	if old, ok := s.commits[ck]; ok {
-		if !reflect.DeepEqual(old, in) {
+	if _, ok := s.commits[ck]; ok {
+		if s.digests[ck] != digest {
 			return sessionstore.CommitTurnResult{}, runtime.ErrCommitConflict
 		}
 		return s.results[ck], nil
@@ -92,17 +109,41 @@ func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnReques
 	for k, v := range in.StateDelta {
 		head.State[k] = v
 	}
+	if candidate := in.SummaryCandidate; candidate != nil {
+		current, ok := s.summary[in.SessionKey]
+		if !ok || candidate.BaseSessionSeq > current.BaseSessionSeq {
+			s.summary[in.SessionKey] = *candidate
+		}
+	}
 	if in.Outcome.Terminal() {
 		head.NextInputSeq++
 	}
 	s.heads[in.SessionKey] = head
-	result := sessionstore.CommitTurnResult{CommitID: in.CommitID, Outcome: in.Outcome, SessionVersion: head.Version, ResultRef: in.ResultRef, ReplyCursor: in.ReplyCursor}
+	result := sessionstore.CommitTurnResult{CommitID: in.CommitID, Outcome: in.Outcome, InputSeq: in.InputSeq, SessionVersion: head.Version, ResultRef: in.ResultRef, ReplyCursor: in.ReplyCursor}
 	s.commits[ck] = cloneCommit(in)
+	s.digests[ck] = digest
 	s.results[ck] = result
+	s.events[in.SessionKey] = append(s.events[in.SessionKey], in.Events...)
+	s.outboxes[in.SessionKey] = append(s.outboxes[in.SessionKey], in.Outbox...)
 	if in.Outcome.Terminal() {
 		s.terminal[sessionstore.TerminalKey{SessionKey: in.SessionKey, InputSeq: in.InputSeq}] = result
 	}
 	return result, nil
+}
+
+// SnapshotEffects exposes copies for contract tests; production callers use
+// the event and outbox repositories rather than this helper.
+func (s *Store) SnapshotEffects(key sessionstore.SessionKey) ([]sessionstore.BufferedEvent, []sessionstore.OutboxEvent, *sessionstore.SummaryCandidate) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events := append([]sessionstore.BufferedEvent(nil), s.events[key]...)
+	outboxes := append([]sessionstore.OutboxEvent(nil), s.outboxes[key]...)
+	var summary *sessionstore.SummaryCandidate
+	if value, ok := s.summary[key]; ok {
+		copy := value
+		summary = &copy
+	}
+	return events, outboxes, summary
 }
 func (s *Store) GetTerminalByInputSeq(ctx context.Context, key sessionstore.TerminalKey) (sessionstore.CommitTurnResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -140,6 +181,7 @@ func cloneHead(in sessionstore.SessionHead) sessionstore.SessionHead {
 func cloneCommit(in sessionstore.CommitTurnRequest) sessionstore.CommitTurnRequest {
 	out := in
 	out.Events = append([]sessionstore.BufferedEvent(nil), in.Events...)
+	out.Outbox = append([]sessionstore.OutboxEvent(nil), in.Outbox...)
 	if in.StateDelta != nil {
 		out.StateDelta = make(sessionstore.StateDelta, len(in.StateDelta))
 		for k, v := range in.StateDelta {
