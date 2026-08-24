@@ -8,23 +8,28 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
 type Binding struct {
-	Locator     string
-	Tenant      tenant.Context
-	IdentityKey []byte
+	Locator           string
+	Tenant            tenant.Context
+	IdentityKey       []byte
+	ExternalAccountID string
 }
 
 type Handler struct {
 	Dispatcher gateway.Dispatcher
+	Inbox      messaging.InboxClaimer
 	mu         sync.RWMutex
 	bindings   map[string]Binding
 	payloads   map[string][]byte
@@ -86,6 +91,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	userID := hmacID("u1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalUserID)
 	sessionID := hmacID("s1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalChatID)
 	payloadRef := "fake-payload://" + requestID
+	if h.Inbox != nil {
+		externalAccountID := binding.ExternalAccountID
+		if externalAccountID == "" {
+			externalAccountID = binding.Locator
+		}
+		digest := sha256.Sum256(payload)
+		claimed, err := h.Inbox.ClaimInbox(r.Context(), messaging.ClaimInboxRequest{
+			InboxKey: messaging.InboxKey{
+				TenantID: binding.Tenant.TenantID, Channel: binding.Tenant.Channel,
+				ExternalAccountID: externalAccountID, ExternalMessageID: in.ExternalMessageID,
+			},
+			RequestID: requestID, AgentAppID: binding.Tenant.AgentAppID, SessionID: sessionID,
+			PayloadRef: payloadRef, PayloadDigest: hex.EncodeToString(digest[:]), KeyVersion: 1,
+			InitialState: messaging.InboxDispatchPending,
+		})
+		if err != nil {
+			if errors.Is(err, runtime.ErrIdempotencyCollision) {
+				http.Error(w, "idempotency collision", http.StatusConflict)
+				return
+			}
+			http.Error(w, "inbox claim failed", http.StatusInternalServerError)
+			return
+		}
+		requestID = claimed.RequestID
+	}
 	handle, err := h.Dispatcher.Dispatch(r.Context(), gateway.DispatchRequest{Tenant: binding.Tenant, RequestID: requestID, SessionID: sessionID, UserID: userID, PayloadRef: payloadRef})
 	if err != nil {
 		http.Error(w, "dispatch failed", http.StatusInternalServerError)

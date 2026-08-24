@@ -22,7 +22,7 @@ func New() *Broker {
 	return &Broker{pending: make(map[string]broker.Delivery), wakeup: make(chan struct{}, 1)}
 }
 
-func (b *Broker) Publish(ctx context.Context, _ broker.Shard, envelope runtime.ExecutionEnvelope) error {
+func (b *Broker) Publish(ctx context.Context, shard broker.Shard, envelope runtime.ExecutionEnvelope) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func (b *Broker) Publish(ctx context.Context, _ broker.Shard, envelope runtime.E
 	}
 	b.mu.Lock()
 	b.nextID++
-	delivery := broker.Delivery{ID: fmt.Sprintf("local-%d", b.nextID), Envelope: envelope}
+	delivery := broker.Delivery{ID: fmt.Sprintf("local-%d", b.nextID), Shard: shard, Envelope: envelope}
 	b.queued = append(b.queued, delivery)
 	b.mu.Unlock()
 	select {

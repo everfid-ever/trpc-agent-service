@@ -20,6 +20,9 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 			t.Errorf("missing %q", clause)
 		}
 	}
+	if strings.Count(up, "FROM public.agent_app_revision") < 4 {
+		t.Fatal("agent app trigger/function queries must schema-qualify agent_app_revision")
+	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
 	}

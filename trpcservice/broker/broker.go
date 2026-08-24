@@ -18,6 +18,7 @@ type ReclaimOptions struct {
 }
 type Delivery struct {
 	ID       string
+	Shard    Shard
 	Envelope runtime.ExecutionEnvelope
 }
 

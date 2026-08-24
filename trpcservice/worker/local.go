@@ -3,6 +3,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -22,8 +23,15 @@ type LocalExecutor struct {
 }
 
 func (w LocalExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEnvelope) error {
+	return w.ExecuteWithFence(ctx, envelope, 1)
+}
+
+func (w LocalExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
 	if err := envelope.Validate(); err != nil {
 		return err
+	}
+	if fence == 0 {
+		return runtime.ErrStaleFence
 	}
 	authoritative, err := w.Tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: envelope.TenantID, RequestID: envelope.RequestID})
 	if err != nil {
@@ -47,7 +55,7 @@ func (w LocalExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEn
 		return runtime.ErrVersionMismatch
 	}
 	sk := sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}
-	head, err := w.Sessions.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: sk, RequestID: envelope.RequestID, InputSeq: envelope.InputSeq, Fence: 1})
+	head, err := w.Sessions.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: sk, RequestID: envelope.RequestID, InputSeq: envelope.InputSeq, Fence: fence})
 	if err != nil {
 		if err == runtime.ErrAlreadyTerminal {
 			_, readErr := w.Sessions.GetTerminalByInputSeq(ctx, sessionstore.TerminalKey{SessionKey: sk, InputSeq: envelope.InputSeq})
@@ -59,6 +67,9 @@ func (w LocalExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEn
 	if err != nil {
 		return err
 	}
-	_, err = w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: sk, RequestID: envelope.RequestID, CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: 1, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1"})
+	_, err = w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: sk, RequestID: envelope.RequestID, CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1"})
+	if errors.Is(err, runtime.ErrAlreadyTerminal) {
+		return nil
+	}
 	return err
 }

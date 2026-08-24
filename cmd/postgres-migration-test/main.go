@@ -120,6 +120,15 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	if err != nil {
 		return fmt.Errorf("PostgreSQL repository contracts: %w\n%s", err, output)
 	}
+	if os.Getenv("TRPC_RUNTIME_TEST") == "1" {
+		command = exec.CommandContext(ctx, "go", "test", "-count=1", "./trpcservice/integration")
+		command.Dir = repoRoot
+		command.Env = append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn)
+		output, err = command.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("runtime slice: %w\n%s", err, output)
+		}
+	}
 	return nil
 }
 

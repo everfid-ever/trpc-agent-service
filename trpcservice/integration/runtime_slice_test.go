@@ -1,0 +1,397 @@
+// Package integration contains opt-in real-backend vertical slice tests.
+package integration
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
+	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
+	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/fake"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
+	coordredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
+	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
+	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
+	redisclient "github.com/redis/go-redis/v9"
+)
+
+const (
+	tenantA = "t_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	tenantB = "t_01ARZ3NDEKTSV4RRFFQ69G5FAY"
+	appID   = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+)
+
+func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
+	if os.Getenv("TRPC_RUNTIME_TEST") != "1" {
+		t.Skip("TRPC_RUNTIME_TEST=1 is required")
+	}
+	db := runtimeTestDB(t)
+	redisAddress := os.Getenv("TRPC_REDIS_TEST_ADDR")
+	if redisAddress == "" {
+		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
+	}
+	redisClient := redisclient.NewClient(&redisclient.Options{Addr: redisAddress})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	environment := fmt.Sprintf("runtime_slice_%d", time.Now().UnixNano())
+	streamBroker, err := brokerredis.New(redisClient, brokerredis.Config{
+		Environment: environment, Group: "workers", ShardCount: 4, ReadBlock: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leases, err := coordredis.New(redisClient, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupRedisNamespace(redisClient, environment) })
+
+	tenants := tenantpostgres.New(db)
+	apps := agentpostgres.New(db)
+	configs := configpostgres.New(db, tenants)
+	var appTable, revisionTable, configTable bool
+	if err := db.QueryRow(`SELECT to_regclass('public.agent_app') IS NOT NULL,
+to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_snapshot') IS NOT NULL`).
+		Scan(&appTable, &revisionTable, &configTable); err != nil {
+		t.Fatal(err)
+	}
+	if !appTable || !revisionTable || !configTable {
+		t.Fatalf("migration tables app=%t revision=%t config=%t", appTable, revisionTable, configTable)
+	}
+	snapshots := []profile.ExecutionProfileSnapshot{
+		prepareTenant(t, tenants, apps, configs, tenantA, "runtime-a", "fake-a"),
+		prepareTenant(t, tenants, apps, configs, tenantB, "runtime-b", "fake-b"),
+	}
+	profiles := profilememory.NewResolver(snapshots...)
+	tasks := gatewaypostgres.NewTaskStore(db)
+	sessions := sessionpostgres.New(db)
+	inbox := messagingpostgres.New(db)
+	model := &delayedModel{inner: mockmodel.New(), delay: 40 * time.Millisecond}
+
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	workersDone := make(chan error, 2)
+	usedWorkers := &workerSet{ids: make(map[string]struct{})}
+	shards := []broker.Shard{0, 1, 2, 3}
+	for _, workerID := range []string{"worker-1", "worker-2"} {
+		executor := recordingExecutor{
+			workerID: workerID, used: usedWorkers,
+			inner: worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: model},
+		}
+		consumer := worker.Consumer{
+			WorkerID: workerID, Shards: shards, Broker: streamBroker, Leases: leases,
+			Sessions: sessions, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond,
+		}
+		go func() { workersDone <- consumer.Run(workerCtx) }()
+	}
+	t.Cleanup(func() {
+		stopWorkers()
+		for index := 0; index < 2; index++ {
+			select {
+			case <-workersDone:
+			case <-time.After(2 * time.Second):
+			}
+		}
+	})
+
+	tenantRows := map[string]tenant.Tenant{}
+	for _, tenantID := range []string{tenantA, tenantB} {
+		row, err := tenants.Get(context.Background(), tenantID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tenantRows[tenantID] = row
+	}
+	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configs, Broker: streamBroker, ShardCount: 4}
+	handler := fake.NewHandler(dispatcher,
+		fake.Binding{Locator: "a", ExternalAccountID: "shared-account", Tenant: tenant.Context{TenantID: tenantA, TenantVersion: tenantRows[tenantA].Version, AgentAppID: appID, SubjectID: "subject", Channel: "fake", TrustedSource: "channel_binding:fake-a"}, IdentityKey: []byte("tenant-a-key")},
+		fake.Binding{Locator: "b", ExternalAccountID: "shared-account", Tenant: tenant.Context{TenantID: tenantB, TenantVersion: tenantRows[tenantB].Version, AgentAppID: appID, SubjectID: "subject", Channel: "fake", TrustedSource: "channel_binding:fake-b"}, IdentityKey: []byte("tenant-b-key")},
+	)
+	handler.Inbox = inbox
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	first := postMessage(t, server.URL, "a", "same-message", "same-chat")
+	duplicate := postMessage(t, server.URL, "a", "same-message", "same-chat")
+	crossTenant := postMessage(t, server.URL, "b", "same-message", "same-chat")
+	if first.RequestID != duplicate.RequestID || first.RequestID == crossTenant.RequestID {
+		t.Fatalf("request isolation first=%s duplicate=%s cross=%s", first.RequestID, duplicate.RequestID, crossTenant.RequestID)
+	}
+
+	type indexedHandle struct {
+		index  int
+		handle gateway.ExecutionHandle
+	}
+	concurrent := make(chan indexedHandle, 4)
+	for index := 0; index < 4; index++ {
+		index := index
+		go func() {
+			chat := "same-chat"
+			if index >= 2 {
+				chat = fmt.Sprintf("parallel-chat-%d", index)
+			}
+			concurrent <- indexedHandle{index: index, handle: postMessage(t, server.URL, "a", fmt.Sprintf("message-%d", index), chat)}
+		}()
+	}
+	concurrentHandles := make([]gateway.ExecutionHandle, 4)
+	for index := 0; index < 4; index++ {
+		result := <-concurrent
+		concurrentHandles[result.index] = result.handle
+	}
+	handles := append([]gateway.ExecutionHandle{first, crossTenant}, concurrentHandles...)
+	for _, handle := range handles {
+		status := waitForTerminal(t, tasks, tenantForRequest(handle.RequestID, first.RequestID, crossTenant.RequestID), handle.RequestID)
+		if status.Outcome != runtime.OutcomeSucceeded || status.ResultRef == "" {
+			t.Fatalf("status=%#v", status)
+		}
+		if calls := model.inner.Calls(status.Envelope.TenantID, handle.RequestID); calls != 1 {
+			t.Fatalf("request=%s model calls=%d", handle.RequestID, calls)
+		}
+	}
+
+	var sessionID string
+	var sequences []uint64
+	rows, err := db.Query(`SELECT session_id,input_seq FROM execution_record
+WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handles[2].RequestID, handles[3].RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var value uint64
+		var currentSession string
+		if err := rows.Scan(&currentSession, &value); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		if sessionID != "" && currentSession != sessionID {
+			rows.Close()
+			t.Fatalf("same chat produced different sessions: %s %s", sessionID, currentSession)
+		}
+		sessionID = currentSession
+		sequences = append(sequences, value)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(sequences) != 2 || sequences[1] != sequences[0]+1 {
+		t.Fatalf("same-session sequences=%v", sequences)
+	}
+	if usedWorkers.count() != 2 {
+		t.Fatalf("expected both workers to execute, used=%v", usedWorkers.snapshot())
+	}
+}
+
+func prepareTenant(t *testing.T, tenants *tenantpostgres.Repository, apps *agentpostgres.Repository, configs *configpostgres.Repository, tenantID, tenantKey, bindingID string) profile.ExecutionProfileSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	meta := tenant.ChangeMetadata{ActorType: "test", ActorID: "slice", ReasonCode: "setup", CorrelationID: tenantKey, TraceID: tenantKey}
+	created, err := tenants.Create(ctx, tenant.CreateInput{Tenant: tenant.Tenant{TenantID: tenantID, TenantKey: tenantKey, DisplayName: tenantKey}, ChangeMetadata: meta})
+	if err != nil {
+		t.Fatalf("create tenant %s: %v", tenantID, err)
+	}
+	appMeta := agentapp.ChangeMetadata{ActorType: "test", ActorID: "slice", Reason: "setup", CorrelationID: tenantKey, TraceID: tenantKey}
+	app, err := apps.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: tenantID, AgentAppID: appID, AgentAppKey: "assistant", DisplayName: "Assistant"}, ChangeMetadata: appMeta})
+	if err != nil {
+		t.Fatalf("create app %s: %v", tenantID, err)
+	}
+	draft, err := apps.CreateDraft(ctx, agentapp.CreateDraftInput{
+		TenantID: tenantID, AgentAppID: appID, ExpectedAppVersion: app.Version,
+		Revision: agentapp.Revision{
+			AgentKind: "llm", Instruction: "help", ModelProfileID: "mock", ModelProfileVersion: 1,
+			GenerationConfig: map[string]any{}, RuntimePolicy: map[string]any{},
+		}, ChangeMetadata: appMeta,
+	})
+	if err != nil {
+		t.Fatalf("create draft %s: %v", tenantID, err)
+	}
+	publishedApp, err := apps.Publish(ctx, agentapp.PublishInput{TenantID: tenantID, AgentAppID: appID, Revision: draft.Revision, ExpectedAppVersion: 2, ExpectedDraftVersion: 1, ChangeMetadata: appMeta})
+	if err != nil {
+		t.Fatalf("publish app %s: %v", tenantID, err)
+	}
+	publishedConfig, err := configs.Publish(ctx, config.PublishInput{
+		TenantID: tenantID, ExpectedTenantVersion: created.Version, Metadata: meta,
+		Payload: config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: 1, ChannelBindings: []config.ChannelBinding{{
+			BindingID: bindingID, Channel: "fake", ExternalAccountID: "shared-account", AgentAppID: appID,
+			SecretRef: secrets.SecretRef{Ref: "secret://fake", Version: 1},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("publish config %s: %v", tenantID, err)
+	}
+	key := profile.ExecutionProfileKey{
+		TenantID: tenantID, AgentAppID: appID, AgentAppRevision: publishedApp.Revision.Revision,
+		ContentDigest: publishedApp.Revision.ContentDigest, ConfigVersion: publishedConfig.Snapshot.ConfigVersion, PolicyVersion: 1,
+	}
+	return profile.ExecutionProfileSnapshot{
+		Key: key, TenantVersion: publishedConfig.Tenant.Version, AgentAppVersion: publishedApp.App.Version,
+		ContentDigest: key.ContentDigest, AgentKind: "llm", Instruction: "help", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1},
+	}
+}
+
+func runtimeTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := os.Getenv("TRPC_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("TRPC_POSTGRES_TEST_DSN is not set")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var name string
+	var major int
+	if err := db.QueryRow(`SELECT current_database(),current_setting('server_version_num')::int/10000`).Scan(&name, &major); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(name, "trpc_agent_service_test_") || major != 16 {
+		t.Fatalf("refusing database=%q PostgreSQL=%d", name, major)
+	}
+	return db
+}
+
+func postMessage(t *testing.T, baseURL, binding, messageID, chatID string) gateway.ExecutionHandle {
+	t.Helper()
+	body := []byte(fmt.Sprintf(`{"external_message_id":%q,"external_user_id":"same-user","external_chat_id":%q,"text":"hello"}`, messageID, chatID))
+	response, err := http.Post(baseURL+"/bindings/"+binding, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Errorf("post: %v", err)
+		return gateway.ExecutionHandle{}
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Errorf("post status=%d", response.StatusCode)
+		return gateway.ExecutionHandle{}
+	}
+	var handle gateway.ExecutionHandle
+	if err := json.NewDecoder(response.Body).Decode(&handle); err != nil {
+		t.Errorf("decode handle: %v", err)
+	}
+	return handle
+}
+
+func waitForTerminal(t *testing.T, tasks *gatewaypostgres.TaskStore, tenantID, requestID string) gateway.ExecutionStatus {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		status, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantID, RequestID: requestID})
+		if err == nil && status.Outcome == runtime.OutcomeSucceeded {
+			return status
+		}
+		if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("request %s did not become terminal", requestID)
+	return gateway.ExecutionStatus{}
+}
+
+func tenantForRequest(requestID, first, cross string) string {
+	if requestID == cross && cross != first {
+		return tenantB
+	}
+	return tenantA
+}
+
+func cleanupRedisNamespace(client *redisclient.Client, environment string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for _, pattern := range []string{"trpc:{" + environment + "}:*", "trpc:" + environment + ":*"} {
+		var cursor uint64
+		for {
+			keys, next, err := client.Scan(ctx, cursor, pattern, 100).Result()
+			if err != nil {
+				break
+			}
+			if len(keys) > 0 {
+				_ = client.Del(ctx, keys...).Err()
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+	}
+}
+
+type delayedModel struct {
+	inner *mockmodel.Model
+	delay time.Duration
+}
+
+func (m *delayedModel) Generate(ctx context.Context, envelope runtime.ExecutionEnvelope, snapshot profile.ExecutionProfileSnapshot) (string, error) {
+	timer := time.NewTimer(m.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-timer.C:
+		return m.inner.Generate(ctx, envelope, snapshot)
+	}
+}
+
+type workerSet struct {
+	mu  sync.Mutex
+	ids map[string]struct{}
+}
+
+func (s *workerSet) add(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ids[id] = struct{}{}
+}
+
+func (s *workerSet) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.ids)
+}
+
+func (s *workerSet) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]string, 0, len(s.ids))
+	for id := range s.ids {
+		result = append(result, id)
+	}
+	return result
+}
+
+type recordingExecutor struct {
+	workerID string
+	used     *workerSet
+	inner    worker.LocalExecutor
+}
+
+func (e recordingExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
+	e.used.add(e.workerID)
+	return e.inner.ExecuteWithFence(ctx, envelope, fence)
+}
