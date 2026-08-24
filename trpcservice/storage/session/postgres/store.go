@@ -31,8 +31,9 @@ func (s *Store) OpenForRun(ctx context.Context, in sessionstore.OpenForRunReques
 	var head sessionstore.SessionHead
 	var state []byte
 	head.SessionKey = in.SessionKey
-	err := s.db.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,state_json
-FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, in.TenantID, in.AgentAppID, in.SessionID).
+	err := s.db.QueryRowContext(ctx, `SELECT h.version,h.last_fence,h.last_session_seq,h.next_input_seq,h.state_json
+FROM session_head h JOIN execution_record e ON e.tenant_id=h.tenant_id AND e.agent_app_id=h.agent_app_id AND e.session_id=h.session_id
+WHERE h.tenant_id=$1 AND h.agent_app_id=$2 AND h.session_id=$3 AND e.request_id=$4 AND e.input_seq=$5`, in.TenantID, in.AgentAppID, in.SessionID, in.RequestID, in.InputSeq).
 		Scan(&head.Version, &head.LastFence, &head.LastSessionSeq, &head.NextInputSeq, &state)
 	if err != nil {
 		return sessionstore.SessionHead{}, translate(err)
@@ -108,16 +109,20 @@ func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnReques
 	}
 	var result sessionstore.CommitTurnResult
 	var resultRef, replyCursor sql.NullString
-	err = s.db.QueryRowContext(ctx, `SELECT commit_id,outcome,input_seq,session_version,result_ref,reply_cursor
+	var alreadyTerminal bool
+	err = s.db.QueryRowContext(ctx, `SELECT commit_id,outcome,input_seq,session_version,result_ref,reply_cursor,already_terminal
 FROM commit_turn($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17::jsonb)`,
 		in.TenantID, in.AgentAppID, in.SessionID, in.RequestID, in.CommitID, digest, in.Stage,
 		in.InputSeq, in.Fence, in.ExpectedVersion, string(in.Outcome), eventBytes, stateBytes,
 		summaryBytes, nullable(in.ResultRef), nullable(in.ReplyCursor), outboxBytes).
-		Scan(&result.CommitID, &result.Outcome, &result.InputSeq, &result.SessionVersion, &resultRef, &replyCursor)
+		Scan(&result.CommitID, &result.Outcome, &result.InputSeq, &result.SessionVersion, &resultRef, &replyCursor, &alreadyTerminal)
 	if err != nil {
 		return sessionstore.CommitTurnResult{}, translate(err)
 	}
 	result.ResultRef, result.ReplyCursor = resultRef.String, replyCursor.String
+	if alreadyTerminal {
+		return result, runtime.ErrAlreadyTerminal
+	}
 	return result, nil
 }
 

@@ -99,7 +99,7 @@ CREATE TABLE execution_record (
   FOREIGN KEY (tenant_id, config_version)
     REFERENCES config_snapshot(tenant_id, config_version),
   CHECK (agent_content_digest ~ '^[0-9a-f]{64}$'),
-  CHECK (outcome IN ('queued', 'running', 'pending', 'succeeded', 'denied', 'failed',
+  CHECK (outcome IN ('queued', 'running', 'pending', 'waiting_confirmation', 'succeeded', 'denied', 'failed',
     'cancelled', 'confirmation_denied', 'confirmation_timeout'))
 );
 
@@ -252,16 +252,23 @@ CREATE OR REPLACE FUNCTION commit_turn(
   p_input_seq bigint, p_fence bigint, p_expected_version bigint, p_outcome text,
   p_events jsonb, p_state_delta jsonb, p_summary jsonb,
   p_result_ref text, p_reply_cursor text, p_outbox jsonb
-) RETURNS TABLE(commit_id text, outcome text, input_seq bigint, session_version bigint, result_ref text, reply_cursor text)
+) RETURNS TABLE(commit_id text, outcome text, input_seq bigint, session_version bigint, result_ref text, reply_cursor text, already_terminal boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
   v_head public.session_head%ROWTYPE; v_existing public.session_commit%ROWTYPE;
   v_terminal public.session_commit%ROWTYPE; v_event jsonb; v_out jsonb;
   v_ordinal bigint; v_new_version bigint; v_new_last_seq bigint;
+  v_execution public.execution_record%ROWTYPE;
 BEGIN
   SELECT * INTO v_head FROM public.session_head WHERE tenant_id = p_tenant_id
     AND agent_app_id = p_agent_app_id AND session_id = p_session_id FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'session not found' USING ERRCODE = 'P0002'; END IF;
+  SELECT * INTO v_execution FROM public.execution_record WHERE tenant_id = p_tenant_id
+    AND request_id = p_request_id FOR UPDATE;
+  IF NOT FOUND OR v_execution.agent_app_id <> p_agent_app_id
+     OR v_execution.session_id <> p_session_id OR v_execution.input_seq <> p_input_seq THEN
+    RAISE EXCEPTION 'execution scope mismatch' USING ERRCODE = '42501';
+  END IF;
   SELECT * INTO v_existing FROM public.session_commit WHERE tenant_id = p_tenant_id
     AND agent_app_id = p_agent_app_id AND session_id = p_session_id AND session_commit.commit_id = p_commit_id;
   IF FOUND THEN
@@ -269,7 +276,7 @@ BEGIN
       RAISE EXCEPTION 'commit id collision' USING ERRCODE = '23505';
     END IF;
     RETURN QUERY SELECT v_existing.commit_id, v_existing.outcome, v_existing.input_seq,
-      v_existing.session_version, v_existing.result_ref, v_existing.reply_cursor;
+      v_existing.session_version, v_existing.result_ref, v_existing.reply_cursor, false;
     RETURN;
   END IF;
   IF p_input_seq < v_head.next_input_seq THEN
@@ -278,7 +285,7 @@ BEGIN
       AND session_commit.outcome IN ('succeeded','denied','failed','cancelled','confirmation_denied','confirmation_timeout');
     IF NOT FOUND THEN RAISE EXCEPTION 'terminal invariant missing' USING ERRCODE = 'XX001'; END IF;
     RETURN QUERY SELECT v_terminal.commit_id, v_terminal.outcome, v_terminal.input_seq,
-      v_terminal.session_version, v_terminal.result_ref, v_terminal.reply_cursor;
+      v_terminal.session_version, v_terminal.result_ref, v_terminal.reply_cursor, true;
     RETURN;
   END IF;
   IF p_input_seq > v_head.next_input_seq THEN RAISE EXCEPTION 'input not ready' USING ERRCODE = '55000'; END IF;
@@ -312,6 +319,9 @@ BEGIN
     request_id, request_digest, input_seq, stage, outcome, fence, session_version, reply_cursor, result_ref)
   VALUES (p_tenant_id, p_agent_app_id, p_session_id, p_commit_id, p_request_id,
     p_request_digest, p_input_seq, p_stage, p_outcome, p_fence, v_new_version, p_reply_cursor, p_result_ref);
+  UPDATE public.execution_record SET outcome = p_outcome, result_ref = p_result_ref,
+    version = version + 1
+    WHERE tenant_id = p_tenant_id AND request_id = p_request_id;
   FOR v_out IN SELECT value FROM jsonb_array_elements(COALESCE(p_outbox, '[]'::jsonb)) LOOP
     INSERT INTO public.outbox(tenant_id, outbox_id, kind, aggregate_id, event_seq,
       idempotency_key, payload_ref, traceparent)
@@ -319,7 +329,7 @@ BEGIN
       v_out->>'kind', p_request_id, (v_out->>'event_seq')::bigint,
       v_out->>'idempotency_key', v_out->>'payload_ref', v_out->>'traceparent');
   END LOOP;
-  RETURN QUERY SELECT p_commit_id, p_outcome, p_input_seq, v_new_version, p_result_ref, p_reply_cursor;
+  RETURN QUERY SELECT p_commit_id, p_outcome, p_input_seq, v_new_version, p_result_ref, p_reply_cursor, false;
 END;
 $$;
 

@@ -90,4 +90,12 @@ func TestRuntimeConsistencyMigrationContract(t *testing.T) {
 		!strings.Contains(runtimeMigration.Down, "DROP FUNCTION IF EXISTS commit_turn(") {
 		t.Fatal("runtime down migration is incomplete")
 	}
+	for _, clause := range []string{
+		"v_execution public.execution_record%ROWTYPE", "execution scope mismatch",
+		"UPDATE public.execution_record SET outcome = p_outcome", "already_terminal boolean",
+	} {
+		if !strings.Contains(runtimeMigration.Up, clause) {
+			t.Errorf("missing commit authority clause %q", clause)
+		}
+	}
 }

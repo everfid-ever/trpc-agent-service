@@ -155,4 +155,4 @@ cd trpc-agent-service
 
 ## 设计文档
 
-多租户模型、Gateway/Worker 分布式运行时、数据一致性、Telegram/WeCom、治理安全、可观测与部署方案见 [docs/design/README.md](./docs/design/README.md)。设计目录同时给出跨组件冻结契约、A/B/C/D 模块依赖和分阶段实施路线。
+多租户模型、Gateway/Worker 分布式运行时、数据一致性、WeCom/Feishu、治理安全、可观测与部署方案见 [docs/design/README.md](./docs/design/README.md)。设计目录同时给出跨组件冻结契约、A/B/C/D 模块依赖和分阶段实施路线。
