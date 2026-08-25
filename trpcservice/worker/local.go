@@ -27,6 +27,10 @@ func (w LocalExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEn
 }
 
 func (w LocalExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
+	return w.ExecuteWithLease(ctx, envelope, fence, nil)
+}
+
+func (w LocalExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
 	if err := envelope.Validate(); err != nil {
 		return err
 	}
@@ -66,6 +70,11 @@ func (w LocalExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.Ex
 	resultRef, err := w.Model.Generate(ctx, envelope, snapshot)
 	if err != nil {
 		return err
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return err
+		}
 	}
 	_, err = w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: sk, RequestID: envelope.RequestID, CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1"})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {

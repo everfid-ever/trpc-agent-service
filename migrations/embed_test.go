@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
+	if len(all) != 4 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -20,11 +20,38 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 			t.Errorf("missing %q", clause)
 		}
 	}
-	if strings.Count(up, "FROM public.agent_app_revision") < 4 {
-		t.Fatal("agent app trigger/function queries must schema-qualify agent_app_revision")
-	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestInboundPayloadMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[3]
+	if migration.Version != "000004" || migration.Name != "inbound_payload" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE inbound_payload (", "PRIMARY KEY (tenant_id, request_id)", "UNIQUE (tenant_id, payload_ref)", "FOREIGN KEY (tenant_id)"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestControlPlaneTriggerSearchPathMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[2]
+	if migration.Version != "000003" || migration.Name != "control_plane_trigger_search_path" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if strings.Count(migration.Up, "FROM public.agent_app_revision") != 3 {
+		t.Fatal("trigger functions must schema-qualify every agent_app_revision lookup")
 	}
 }
 

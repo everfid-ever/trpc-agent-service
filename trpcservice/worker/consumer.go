@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
@@ -11,19 +12,20 @@ import (
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 )
 
-type FencedExecutor interface {
-	ExecuteWithFence(context.Context, runtime.ExecutionEnvelope, uint64) error
+type LeaseExecutor interface {
+	ExecuteWithLease(context.Context, runtime.ExecutionEnvelope, uint64, func(context.Context) error) error
 }
 
 type Consumer struct {
-	WorkerID  string
-	Shards    []broker.Shard
-	Broker    broker.Broker
-	Leases    coordination.LeaseManager
-	Sessions  sessionstore.AtomicSessionStore
-	Executor  FencedExecutor
-	LeaseTTL  time.Duration
-	RetryWait time.Duration
+	WorkerID      string
+	Shards        []broker.Shard
+	Broker        broker.Broker
+	Leases        coordination.LeaseManager
+	Sessions      sessionstore.AtomicSessionStore
+	Executor      LeaseExecutor
+	LeaseTTL      time.Duration
+	RenewInterval time.Duration
+	RetryWait     time.Duration
 }
 
 func (w Consumer) Run(ctx context.Context) error {
@@ -35,6 +37,9 @@ func (w Consumer) Run(ctx context.Context) error {
 	}
 	if w.RetryWait <= 0 {
 		w.RetryWait = 10 * time.Millisecond
+	}
+	if w.RenewInterval <= 0 {
+		w.RenewInterval = w.LeaseTTL / 3
 	}
 	return w.Broker.Consume(ctx, broker.ConsumerOptions{ConsumerID: w.WorkerID, Shards: w.Shards}, func(ctx context.Context, delivery broker.Delivery) error {
 		for {
@@ -69,8 +74,58 @@ func (w Consumer) handle(ctx context.Context, delivery broker.Delivery) error {
 		defer cancel()
 		_ = w.Leases.Release(releaseCtx, lease)
 	}()
-	if err := w.Executor.ExecuteWithFence(ctx, delivery.Envelope, lease.Fence); err != nil {
-		return err
+	executionCtx, cancelExecution := context.WithCancel(ctx)
+	defer cancelExecution()
+	stopRenewal := make(chan struct{})
+	renewalDone := make(chan struct{})
+	leaseLost := make(chan struct{})
+	var leaseLostOnce sync.Once
+	markLeaseLost := func() {
+		leaseLostOnce.Do(func() {
+			close(leaseLost)
+			cancelExecution()
+		})
+	}
+	go func() {
+		defer close(renewalDone)
+		ticker := time.NewTicker(w.RenewInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopRenewal:
+				return
+			case <-executionCtx.Done():
+				return
+			case <-ticker.C:
+				if _, renewErr := w.Leases.Renew(executionCtx, lease, w.LeaseTTL); renewErr != nil {
+					markLeaseLost()
+					return
+				}
+			}
+		}
+	}()
+	beforeCommit := func(commitCtx context.Context) error {
+		select {
+		case <-leaseLost:
+			return runtime.ErrLeaseLost
+		default:
+		}
+		if _, renewErr := w.Leases.Renew(commitCtx, lease, w.LeaseTTL); renewErr != nil {
+			markLeaseLost()
+			return runtime.ErrLeaseLost
+		}
+		return nil
+	}
+	executeErr := w.Executor.ExecuteWithLease(executionCtx, delivery.Envelope, lease.Fence, beforeCommit)
+	close(stopRenewal)
+	<-renewalDone
+	select {
+	case <-leaseLost:
+		return runtime.ErrLeaseLost
+	default:
+	}
+	if executeErr != nil {
+		return executeErr
 	}
 	return w.Broker.Ack(ctx, delivery)
 }

@@ -66,8 +66,23 @@ func (r Revision) ValidateDraft() error {
 	return nil
 }
 
+// NormalizeRevision returns a detached revision whose JSON object fields are
+// always objects. PostgreSQL rejects JSON null for these columns, so all
+// repository implementations apply the same canonical representation.
+func NormalizeRevision(r Revision) Revision {
+	r = cloneRevision(r)
+	if r.GenerationConfig == nil {
+		r.GenerationConfig = map[string]any{}
+	}
+	if r.RuntimePolicy == nil {
+		r.RuntimePolicy = map[string]any{}
+	}
+	return r
+}
+
 // ComputeContentDigest hashes the normalized behavior-affecting definition.
 func (r Revision) ComputeContentDigest() (string, error) {
+	r = NormalizeRevision(r)
 	tools := cloneRefs(r.ToolRefs)
 	knowledge := cloneRefs(r.KnowledgeRefs)
 	sort.Slice(tools, func(i, j int) bool {

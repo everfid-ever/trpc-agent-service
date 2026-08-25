@@ -43,6 +43,19 @@ type InboxClaimer interface {
 	GetInbox(context.Context, InboxKey) (InboxRecord, error)
 }
 
+type PayloadRecord struct {
+	TenantID, RequestID, PayloadRef, ContentDigest string
+	Content                                        []byte
+	CreatedAt                                      time.Time
+}
+
+// PayloadStore persists normalized inbound payloads before the inbox claim so
+// a dispatcher can recover them after process restart.
+type PayloadStore interface {
+	PutPayload(context.Context, PayloadRecord) error
+	GetPayload(context.Context, string, string) (PayloadRecord, error)
+}
+
 type OutboxState string
 
 const (

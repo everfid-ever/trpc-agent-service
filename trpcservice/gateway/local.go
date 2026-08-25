@@ -20,6 +20,9 @@ type LocalDispatcher struct {
 }
 
 func (d LocalDispatcher) Dispatch(ctx context.Context, in DispatchRequest) (ExecutionHandle, error) {
+	if d.Tasks == nil || d.Bindings == nil || d.Executor == nil {
+		return ExecutionHandle{}, runtime.ErrInvariantViolation
+	}
 	if err := in.Tenant.Validate(); err != nil {
 		return ExecutionHandle{}, err
 	}

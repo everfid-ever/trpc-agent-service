@@ -29,6 +29,7 @@ import (
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
@@ -129,12 +130,24 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		}
 		tenantRows[tenantID] = row
 	}
-	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configs, Broker: streamBroker, ShardCount: 4}
+	relayCtx, stopRelay := context.WithCancel(context.Background())
+	relayDone := make(chan error, 1)
+	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: "runtime-relay", ShardCount: 4, PollInterval: 5 * time.Millisecond}
+	go func() { relayDone <- dispatchRelay.Run(relayCtx) }()
+	t.Cleanup(func() {
+		stopRelay()
+		select {
+		case <-relayDone:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configs}
 	handler := fake.NewHandler(dispatcher,
 		fake.Binding{Locator: "a", ExternalAccountID: "shared-account", Tenant: tenant.Context{TenantID: tenantA, TenantVersion: tenantRows[tenantA].Version, AgentAppID: appID, SubjectID: "subject", Channel: "fake", TrustedSource: "channel_binding:fake-a"}, IdentityKey: []byte("tenant-a-key")},
 		fake.Binding{Locator: "b", ExternalAccountID: "shared-account", Tenant: tenant.Context{TenantID: tenantB, TenantVersion: tenantRows[tenantB].Version, AgentAppID: appID, SubjectID: "subject", Channel: "fake", TrustedSource: "channel_binding:fake-b"}, IdentityKey: []byte("tenant-b-key")},
 	)
 	handler.Inbox = inbox
+	handler.Payloads = inbox
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
@@ -143,6 +156,10 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	crossTenant := postMessage(t, server.URL, "b", "same-message", "same-chat")
 	if first.RequestID != duplicate.RequestID || first.RequestID == crossTenant.RequestID {
 		t.Fatalf("request isolation first=%s duplicate=%s cross=%s", first.RequestID, duplicate.RequestID, crossTenant.RequestID)
+	}
+	persistedPayload, err := inbox.GetPayload(context.Background(), tenantA, first.RequestID)
+	if err != nil || len(persistedPayload.Content) == 0 || persistedPayload.PayloadRef == "" {
+		t.Fatalf("persisted payload=%#v err=%v", persistedPayload, err)
 	}
 
 	type indexedHandle struct {
@@ -225,11 +242,13 @@ func prepareTenant(t *testing.T, tenants *tenantpostgres.Repository, apps *agent
 		TenantID: tenantID, AgentAppID: appID, ExpectedAppVersion: app.Version,
 		Revision: agentapp.Revision{
 			AgentKind: "llm", Instruction: "help", ModelProfileID: "mock", ModelProfileVersion: 1,
-			GenerationConfig: map[string]any{}, RuntimePolicy: map[string]any{},
 		}, ChangeMetadata: appMeta,
 	})
 	if err != nil {
 		t.Fatalf("create draft %s: %v", tenantID, err)
+	}
+	if draft.GenerationConfig == nil || draft.RuntimePolicy == nil {
+		t.Fatalf("draft JSON objects were not normalized: %#v", draft)
 	}
 	publishedApp, err := apps.Publish(ctx, agentapp.PublishInput{TenantID: tenantID, AgentAppID: appID, Revision: draft.Revision, ExpectedAppVersion: 2, ExpectedDraftVersion: 1, ChangeMetadata: appMeta})
 	if err != nil {
@@ -391,7 +410,7 @@ type recordingExecutor struct {
 	inner    worker.LocalExecutor
 }
 
-func (e recordingExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
+func (e recordingExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
 	e.used.add(e.workerID)
-	return e.inner.ExecuteWithFence(ctx, envelope, fence)
+	return e.inner.ExecuteWithLease(ctx, envelope, fence, beforeCommit)
 }

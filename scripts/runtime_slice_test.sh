@@ -14,4 +14,5 @@ if [[ -z "${TRPC_REDIS_TEST_ADDR:-}" ]]; then
   exit 1
 fi
 
+go test -count=1 ./trpcservice/broker/redis ./trpcservice/coordination/redis
 TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test

@@ -15,6 +15,38 @@ type Store struct{ db *sql.DB }
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
+func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) error {
+	if in.TenantID == "" || in.RequestID == "" || in.PayloadRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+		return runtime.ErrCommitConflict
+	}
+	var storedRef, storedDigest string
+	var storedContent []byte
+	err := s.db.QueryRowContext(ctx, `INSERT INTO inbound_payload(tenant_id,request_id,payload_ref,content,content_digest)
+VALUES($1,$2,$3,$4,$5)
+ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
+RETURNING payload_ref,content_digest,content`, in.TenantID, in.RequestID, in.PayloadRef, in.Content, in.ContentDigest).
+		Scan(&storedRef, &storedDigest, &storedContent)
+	if err != nil {
+		return translate(err)
+	}
+	if storedRef != in.PayloadRef || storedDigest != in.ContentDigest || string(storedContent) != string(in.Content) {
+		return runtime.ErrIdempotencyCollision
+	}
+	return nil
+}
+
+func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (messaging.PayloadRecord, error) {
+	var record messaging.PayloadRecord
+	record.TenantID, record.RequestID = tenantID, requestID
+	err := s.db.QueryRowContext(ctx, `SELECT payload_ref,content_digest,content,created_at FROM inbound_payload
+WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
+		Scan(&record.PayloadRef, &record.ContentDigest, &record.Content, &record.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return messaging.PayloadRecord{}, runtime.ErrNotFound
+	}
+	return record, err
+}
+
 func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) (messaging.InboxRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT tenant_id,channel,external_account_id,external_message_id,
 request_id,agent_app_id,COALESCE(session_id,''),COALESCE(input_seq,0),state,payload_ref,payload_digest,
@@ -163,5 +195,6 @@ func translate(err error) error {
 }
 
 var _ messaging.InboxClaimer = (*Store)(nil)
+var _ messaging.PayloadStore = (*Store)(nil)
 var _ messaging.OutboxStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)

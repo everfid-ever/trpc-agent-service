@@ -72,7 +72,7 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 	if err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
-	value := in.Revision
+	value := agentapp.NormalizeRevision(in.Revision)
 	value.TenantID = in.TenantID
 	value.AgentAppID = in.AgentAppID
 	value.Revision = revision
@@ -110,7 +110,7 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 	if err := in.ChangeMetadata.Validate(); err != nil {
 		return agentapp.Revision{}, err
 	}
-	value := in.Revision
+	value := agentapp.NormalizeRevision(in.Revision)
 	if err := value.ValidateDraft(); err != nil {
 		return agentapp.Revision{}, err
 	}

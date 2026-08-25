@@ -92,7 +92,7 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 	if a.Status == agentapp.StatusDisabled {
 		return agentapp.Revision{}, agentapp.ErrStatusConflict
 	}
-	rev := in.Revision
+	rev := agentapp.NormalizeRevision(in.Revision)
 	rev.TenantID = in.TenantID
 	rev.AgentAppID = in.AgentAppID
 	rev.Revision = a.NextRevision
@@ -122,7 +122,7 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	rev := in.Revision
+	rev := agentapp.NormalizeRevision(in.Revision)
 	k := revisionKey{appKey{rev.TenantID, rev.AgentAppID}, rev.Revision}
 	old, ok := r.revisions[k]
 	if !ok {

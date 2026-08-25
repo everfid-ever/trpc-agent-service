@@ -2,7 +2,7 @@
 package fake
 
 import (
-	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -30,13 +30,12 @@ type Binding struct {
 type Handler struct {
 	Dispatcher gateway.Dispatcher
 	Inbox      messaging.InboxClaimer
-	mu         sync.RWMutex
+	Payloads   messaging.PayloadStore
 	bindings   map[string]Binding
-	payloads   map[string][]byte
 }
 
 func NewHandler(dispatcher gateway.Dispatcher, bindings ...Binding) *Handler {
-	h := &Handler{Dispatcher: dispatcher, bindings: make(map[string]Binding), payloads: make(map[string][]byte)}
+	h := &Handler{Dispatcher: dispatcher, Payloads: messagingmemory.New(), bindings: make(map[string]Binding)}
 	for _, binding := range bindings {
 		h.bindings[binding.Locator] = binding
 	}
@@ -56,9 +55,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	locator := strings.TrimPrefix(r.URL.Path, "/bindings/")
-	h.mu.RLock()
 	binding, ok := h.bindings[locator]
-	h.mu.RUnlock()
 	if !ok {
 		http.Error(w, "binding not found", http.StatusNotFound)
 		return
@@ -80,23 +77,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	requestID := stableID("req", binding.Tenant.TenantID, in.ExternalMessageID)
 	payload, _ := json.Marshal(in)
-	h.mu.Lock()
-	if existing, exists := h.payloads[requestID]; exists && !bytes.Equal(existing, payload) {
-		h.mu.Unlock()
-		http.Error(w, "idempotency collision", http.StatusConflict)
-		return
-	}
-	h.payloads[requestID] = append([]byte(nil), payload...)
-	h.mu.Unlock()
 	userID := hmacID("u1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalUserID)
 	sessionID := hmacID("s1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalChatID)
 	payloadRef := "fake-payload://" + requestID
+	digest := sha256.Sum256(payload)
+	if h.Payloads == nil {
+		http.Error(w, "payload store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := h.Payloads.PutPayload(r.Context(), messaging.PayloadRecord{TenantID: binding.Tenant.TenantID, RequestID: requestID, PayloadRef: payloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: payload}); err != nil {
+		if errors.Is(err, runtime.ErrIdempotencyCollision) {
+			http.Error(w, "idempotency collision", http.StatusConflict)
+			return
+		}
+		http.Error(w, "payload persistence failed", http.StatusInternalServerError)
+		return
+	}
 	if h.Inbox != nil {
 		externalAccountID := binding.ExternalAccountID
 		if externalAccountID == "" {
 			externalAccountID = binding.Locator
 		}
-		digest := sha256.Sum256(payload)
 		claimed, err := h.Inbox.ClaimInbox(r.Context(), messaging.ClaimInboxRequest{
 			InboxKey: messaging.InboxKey{
 				TenantID: binding.Tenant.TenantID, Channel: binding.Tenant.Channel,
@@ -128,10 +129,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // Payload returns a defensive copy of the locally durable normalized payload.
 func (h *Handler) Payload(requestID string) ([]byte, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	payload, ok := h.payloads[requestID]
-	return append([]byte(nil), payload...), ok
+	for _, binding := range h.bindings {
+		record, err := h.Payloads.GetPayload(context.Background(), binding.Tenant.TenantID, requestID)
+		if err == nil {
+			return record.Content, true
+		}
+	}
+	return nil, false
 }
 
 func stableID(prefix string, parts ...string) string {

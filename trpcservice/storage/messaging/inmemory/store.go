@@ -14,10 +14,47 @@ type Store struct {
 	mu         sync.Mutex
 	inbox      map[messaging.InboxKey]messaging.InboxRecord
 	deliveries map[messaging.DeliveryKey]messaging.DeliveryRecord
+	payloads   map[string]messaging.PayloadRecord
 }
 
 func New() *Store {
-	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord)}
+	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord)}
+}
+
+func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.TenantID == "" || in.RequestID == "" || in.PayloadRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+		return runtime.ErrCommitConflict
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := in.TenantID + "\x00" + in.RequestID
+	if old, ok := s.payloads[key]; ok {
+		if old.PayloadRef != in.PayloadRef || old.ContentDigest != in.ContentDigest || string(old.Content) != string(in.Content) {
+			return runtime.ErrIdempotencyCollision
+		}
+		return nil
+	}
+	in.Content = append([]byte(nil), in.Content...)
+	in.CreatedAt = time.Now().UTC()
+	s.payloads[key] = in
+	return nil
+}
+
+func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (messaging.PayloadRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.PayloadRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.payloads[tenantID+"\x00"+requestID]
+	if !ok {
+		return messaging.PayloadRecord{}, runtime.ErrNotFound
+	}
+	record.Content = append([]byte(nil), record.Content...)
+	return record, nil
 }
 
 func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) (messaging.InboxRecord, error) {
@@ -94,4 +131,5 @@ func (s *Store) RecordDelivery(ctx context.Context, in messaging.DeliveryRecord,
 }
 
 var _ messaging.InboxClaimer = (*Store)(nil)
+var _ messaging.PayloadStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)
