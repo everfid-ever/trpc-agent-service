@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -52,6 +53,37 @@ func TestRedisStreamsPublishConsumeAck(t *testing.T) {
 	pending, err := client.XPending(context.Background(), instance.stream(1), "workers").Result()
 	if err != nil || pending.Count != 0 {
 		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+}
+
+func TestRedisStreamsReclaimsUnackedDelivery(t *testing.T) {
+	client := redisTestClient(t)
+	environment := fmt.Sprintf("broker_reclaim_test_%d", time.Now().UnixNano())
+	instance, err := New(client, Config{Environment: environment, Group: "workers", ShardCount: 1, ReadBlock: 10 * time.Millisecond, ReclaimIdle: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Del(context.Background(), instance.stream(0)).Err() })
+	envelope := testEnvelope()
+	if err := instance.Publish(context.Background(), 0, envelope); err != nil {
+		t.Fatal(err)
+	}
+	deliverySeen := errors.New("delivery intentionally left pending")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err = instance.Consume(ctx, brokercontract.ConsumerOptions{ConsumerID: "worker-1", Shards: []brokercontract.Shard{0}}, func(context.Context, brokercontract.Delivery) error {
+		return deliverySeen
+	})
+	if !errors.Is(err, deliverySeen) {
+		t.Fatalf("consume=%v", err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	reclaimed, err := instance.Reclaim(context.Background(), brokercontract.ReclaimOptions{ConsumerID: "worker-2", Limit: 1})
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].Envelope != envelope {
+		t.Fatalf("reclaimed=%#v err=%v", reclaimed, err)
+	}
+	if err := instance.Ack(context.Background(), reclaimed[0]); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -46,6 +46,7 @@ type InboxClaimer interface {
 type PayloadRecord struct {
 	TenantID, RequestID, PayloadRef, ContentDigest string
 	Content                                        []byte
+	KeyVersion                                     int64
 	CreatedAt                                      time.Time
 }
 
@@ -77,6 +78,7 @@ type OutboxRecord struct {
 
 type OutboxStore interface {
 	ClaimOutbox(context.Context, string, int, string, time.Time) ([]OutboxRecord, error)
+	RenewOutboxClaim(context.Context, string, string, uint64, string, time.Time) (uint64, error)
 	MarkPublished(context.Context, string, string, uint64) error
 	MarkRetry(context.Context, string, string, uint64, time.Time) error
 }

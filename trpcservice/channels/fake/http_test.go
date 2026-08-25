@@ -33,7 +33,11 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 	profiles := profilememory.NewResolver(snapshots...)
 	executor := worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: models}
 	dispatcher := gateway.LocalDispatcher{Tasks: tasks, Bindings: bindings, Executor: executor}
-	handler := NewHandler(dispatcher, Binding{Locator: "a", Tenant: tenant.Context{TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:a"}, IdentityKey: []byte("a-key")}, Binding{Locator: "b", Tenant: tenant.Context{TenantID: "tenant-b", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:b"}, IdentityKey: []byte("b-key")})
+	handler := NewHandler(dispatcher,
+		Binding{Locator: "a", Tenant: tenant.Context{TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:a"}, IdentityKey: []byte("a-key")},
+		Binding{Locator: "c", Tenant: tenant.Context{TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:c"}, IdentityKey: []byte("a-key")},
+		Binding{Locator: "b", Tenant: tenant.Context{TenantID: "tenant-b", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:b"}, IdentityKey: []byte("b-key")},
+	)
 	body := []byte(`{"external_message_id":"same-message","external_user_id":"same-user","external_chat_id":"same-chat","text":"hello"}`)
 	for _, locator := range []string{"a", "a", "b"} {
 		req := httptest.NewRequest(http.MethodPost, "/bindings/"+locator, bytes.NewReader(body))
@@ -43,8 +47,13 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 			t.Fatalf("%s: status=%d body=%s", locator, rec.Code, rec.Body.String())
 		}
 	}
-	if got := models.Calls("tenant-a", stableID("req", "tenant-a", "same-message")); got != 1 {
+	if got := models.Calls("tenant-a", stableID("req", "tenant-a", "fake", "a", "same-message")); got != 1 {
 		t.Fatalf("tenant-a calls=%d", got)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/bindings/c", bytes.NewReader(body)))
+	if rec.Code != http.StatusAccepted || models.Calls("tenant-a", stableID("req", "tenant-a", "fake", "c", "same-message")) != 1 {
+		t.Fatalf("second account status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	// Verify terminal facts are independently keyed even though external IDs match.
 	for _, id := range []string{"tenant-a", "tenant-b"} {
@@ -61,7 +70,7 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 		}
 	}
 	spoof := []byte(`{"tenant_id":"tenant-b","external_message_id":"x","external_user_id":"u","external_chat_id":"c","text":"x"}`)
-	rec := httptest.NewRecorder()
+	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/bindings/a", bytes.NewReader(spoof)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("spoof status=%d", rec.Code)
@@ -76,6 +85,10 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 
 func findExecution(ctx context.Context, tasks *gatewaymemory.TaskStore, tenantID string) (gateway.ExecutionStatus, error) {
 	// Request IDs are deterministic but tenant-specific; derive the same trusted key.
-	requestID := stableID("req", tenantID, "same-message")
+	accountID := "a"
+	if tenantID == "tenant-b" {
+		accountID = "b"
+	}
+	requestID := stableID("req", tenantID, "fake", accountID, "same-message")
 	return tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: tenantID, RequestID: requestID})
 }

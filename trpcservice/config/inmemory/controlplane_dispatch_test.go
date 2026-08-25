@@ -44,3 +44,66 @@ func TestPublishedControlPlaneDrivesLocalDispatcher(t *testing.T) {
 		t.Fatalf("handle=%#v calls=%d", handle, model.Calls("tenant-a", "request"))
 	}
 }
+
+func TestConfigPublishAndRollbackOnlyAffectNewRequests(t *testing.T) {
+	ctx, _, apps, configs := setup(t)
+	first, err := configs.Publish(ctx, config.PublishInput{TenantID: "tenant-a", ExpectedTenantVersion: 1, Payload: payload(7), Metadata: metadata("first")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := gatewaymemory.NewTaskStore()
+	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configs}
+	contextFor := func(version int64) tenant.Context {
+		return tenant.Context{TenantID: "tenant-a", TenantVersion: version, AgentAppID: "app", SubjectID: "user", Channel: "fake", TrustedSource: "channel_binding:fake-account"}
+	}
+	if _, err := dispatcher.Dispatch(ctx, gateway.DispatchRequest{Tenant: contextFor(first.Tenant.Version), RequestID: "request-old", SessionID: "session-old", UserID: "user", PayloadRef: "payload://old"}); err != nil {
+		t.Fatal(err)
+	}
+	oldExecution, err := tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: "tenant-a", RequestID: "request-old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := configs.Publish(ctx, config.PublishInput{TenantID: "tenant-a", ExpectedTenantVersion: first.Tenant.Version, Payload: payload(8), Metadata: metadata("second")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.Dispatch(ctx, gateway.DispatchRequest{Tenant: contextFor(second.Tenant.Version), RequestID: "request-new", SessionID: "session-new", UserID: "user", PayloadRef: "payload://new"}); err != nil {
+		t.Fatal(err)
+	}
+	newExecution, err := tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: "tenant-a", RequestID: "request-new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := configs.Rollback(ctx, config.RollbackInput{TenantID: "tenant-a", ExpectedTenantVersion: second.Tenant.Version, TargetVersion: first.Snapshot.ConfigVersion, Metadata: metadata("rollback")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatcher.Dispatch(ctx, gateway.DispatchRequest{Tenant: contextFor(rolled.Tenant.Version), RequestID: "request-rolled", SessionID: "session-rolled", UserID: "user", PayloadRef: "payload://rolled"}); err != nil {
+		t.Fatal(err)
+	}
+	rolledExecution, err := tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: "tenant-a", RequestID: "request-rolled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldExecution.Envelope.ConfigVersion != first.Snapshot.ConfigVersion || oldExecution.Envelope.PolicyVersion != 7 ||
+		newExecution.Envelope.ConfigVersion != second.Snapshot.ConfigVersion || newExecution.Envelope.PolicyVersion != 8 ||
+		rolledExecution.Envelope.ConfigVersion != rolled.Snapshot.ConfigVersion || rolledExecution.Envelope.PolicyVersion != 7 ||
+		rolledExecution.Envelope.ConfigVersion <= newExecution.Envelope.ConfigVersion {
+		t.Fatalf("old=%#v new=%#v rolled=%#v", oldExecution.Envelope, newExecution.Envelope, rolledExecution.Envelope)
+	}
+	app, err := apps.Get(ctx, "tenant-a", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := apps.GetRevision(ctx, "tenant-a", "app", app.CurrentRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: oldExecution.Envelope.ConfigVersion, PolicyVersion: oldExecution.Envelope.PolicyVersion}
+	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: oldKey, TenantVersion: oldExecution.Envelope.TenantVersion, AgentAppVersion: oldExecution.Envelope.AgentAppVersion, ContentDigest: revision.ContentDigest})
+	model := mockmodel.New()
+	executor := worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessionmemory.New(), Model: model}
+	if err := executor.Execute(ctx, oldExecution.Envelope); err != nil || model.Calls("tenant-a", "request-old") != 1 {
+		t.Fatalf("old execution err=%v calls=%d", err, model.Calls("tenant-a", "request-old"))
+	}
+}

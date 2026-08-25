@@ -28,11 +28,14 @@ func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) erro
 	if in.TenantID == "" || in.RequestID == "" || in.PayloadRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
 		return runtime.ErrCommitConflict
 	}
+	if in.KeyVersion < 1 {
+		in.KeyVersion = 1
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := in.TenantID + "\x00" + in.RequestID
 	if old, ok := s.payloads[key]; ok {
-		if old.PayloadRef != in.PayloadRef || old.ContentDigest != in.ContentDigest || string(old.Content) != string(in.Content) {
+		if old.PayloadRef != in.PayloadRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
 			return runtime.ErrIdempotencyCollision
 		}
 		return nil

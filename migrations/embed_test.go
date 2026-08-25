@@ -34,7 +34,7 @@ func TestInboundPayloadMigrationContract(t *testing.T) {
 	if migration.Version != "000004" || migration.Name != "inbound_payload" {
 		t.Fatalf("migration=%#v", migration)
 	}
-	for _, clause := range []string{"CREATE TABLE inbound_payload (", "PRIMARY KEY (tenant_id, request_id)", "UNIQUE (tenant_id, payload_ref)", "FOREIGN KEY (tenant_id)"} {
+	for _, clause := range []string{"CREATE TABLE inbound_payload (", "payload_ciphertext bytea NOT NULL", "payload_nonce bytea NOT NULL", "key_version bigint NOT NULL", "PRIMARY KEY (tenant_id, request_id)", "UNIQUE (tenant_id, payload_ref)", "FOREIGN KEY (tenant_id)"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("missing %q", clause)
 		}

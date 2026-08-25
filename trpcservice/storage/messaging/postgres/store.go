@@ -3,6 +3,9 @@ package postgres
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"errors"
 	"time"
@@ -11,40 +14,110 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db                *sql.DB
+	payloadKey        []byte
+	payloadKeyVersion int64
+}
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
+
+func NewWithPayloadKey(db *sql.DB, key []byte, keyVersion int64) *Store {
+	return &Store{db: db, payloadKey: append([]byte(nil), key...), payloadKeyVersion: keyVersion}
+}
 
 func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) error {
 	if in.TenantID == "" || in.RequestID == "" || in.PayloadRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
 		return runtime.ErrCommitConflict
 	}
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
+		return runtime.ErrVersionMismatch
+	}
+	ciphertext, nonce, err := encryptPayload(s.payloadKey, payloadAAD(in), in.Content)
+	if err != nil {
+		return err
+	}
 	var storedRef, storedDigest string
-	var storedContent []byte
-	err := s.db.QueryRowContext(ctx, `INSERT INTO inbound_payload(tenant_id,request_id,payload_ref,content,content_digest)
-VALUES($1,$2,$3,$4,$5)
+	var storedCiphertext, storedNonce []byte
+	var storedKeyVersion int64
+	err = s.db.QueryRowContext(ctx, `INSERT INTO inbound_payload(tenant_id,request_id,payload_ref,payload_ciphertext,payload_nonce,content_digest,key_version)
+VALUES($1,$2,$3,$4,$5,$6,$7)
 ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
-RETURNING payload_ref,content_digest,content`, in.TenantID, in.RequestID, in.PayloadRef, in.Content, in.ContentDigest).
-		Scan(&storedRef, &storedDigest, &storedContent)
+RETURNING payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version`, in.TenantID, in.RequestID, in.PayloadRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
+		Scan(&storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion)
 	if err != nil {
 		return translate(err)
 	}
-	if storedRef != in.PayloadRef || storedDigest != in.ContentDigest || string(storedContent) != string(in.Content) {
+	if storedRef != in.PayloadRef || storedDigest != in.ContentDigest || storedKeyVersion != s.payloadKeyVersion {
+		return runtime.ErrIdempotencyCollision
+	}
+	storedContent, err := decryptPayload(s.payloadKey, payloadAAD(in), storedCiphertext, storedNonce)
+	if err != nil || string(storedContent) != string(in.Content) {
 		return runtime.ErrIdempotencyCollision
 	}
 	return nil
 }
 
 func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (messaging.PayloadRecord, error) {
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return messaging.PayloadRecord{}, runtime.ErrCapabilityUnsupported
+	}
 	var record messaging.PayloadRecord
 	record.TenantID, record.RequestID = tenantID, requestID
-	err := s.db.QueryRowContext(ctx, `SELECT payload_ref,content_digest,content,created_at FROM inbound_payload
+	var ciphertext, nonce []byte
+	err := s.db.QueryRowContext(ctx, `SELECT payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version,created_at FROM inbound_payload
 WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
-		Scan(&record.PayloadRef, &record.ContentDigest, &record.Content, &record.CreatedAt)
+		Scan(&record.PayloadRef, &record.ContentDigest, &ciphertext, &nonce, &record.KeyVersion, &record.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return messaging.PayloadRecord{}, runtime.ErrNotFound
 	}
+	if err != nil {
+		return messaging.PayloadRecord{}, err
+	}
+	if record.KeyVersion != s.payloadKeyVersion {
+		return messaging.PayloadRecord{}, runtime.ErrVersionMismatch
+	}
+	record.Content, err = decryptPayload(s.payloadKey, payloadAAD(record), ciphertext, nonce)
 	return record, err
+}
+
+func payloadAAD(record messaging.PayloadRecord) []byte {
+	return []byte(record.TenantID + "\x00" + record.RequestID + "\x00" + record.PayloadRef + "\x00" + record.ContentDigest)
+}
+
+func encryptPayload(key, aad, plaintext []byte) ([]byte, []byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, runtime.ErrCapabilityUnsupported
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := cryptorand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	return aead.Seal(nil, nonce, plaintext, aad), nonce, nil
+}
+
+func decryptPayload(key, aad, ciphertext, nonce []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := aead.Open(nil, nonce, ciphertext, aad)
+	if err != nil {
+		return nil, runtime.ErrVersionMismatch
+	}
+	return plaintext, nil
 }
 
 func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) (messaging.InboxRecord, error) {
@@ -117,6 +190,20 @@ func (s *Store) MarkPublished(ctx context.Context, tenantID, outboxID string, ex
 	result, err := s.db.ExecContext(ctx, `UPDATE outbox SET state='published',published_at=now(),claim_owner=NULL,claim_until=NULL,version=version+1
 WHERE tenant_id=$1 AND outbox_id=$2 AND version=$3 AND state='claimed'`, tenantID, outboxID, expectedVersion)
 	return casResult(result, err)
+}
+
+func (s *Store) RenewOutboxClaim(ctx context.Context, tenantID, outboxID string, expectedVersion uint64, owner string, until time.Time) (uint64, error) {
+	if owner == "" || until.IsZero() {
+		return 0, runtime.ErrCommitConflict
+	}
+	var version uint64
+	err := s.db.QueryRowContext(ctx, `UPDATE outbox SET claim_until=$5,version=version+1
+WHERE tenant_id=$1 AND outbox_id=$2 AND version=$3 AND state='claimed' AND claim_owner=$4
+RETURNING version`, tenantID, outboxID, expectedVersion, owner, until).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, runtime.ErrVersionConflict
+	}
+	return version, err
 }
 
 func (s *Store) MarkRetry(ctx context.Context, tenantID, outboxID string, expectedVersion uint64, next time.Time) error {

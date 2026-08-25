@@ -5,21 +5,31 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
 type Broker struct {
-	mu      sync.Mutex
-	nextID  uint64
-	queued  []broker.Delivery
-	pending map[string]broker.Delivery
-	wakeup  chan struct{}
+	mu           sync.Mutex
+	nextID       uint64
+	queued       []broker.Delivery
+	pending      map[string]broker.Delivery
+	pendingSince map[string]time.Time
+	reclaimIdle  time.Duration
+	wakeup       chan struct{}
 }
 
 func New() *Broker {
-	return &Broker{pending: make(map[string]broker.Delivery), wakeup: make(chan struct{}, 1)}
+	return NewWithReclaimIdle(30 * time.Second)
+}
+
+func NewWithReclaimIdle(idle time.Duration) *Broker {
+	if idle <= 0 {
+		idle = 30 * time.Second
+	}
+	return &Broker{pending: make(map[string]broker.Delivery), pendingSince: make(map[string]time.Time), reclaimIdle: idle, wakeup: make(chan struct{}, 1)}
 }
 
 func (b *Broker) Publish(ctx context.Context, shard broker.Shard, envelope runtime.ExecutionEnvelope) error {
@@ -66,6 +76,7 @@ func (b *Broker) take() (broker.Delivery, bool) {
 	d := b.queued[0]
 	b.queued = b.queued[1:]
 	b.pending[d.ID] = d
+	b.pendingSince[d.ID] = time.Now()
 	return d, true
 }
 func (b *Broker) Ack(ctx context.Context, d broker.Delivery) error {
@@ -75,6 +86,7 @@ func (b *Broker) Ack(ctx context.Context, d broker.Delivery) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.pending, d.ID)
+	delete(b.pendingSince, d.ID)
 	return nil
 }
 func (b *Broker) Reclaim(ctx context.Context, opts broker.ReclaimOptions) ([]broker.Delivery, error) {
@@ -88,9 +100,13 @@ func (b *Broker) Reclaim(ctx context.Context, opts broker.ReclaimOptions) ([]bro
 		limit = len(b.pending)
 	}
 	out := make([]broker.Delivery, 0, limit)
+	now := time.Now()
 	for id, d := range b.pending {
+		if now.Sub(b.pendingSince[id]) < b.reclaimIdle {
+			continue
+		}
 		out = append(out, d)
-		delete(b.pending, id)
+		b.pendingSince[id] = now
 		if len(out) == limit {
 			break
 		}

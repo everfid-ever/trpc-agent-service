@@ -32,6 +32,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -64,7 +65,7 @@ func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
 
 	environment := fmt.Sprintf("runtime_slice_%d", time.Now().UnixNano())
 	streamBroker, err := brokerredis.New(redisClient, brokerredis.Config{
-		Environment: environment, Group: "workers", ShardCount: 4, ReadBlock: 20 * time.Millisecond,
+		Environment: environment, Group: "workers", ShardCount: 4, ReadBlock: 20 * time.Millisecond, ReclaimIdle: 50 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -95,25 +96,31 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	tasks := gatewaypostgres.NewTaskStore(db)
 	sessions := sessionpostgres.New(db)
 	inbox := messagingpostgres.New(db)
+	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
 	model := &delayedModel{inner: mockmodel.New(), delay: 40 * time.Millisecond}
 
-	workerCtx, stopWorkers := context.WithCancel(context.Background())
 	workersDone := make(chan error, 2)
 	usedWorkers := &workerSet{ids: make(map[string]struct{})}
+	executionStarted := make(chan executionStart, 32)
+	workerStops := make(map[string]context.CancelFunc)
 	shards := []broker.Shard{0, 1, 2, 3}
 	for _, workerID := range []string{"worker-1", "worker-2"} {
+		workerCtx, stopWorker := context.WithCancel(context.Background())
+		workerStops[workerID] = stopWorker
 		executor := recordingExecutor{
-			workerID: workerID, used: usedWorkers,
+			workerID: workerID, used: usedWorkers, started: executionStarted,
 			inner: worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: model},
 		}
 		consumer := worker.Consumer{
 			WorkerID: workerID, Shards: shards, Broker: streamBroker, Leases: leases,
-			Sessions: sessions, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond,
+			Sessions: sessions, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
 		}
-		go func() { workersDone <- consumer.Run(workerCtx) }()
+		go func(ctx context.Context) { workersDone <- consumer.Run(ctx) }(workerCtx)
 	}
 	t.Cleanup(func() {
-		stopWorkers()
+		for _, stopWorker := range workerStops {
+			stopWorker()
+		}
 		for index := 0; index < 2; index++ {
 			select {
 			case <-workersDone:
@@ -132,7 +139,8 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	}
 	relayCtx, stopRelay := context.WithCancel(context.Background())
 	relayDone := make(chan error, 1)
-	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: "runtime-relay", ShardCount: 4, PollInterval: 5 * time.Millisecond}
+	flakyOutbox := &failFirstPublishedMark{inner: inbox}
+	dispatchRelay := relay.DispatchRelay{Outbox: flakyOutbox, Tasks: tasks, Broker: streamBroker, Owner: "runtime-relay", ShardCount: 4, PollInterval: 5 * time.Millisecond, ClaimTTL: 40 * time.Millisecond, ClaimRenewInterval: 10 * time.Millisecond}
 	go func() { relayDone <- dispatchRelay.Run(relayCtx) }()
 	t.Cleanup(func() {
 		stopRelay()
@@ -147,19 +155,37 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		fake.Binding{Locator: "b", ExternalAccountID: "shared-account", Tenant: tenant.Context{TenantID: tenantB, TenantVersion: tenantRows[tenantB].Version, AgentAppID: appID, SubjectID: "subject", Channel: "fake", TrustedSource: "channel_binding:fake-b"}, IdentityKey: []byte("tenant-b-key")},
 	)
 	handler.Inbox = inbox
-	handler.Payloads = inbox
+	handler.Payloads = payloads
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
 	first := postMessage(t, server.URL, "a", "same-message", "same-chat")
+	var killedWorker string
+	select {
+	case started := <-executionStarted:
+		if started.requestID != first.RequestID {
+			t.Fatalf("first execution start=%#v request=%s", started, first.RequestID)
+		}
+		killedWorker = started.workerID
+		workerStops[killedWorker]()
+	case <-time.After(2 * time.Second):
+		t.Fatal("first execution did not start")
+	}
 	duplicate := postMessage(t, server.URL, "a", "same-message", "same-chat")
 	crossTenant := postMessage(t, server.URL, "b", "same-message", "same-chat")
 	if first.RequestID != duplicate.RequestID || first.RequestID == crossTenant.RequestID {
 		t.Fatalf("request isolation first=%s duplicate=%s cross=%s", first.RequestID, duplicate.RequestID, crossTenant.RequestID)
 	}
-	persistedPayload, err := inbox.GetPayload(context.Background(), tenantA, first.RequestID)
+	persistedPayload, err := payloads.GetPayload(context.Background(), tenantA, first.RequestID)
 	if err != nil || len(persistedPayload.Content) == 0 || persistedPayload.PayloadRef == "" {
 		t.Fatalf("persisted payload=%#v err=%v", persistedPayload, err)
+	}
+	var storedCiphertext []byte
+	if err := db.QueryRow(`SELECT payload_ciphertext FROM inbound_payload WHERE tenant_id=$1 AND request_id=$2`, tenantA, first.RequestID).Scan(&storedCiphertext); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(storedCiphertext, persistedPayload.Content) {
+		t.Fatal("payload was stored as plaintext")
 	}
 
 	type indexedHandle struct {
@@ -222,6 +248,21 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handl
 	}
 	if usedWorkers.count() != 2 {
 		t.Fatalf("expected both workers to execute, used=%v", usedWorkers.snapshot())
+	}
+	if killedWorker == "" || flakyOutbox.failures() != 1 {
+		t.Fatalf("killed worker=%q mark failures=%d", killedWorker, flakyOutbox.failures())
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var unpublished int
+		err := db.QueryRow(`SELECT count(*) FROM outbox WHERE kind='dispatch' AND state<>'published'`).Scan(&unpublished)
+		if err == nil && unpublished == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unpublished dispatch=%d err=%v", unpublished, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -407,10 +448,50 @@ func (s *workerSet) snapshot() []string {
 type recordingExecutor struct {
 	workerID string
 	used     *workerSet
+	started  chan<- executionStart
 	inner    worker.LocalExecutor
 }
 
+type executionStart struct{ workerID, requestID string }
+
 func (e recordingExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
 	e.used.add(e.workerID)
+	if e.started != nil {
+		e.started <- executionStart{workerID: e.workerID, requestID: envelope.RequestID}
+	}
 	return e.inner.ExecuteWithLease(ctx, envelope, fence, beforeCommit)
+}
+
+type failFirstPublishedMark struct {
+	inner  messaging.OutboxStore
+	mu     sync.Mutex
+	failed bool
+}
+
+func (s *failFirstPublishedMark) ClaimOutbox(ctx context.Context, kind string, limit int, owner string, until time.Time) ([]messaging.OutboxRecord, error) {
+	return s.inner.ClaimOutbox(ctx, kind, limit, owner, until)
+}
+func (s *failFirstPublishedMark) RenewOutboxClaim(ctx context.Context, tenantID, outboxID string, version uint64, owner string, until time.Time) (uint64, error) {
+	return s.inner.RenewOutboxClaim(ctx, tenantID, outboxID, version, owner, until)
+}
+func (s *failFirstPublishedMark) MarkPublished(ctx context.Context, tenantID, outboxID string, version uint64) error {
+	s.mu.Lock()
+	if !s.failed {
+		s.failed = true
+		s.mu.Unlock()
+		return errors.New("injected crash after publish before mark")
+	}
+	s.mu.Unlock()
+	return s.inner.MarkPublished(ctx, tenantID, outboxID, version)
+}
+func (s *failFirstPublishedMark) MarkRetry(ctx context.Context, tenantID, outboxID string, version uint64, next time.Time) error {
+	return s.inner.MarkRetry(ctx, tenantID, outboxID, version, next)
+}
+func (s *failFirstPublishedMark) failures() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed {
+		return 1
+	}
+	return 0
 }

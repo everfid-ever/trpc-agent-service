@@ -15,15 +15,16 @@ import (
 // The authoritative envelope is reloaded from the task store; outbox payload
 // references are never trusted as execution input.
 type DispatchRelay struct {
-	Outbox       messaging.OutboxStore
-	Tasks        gateway.TaskStore
-	Broker       broker.Broker
-	Owner        string
-	ShardCount   uint32
-	BatchSize    int
-	ClaimTTL     time.Duration
-	RetryDelay   time.Duration
-	PollInterval time.Duration
+	Outbox             messaging.OutboxStore
+	Tasks              gateway.TaskStore
+	Broker             broker.Broker
+	Owner              string
+	ShardCount         uint32
+	BatchSize          int
+	ClaimTTL           time.Duration
+	ClaimRenewInterval time.Duration
+	RetryDelay         time.Duration
+	PollInterval       time.Duration
 }
 
 func (r DispatchRelay) Run(ctx context.Context) error {
@@ -71,7 +72,37 @@ func (r DispatchRelay) RunOnce(ctx context.Context) (int, error) {
 	published := 0
 	var relayErr error
 	for _, record := range records {
-		status, loadErr := r.Tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: record.TenantID, RequestID: record.AggregateID})
+		processCtx, cancelProcess := context.WithCancel(ctx)
+		stopRenewal := make(chan struct{})
+		renewalDone := make(chan struct{})
+		claimLost := make(chan struct{})
+		version := record.Version
+		renewInterval := r.ClaimRenewInterval
+		if renewInterval <= 0 {
+			renewInterval = claimTTL / 3
+		}
+		go func() {
+			defer close(renewalDone)
+			ticker := time.NewTicker(renewInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopRenewal:
+					return
+				case <-processCtx.Done():
+					return
+				case <-ticker.C:
+					nextVersion, renewErr := r.Outbox.RenewOutboxClaim(processCtx, record.TenantID, record.OutboxID, version, r.Owner, time.Now().Add(claimTTL))
+					if renewErr != nil {
+						close(claimLost)
+						cancelProcess()
+						return
+					}
+					version = nextVersion
+				}
+			}
+		}()
+		status, loadErr := r.Tasks.GetExecution(processCtx, gateway.ExecutionKey{TenantID: record.TenantID, RequestID: record.AggregateID})
 		if loadErr == nil {
 			if status.Envelope.TenantID != record.TenantID || status.Envelope.RequestID != record.AggregateID {
 				loadErr = runtime.ErrTenantScope
@@ -83,15 +114,24 @@ func (r DispatchRelay) RunOnce(ctx context.Context) (int, error) {
 			var shard broker.Shard
 			shard, loadErr = broker.ShardForSession(status.Envelope.TenantID, status.Envelope.AgentAppID, status.Envelope.SessionID, r.ShardCount)
 			if loadErr == nil {
-				loadErr = r.Broker.Publish(ctx, shard, status.Envelope)
+				loadErr = r.Broker.Publish(processCtx, shard, status.Envelope)
 			}
 		}
+		close(stopRenewal)
+		<-renewalDone
+		cancelProcess()
+		select {
+		case <-claimLost:
+			relayErr = errors.Join(relayErr, runtime.ErrLeaseLost)
+			continue
+		default:
+		}
 		if loadErr != nil {
-			markErr := r.Outbox.MarkRetry(ctx, record.TenantID, record.OutboxID, record.Version, time.Now().Add(retryDelay))
+			markErr := r.Outbox.MarkRetry(ctx, record.TenantID, record.OutboxID, version, time.Now().Add(retryDelay))
 			relayErr = errors.Join(relayErr, loadErr, markErr)
 			continue
 		}
-		if markErr := r.Outbox.MarkPublished(ctx, record.TenantID, record.OutboxID, record.Version); markErr != nil {
+		if markErr := r.Outbox.MarkPublished(ctx, record.TenantID, record.OutboxID, version); markErr != nil {
 			relayErr = errors.Join(relayErr, markErr)
 			continue
 		}

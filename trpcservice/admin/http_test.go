@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
@@ -19,7 +20,7 @@ import (
 type headerPrincipalResolver struct{}
 
 func (headerPrincipalResolver) Resolve(r *http.Request) (Principal, error) {
-	return Principal{Authenticated: r.Header.Get("X-Authenticated") == "true", TenantID: r.Header.Get("X-Admin-Tenant"), SubjectID: "operator", CanManage: true}, nil
+	return Principal{Authenticated: r.Header.Get("X-Authenticated") == "true", TenantID: r.Header.Get("X-Admin-Tenant"), SubjectID: "operator", CanManage: r.Header.Get("X-Can-Manage") != "false"}, nil
 }
 
 func adminSetup(t *testing.T) (*Handler, *tenantmemory.Repository) {
@@ -86,5 +87,82 @@ func TestAdminHTTPValidatePublishAndTenantScope(t *testing.T) {
 	handler.ServeHTTP(rec, request(http.MethodGet, "/v1/tenants/tenant-a/configs", "tenant-a"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get=%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminHTTPAuthenticationRollbackVersionReadAndCAS(t *testing.T) {
+	handler, _ := adminSetup(t)
+	payload := config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: "app", PolicyVersion: 1}
+	body, _ := json.Marshal(payload)
+	request := func(method, path string) *http.Request {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Header.Set("X-Authenticated", "true")
+		req.Header.Set("X-Admin-Tenant", "tenant-a")
+		req.Header.Set("X-Reason-Code", "test")
+		req.Header.Set("X-Correlation-ID", "correlation")
+		req.Header.Set("X-Trace-ID", "trace")
+		return req
+	}
+
+	unauthenticated := request(http.MethodPost, "/v1/tenants/tenant-a/configs/validate")
+	unauthenticated.Header.Del("X-Authenticated")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, unauthenticated)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated=%d", recorder.Code)
+	}
+
+	forbidden := request(http.MethodPost, "/v1/tenants/tenant-a/configs/validate")
+	forbidden.Header.Set("X-Can-Manage", "false")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, forbidden)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("forbidden=%d", recorder.Code)
+	}
+
+	missingMetadata := request(http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version=1")
+	missingMetadata.Header.Del("X-Reason-Code")
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, missingMetadata)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("missing metadata=%d", recorder.Code)
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version=1"))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("first publish=%d %s", recorder.Code, recorder.Body.String())
+	}
+	var first config.PublishResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version=1"))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("stale publish=%d", recorder.Code)
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(http.MethodGet, "/v1/tenants/tenant-a/configs/"+strconv.FormatInt(first.Snapshot.ConfigVersion, 10)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("version read=%d", recorder.Code)
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version="+strconv.FormatInt(first.Tenant.Version, 10)))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("second publish=%d %s", recorder.Code, recorder.Body.String())
+	}
+	var second config.PublishResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request(http.MethodPost, "/v1/tenants/tenant-a/configs/rollback?expected_version="+strconv.FormatInt(second.Tenant.Version, 10)+"&target_version="+strconv.FormatInt(first.Snapshot.ConfigVersion, 10)))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("rollback=%d %s", recorder.Code, recorder.Body.String())
+	}
+	var rolled config.PublishResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &rolled); err != nil || rolled.Snapshot.ConfigVersion <= second.Snapshot.ConfigVersion || rolled.Snapshot.Payload.PolicyVersion != 1 {
+		t.Fatalf("rollback result=%#v err=%v", rolled, err)
 	}
 }

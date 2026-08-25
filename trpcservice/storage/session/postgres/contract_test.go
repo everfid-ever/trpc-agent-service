@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
@@ -100,6 +101,26 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	var dispatchCount int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM outbox WHERE tenant_id=$1 AND kind='dispatch' AND aggregate_id=$2`, key.TenantID, first.RequestID).Scan(&dispatchCount); err != nil || dispatchCount != 1 {
 		t.Fatalf("dispatch outbox=%d err=%v", dispatchCount, err)
+	}
+	claimedOutbox, err := inboxes.ClaimOutbox(ctx, "dispatch", 10, "contract-relay", time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatalf("claimed outbox=%#v err=%v", claimedOutbox, err)
+	}
+	targetFound := false
+	for _, outboxRecord := range claimedOutbox {
+		renewedVersion, renewErr := inboxes.RenewOutboxClaim(ctx, outboxRecord.TenantID, outboxRecord.OutboxID, outboxRecord.Version, "contract-relay", time.Now().Add(2*time.Second))
+		if renewErr != nil || renewedVersion <= outboxRecord.Version {
+			t.Fatalf("renewed version=%d err=%v", renewedVersion, renewErr)
+		}
+		if err := inboxes.MarkPublished(ctx, outboxRecord.TenantID, outboxRecord.OutboxID, renewedVersion); err != nil {
+			t.Fatal(err)
+		}
+		if outboxRecord.TenantID == key.TenantID && outboxRecord.AggregateID == first.RequestID {
+			targetFound = true
+		}
+	}
+	if !targetFound {
+		t.Fatalf("request dispatch was not claimed: %#v", claimedOutbox)
 	}
 	var suspendedVersion int64
 	if err := db.QueryRowContext(ctx, `SELECT transition_tenant_status($1,$2,'suspended','test','contract','test',NULL,'contract','contract',NULL)`, key.TenantID, tenantVersion).Scan(&suspendedVersion); err != nil {

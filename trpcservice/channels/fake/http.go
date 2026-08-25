@@ -75,7 +75,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing field", http.StatusBadRequest)
 		return
 	}
-	requestID := stableID("req", binding.Tenant.TenantID, in.ExternalMessageID)
+	externalAccountID := binding.ExternalAccountID
+	if externalAccountID == "" {
+		externalAccountID = binding.Locator
+	}
+	requestID := stableID("req", binding.Tenant.TenantID, binding.Tenant.Channel, externalAccountID, in.ExternalMessageID)
 	payload, _ := json.Marshal(in)
 	userID := hmacID("u1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalUserID)
 	sessionID := hmacID("s1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalChatID)
@@ -85,7 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "payload store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if err := h.Payloads.PutPayload(r.Context(), messaging.PayloadRecord{TenantID: binding.Tenant.TenantID, RequestID: requestID, PayloadRef: payloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: payload}); err != nil {
+	if err := h.Payloads.PutPayload(r.Context(), messaging.PayloadRecord{TenantID: binding.Tenant.TenantID, RequestID: requestID, PayloadRef: payloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: payload, KeyVersion: 1}); err != nil {
 		if errors.Is(err, runtime.ErrIdempotencyCollision) {
 			http.Error(w, "idempotency collision", http.StatusConflict)
 			return
@@ -94,10 +98,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.Inbox != nil {
-		externalAccountID := binding.ExternalAccountID
-		if externalAccountID == "" {
-			externalAccountID = binding.Locator
-		}
 		claimed, err := h.Inbox.ClaimInbox(r.Context(), messaging.ClaimInboxRequest{
 			InboxKey: messaging.InboxKey{
 				TenantID: binding.Tenant.TenantID, Channel: binding.Tenant.Channel,
