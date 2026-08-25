@@ -84,6 +84,66 @@ WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
 	return record, err
 }
 
+func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error {
+	if in.TenantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+		return runtime.ErrCommitConflict
+	}
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
+		return runtime.ErrVersionMismatch
+	}
+	aad := resultAAD(in)
+	ciphertext, nonce, err := encryptPayload(s.payloadKey, aad, in.Content)
+	if err != nil {
+		return err
+	}
+	var ref, digest string
+	var encrypted, storedNonce []byte
+	var version int64
+	err = s.db.QueryRowContext(ctx, `INSERT INTO result_payload(tenant_id,request_id,result_ref,result_ciphertext,result_nonce,content_digest,key_version)
+VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
+RETURNING result_ref,content_digest,result_ciphertext,result_nonce,key_version`, in.TenantID, in.RequestID, in.ResultRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
+		Scan(&ref, &digest, &encrypted, &storedNonce, &version)
+	if err != nil {
+		return translate(err)
+	}
+	if ref != in.ResultRef || digest != in.ContentDigest || version != s.payloadKeyVersion {
+		return runtime.ErrIdempotencyCollision
+	}
+	content, err := decryptPayload(s.payloadKey, aad, encrypted, storedNonce)
+	if err != nil || string(content) != string(in.Content) {
+		return runtime.ErrIdempotencyCollision
+	}
+	return nil
+}
+
+func (s *Store) GetResult(ctx context.Context, tenantID, requestID string) (messaging.ResultRecord, error) {
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return messaging.ResultRecord{}, runtime.ErrCapabilityUnsupported
+	}
+	record := messaging.ResultRecord{TenantID: tenantID, RequestID: requestID}
+	var ciphertext, nonce []byte
+	err := s.db.QueryRowContext(ctx, `SELECT result_ref,content_digest,result_ciphertext,result_nonce,key_version,created_at FROM result_payload WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
+		Scan(&record.ResultRef, &record.ContentDigest, &ciphertext, &nonce, &record.KeyVersion, &record.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return messaging.ResultRecord{}, runtime.ErrNotFound
+	}
+	if err != nil {
+		return messaging.ResultRecord{}, err
+	}
+	if record.KeyVersion != s.payloadKeyVersion {
+		return messaging.ResultRecord{}, runtime.ErrVersionMismatch
+	}
+	record.Content, err = decryptPayload(s.payloadKey, resultAAD(record), ciphertext, nonce)
+	return record, err
+}
+
+func resultAAD(record messaging.ResultRecord) []byte {
+	return []byte(record.TenantID + "\x00" + record.RequestID + "\x00" + record.ResultRef + "\x00" + record.ContentDigest)
+}
+
 func payloadAAD(record messaging.PayloadRecord) []byte {
 	return []byte(record.TenantID + "\x00" + record.RequestID + "\x00" + record.PayloadRef + "\x00" + record.ContentDigest)
 }
@@ -121,12 +181,19 @@ func decryptPayload(key, aad, ciphertext, nonce []byte) ([]byte, error) {
 }
 
 func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) (messaging.InboxRecord, error) {
+	if in.TenantID == "" || in.Channel == "" || in.ExternalAccountID == "" || in.ExternalMessageID == "" {
+		return messaging.InboxRecord{}, runtime.ErrTenantScope
+	}
+	if in.AgentAppID == "" || in.PayloadDigest == "" || in.KeyVersion < 1 {
+		return messaging.InboxRecord{}, runtime.ErrCommitConflict
+	}
+	requestID, payloadRef := messaging.StableInboxIdentity(in.InboxKey)
 	row := s.db.QueryRowContext(ctx, `SELECT tenant_id,channel,external_account_id,external_message_id,
 request_id,agent_app_id,COALESCE(session_id,''),COALESCE(input_seq,0),state,payload_ref,payload_digest,
 key_version,version,COALESCE(terminal_reason,''),COALESCE(result_ref,''),created_at,updated_at
 FROM claim_inbox($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		in.TenantID, in.Channel, in.ExternalAccountID, in.ExternalMessageID, in.RequestID,
-		in.AgentAppID, nullable(in.SessionID), in.PayloadRef, in.PayloadDigest, in.KeyVersion, string(in.InitialState))
+		in.TenantID, in.Channel, in.ExternalAccountID, in.ExternalMessageID, requestID,
+		in.AgentAppID, nullable(in.SessionID), payloadRef, in.PayloadDigest, in.KeyVersion, string(in.InitialState))
 	record, err := scanInbox(row)
 	return record, translate(err)
 }
@@ -283,5 +350,6 @@ func translate(err error) error {
 
 var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
+var _ messaging.ResultStore = (*Store)(nil)
 var _ messaging.OutboxStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)

@@ -102,6 +102,9 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 	if err := rev.ValidateDraft(); err != nil {
 		return agentapp.Revision{}, err
 	}
+	if err := r.validateChildRefsLocked(rev); err != nil {
+		return agentapp.Revision{}, err
+	}
 	now := time.Now().UTC()
 	rev.CreatedAt = now
 	rev.UpdatedAt = now
@@ -142,8 +145,47 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 	if err := rev.ValidateDraft(); err != nil {
 		return agentapp.Revision{}, err
 	}
+	if err := r.validateChildRefsLocked(rev); err != nil {
+		return agentapp.Revision{}, err
+	}
 	r.revisions[k] = rev
 	return copyRevision(rev), nil
+}
+
+func (r *Repository) validateChildRefsLocked(rev agentapp.Revision) error {
+	source := revisionKey{appKey{rev.TenantID, rev.AgentAppID}, rev.Revision}
+	for _, node := range rev.AgentSpec.Nodes {
+		targetKey := revisionKey{appKey{rev.TenantID, node.AgentRef.AgentAppID}, node.AgentRef.Revision}
+		target, ok := r.revisions[targetKey]
+		if !ok || target.State != agentapp.RevisionPublished || target.ContentDigest != node.AgentRef.ContentDigest {
+			return agentapp.ErrInvalid
+		}
+		if targetKey == source || r.reachesLocked(targetKey, source, make(map[revisionKey]bool)) {
+			return agentapp.ErrInvalid
+		}
+	}
+	return nil
+}
+
+func (r *Repository) reachesLocked(current, target revisionKey, seen map[revisionKey]bool) bool {
+	if current == target {
+		return true
+	}
+	if seen[current] {
+		return false
+	}
+	seen[current] = true
+	revision, ok := r.revisions[current]
+	if !ok {
+		return false
+	}
+	for _, node := range revision.AgentSpec.Nodes {
+		next := revisionKey{appKey{revision.TenantID, node.AgentRef.AgentAppID}, node.AgentRef.Revision}
+		if r.reachesLocked(next, target, seen) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Repository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (agentapp.Revision, error) {

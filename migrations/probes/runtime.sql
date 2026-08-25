@@ -3,6 +3,15 @@ INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES
   ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW','probe-b','Probe B')
 ON CONFLICT DO NOTHING;
 
+INSERT INTO model_profile(tenant_id,model_profile_id,profile_key,display_name,status,current_version)
+VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','model','probe-model','Probe Model','active',NULL)
+ON CONFLICT DO NOTHING;
+INSERT INTO model_profile_revision(tenant_id,model_profile_id,profile_version,schema_version,provider,model_name,content_digest)
+VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','model',1,1,'probe','probe',repeat('d',64))
+ON CONFLICT DO NOTHING;
+UPDATE model_profile SET current_version=1
+WHERE tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAV' AND model_profile_id='model' AND current_version IS NULL;
+
 INSERT INTO agent_app(tenant_id,agent_app_id,agent_app_key,display_name,status,current_revision,next_revision) VALUES
   ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','app_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-a','Probe A','disabled',NULL,2),
   ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW','app_01ARZ3NDEKTSV4RRFFQ69G5FAW','probe-b','Probe B','draft',NULL,2)
@@ -36,7 +45,7 @@ DO $$
 BEGIN
   BEGIN
     INSERT INTO session_event(tenant_id,agent_app_id,session_id,session_seq,request_id,input_seq,event_seq,event_id,event_type,payload_ref)
-    VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW','app_01ARZ3NDEKTSV4RRFFQ69G5FAW','probe-session',1,'cross-tenant',1,1,'event','test','payload://probe');
+    VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAW','app_01ARZ3NDEKTSV4RRFFQ69G5FAW','probe-session',1,'cross-tenant',1,1,'event','test','{"ref":"payload://probe","payload":{}}');
     RAISE EXCEPTION 'cross-tenant session FK was accepted';
   EXCEPTION WHEN foreign_key_violation THEN NULL;
   END;

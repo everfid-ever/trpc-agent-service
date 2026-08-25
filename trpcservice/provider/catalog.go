@@ -1,0 +1,390 @@
+// Package provider defines the trusted Provider Catalog and immutable,
+// secret-free Model/Backend Profile snapshots.
+package provider
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/url"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"unicode"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+)
+
+type Kind string
+
+const (
+	KindModel   Kind = "model"
+	KindBackend Kind = "backend"
+)
+
+type OptionType string
+
+const (
+	OptionString  OptionType = "string"
+	OptionInteger OptionType = "integer"
+	OptionBoolean OptionType = "boolean"
+)
+
+type OptionRule struct {
+	Type     OptionType
+	Required bool
+	Default  string
+	Enum     []string
+	Min      int64
+	Max      int64
+}
+
+type CapabilitySet map[string]bool
+
+type Schema struct {
+	Kind              Kind
+	Name              string
+	SchemaVersion     uint16
+	AllowedModels     []string
+	EndpointSchemes   []string
+	EndpointHosts     []string
+	OptionRules       map[string]OptionRule
+	SecretRequirement string
+	Capabilities      CapabilitySet
+}
+
+type Catalog struct {
+	mu      sync.RWMutex
+	schemas map[schemaKey]Schema
+}
+
+type schemaKey struct {
+	Kind    Kind
+	Name    string
+	Version uint16
+}
+
+func NewCatalog(schemas ...Schema) (*Catalog, error) {
+	catalog := &Catalog{schemas: make(map[schemaKey]Schema, len(schemas))}
+	for _, schema := range schemas {
+		if err := catalog.Register(schema); err != nil {
+			return nil, err
+		}
+	}
+	return catalog, nil
+}
+
+func (c *Catalog) Register(schema Schema) error {
+	if c == nil || (schema.Kind != KindModel && schema.Kind != KindBackend) || schema.Name == "" ||
+		schema.SchemaVersion < 1 || !validSecretRequirement(schema.SecretRequirement) {
+		return runtime.ErrInvariantViolation
+	}
+	for name, rule := range schema.OptionRules {
+		if name == "" || sensitiveOption(name) || !validOptionRule(rule) {
+			return runtime.ErrInvariantViolation
+		}
+	}
+	key := schemaKey{schema.Kind, schema.Name, schema.SchemaVersion}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.schemas[key]; exists {
+		return runtime.ErrVersionConflict
+	}
+	c.schemas[key] = cloneSchema(schema)
+	return nil
+}
+
+func (c *Catalog) Resolve(kind Kind, name string, version uint16) (Schema, error) {
+	if c == nil {
+		return Schema{}, runtime.ErrCapabilityUnsupported
+	}
+	c.mu.RLock()
+	schema, ok := c.schemas[schemaKey{kind, name, version}]
+	c.mu.RUnlock()
+	if !ok {
+		return Schema{}, runtime.ErrNotFound
+	}
+	return cloneSchema(schema), nil
+}
+
+type ModelProfileSnapshot struct {
+	TenantID      string
+	ProfileID     string
+	ProfileKey    string
+	DisplayName   string
+	Status        string
+	SchemaVersion uint16
+	Provider      string
+	Model         string
+	Endpoint      string
+	Options       map[string]string
+	SecretRef     secrets.SecretRef
+	Generation    map[string]any
+	ContentDigest string
+	Version       int64
+}
+
+type BackendProfileSnapshot struct {
+	TenantID      string
+	ProfileID     string
+	ProfileKey    string
+	DisplayName   string
+	Status        string
+	SchemaVersion uint16
+	Provider      string
+	Configuration map[string]string
+	CredentialRef secrets.SecretRef
+	Capabilities  CapabilitySet
+	ContentDigest string
+	Version       int64
+}
+
+func (c *Catalog) NormalizeModel(input ModelProfileSnapshot) (ModelProfileSnapshot, error) {
+	schema, err := c.Resolve(KindModel, input.Provider, input.SchemaVersion)
+	if err != nil {
+		return ModelProfileSnapshot{}, err
+	}
+	if err := validateIdentity(input.TenantID, input.ProfileID, input.ProfileKey, input.Status, input.Version); err != nil {
+		return ModelProfileSnapshot{}, err
+	}
+	if !contains(schema.AllowedModels, input.Model) {
+		return ModelProfileSnapshot{}, runtime.ErrCapabilityUnsupported
+	}
+	if err := validateEndpoint(input.Endpoint, schema); err != nil {
+		return ModelProfileSnapshot{}, err
+	}
+	options, err := normalizeOptions(input.Options, schema.OptionRules)
+	if err != nil {
+		return ModelProfileSnapshot{}, err
+	}
+	if err := validateSecret(input.SecretRef, schema.SecretRequirement); err != nil {
+		return ModelProfileSnapshot{}, err
+	}
+	input.Options = options
+	input.Generation = cloneAnyMap(input.Generation)
+	input.ContentDigest, err = digest(struct {
+		SchemaVersion uint16
+		Provider      string
+		Model         string
+		Endpoint      string
+		Options       map[string]string
+		SecretRef     secrets.SecretRef
+		Generation    map[string]any
+	}{input.SchemaVersion, input.Provider, input.Model, input.Endpoint, input.Options, input.SecretRef, input.Generation})
+	return input, err
+}
+
+func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfileSnapshot, error) {
+	schema, err := c.Resolve(KindBackend, input.Provider, input.SchemaVersion)
+	if err != nil {
+		return BackendProfileSnapshot{}, err
+	}
+	if err := validateIdentity(input.TenantID, input.ProfileID, input.ProfileKey, input.Status, input.Version); err != nil {
+		return BackendProfileSnapshot{}, err
+	}
+	configuration, err := normalizeOptions(input.Configuration, schema.OptionRules)
+	if err != nil {
+		return BackendProfileSnapshot{}, err
+	}
+	if err := validateSecret(input.CredentialRef, schema.SecretRequirement); err != nil {
+		return BackendProfileSnapshot{}, err
+	}
+	for capability, enabled := range input.Capabilities {
+		if enabled && !schema.Capabilities[capability] {
+			return BackendProfileSnapshot{}, runtime.ErrCapabilityUnsupported
+		}
+	}
+	input.Configuration = configuration
+	input.Capabilities = cloneCapabilities(input.Capabilities)
+	input.ContentDigest, err = digest(struct {
+		SchemaVersion uint16
+		Provider      string
+		Configuration map[string]string
+		CredentialRef secrets.SecretRef
+		Capabilities  CapabilitySet
+	}{input.SchemaVersion, input.Provider, input.Configuration, input.CredentialRef, input.Capabilities})
+	return input, err
+}
+
+func validateIdentity(tenantID, profileID, profileKey, status string, version int64) error {
+	if tenantID == "" || profileID == "" || profileKey == "" || version < 1 ||
+		(status != "active" && status != "suspended" && status != "disabled") {
+		return runtime.ErrInvariantViolation
+	}
+	return nil
+}
+
+func validateEndpoint(raw string, schema Schema) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.IndexFunc(raw, unicode.IsControl) >= 0 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if !contains(schema.EndpointSchemes, strings.ToLower(parsed.Scheme)) || !containsFold(schema.EndpointHosts, parsed.Hostname()) {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if address := net.ParseIP(parsed.Hostname()); address != nil && (address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast()) {
+		return runtime.ErrCapabilityUnsupported
+	}
+	return nil
+}
+
+func normalizeOptions(input map[string]string, rules map[string]OptionRule) (map[string]string, error) {
+	output := make(map[string]string, len(rules))
+	for name := range input {
+		if sensitiveOption(name) {
+			return nil, runtime.ErrCapabilityUnsupported
+		}
+		if _, ok := rules[name]; !ok {
+			return nil, runtime.ErrCapabilityUnsupported
+		}
+	}
+	for name, rule := range rules {
+		value, exists := input[name]
+		if !exists || strings.TrimSpace(value) == "" {
+			value = rule.Default
+		}
+		if value == "" {
+			if rule.Required {
+				return nil, runtime.ErrInvariantViolation
+			}
+			continue
+		}
+		normalized, err := normalizeOption(value, rule)
+		if err != nil {
+			return nil, err
+		}
+		output[name] = normalized
+	}
+	return output, nil
+}
+
+func normalizeOption(value string, rule OptionRule) (string, error) {
+	value = strings.TrimSpace(value)
+	switch rule.Type {
+	case OptionString:
+		if len(rule.Enum) != 0 && !contains(rule.Enum, value) {
+			return "", runtime.ErrCapabilityUnsupported
+		}
+		return value, nil
+	case OptionInteger:
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || (rule.Min != 0 && parsed < rule.Min) || (rule.Max != 0 && parsed > rule.Max) {
+			return "", runtime.ErrCapabilityUnsupported
+		}
+		return strconv.FormatInt(parsed, 10), nil
+	case OptionBoolean:
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return "", runtime.ErrCapabilityUnsupported
+		}
+		return strconv.FormatBool(parsed), nil
+	default:
+		return "", runtime.ErrInvariantViolation
+	}
+}
+
+func sensitiveOption(name string) bool {
+	normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(name))
+	for _, forbidden := range []string{"apikey", "password", "token", "authorization", "dsn", "credential", "secret"} {
+		if strings.Contains(normalized, forbidden) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateSecret(ref secrets.SecretRef, requirement string) error {
+	present := ref.Ref != "" || ref.Version != 0
+	if present && (ref.Ref == "" || ref.Version < 1) {
+		return runtime.ErrInvariantViolation
+	}
+	if requirement == "required" && !present || requirement == "forbidden" && present {
+		return runtime.ErrCapabilityUnsupported
+	}
+	return nil
+}
+
+func validSecretRequirement(value string) bool {
+	return value == "required" || value == "optional" || value == "forbidden"
+}
+
+func validOptionRule(rule OptionRule) bool {
+	return rule.Type == OptionString || rule.Type == OptionInteger || rule.Type == OptionBoolean
+}
+
+func digest(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("profile digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func cloneSchema(input Schema) Schema {
+	input.AllowedModels = append([]string(nil), input.AllowedModels...)
+	input.EndpointSchemes = append([]string(nil), input.EndpointSchemes...)
+	input.EndpointHosts = append([]string(nil), input.EndpointHosts...)
+	input.OptionRules = cloneRules(input.OptionRules)
+	input.Capabilities = cloneCapabilities(input.Capabilities)
+	sort.Strings(input.AllowedModels)
+	sort.Strings(input.EndpointSchemes)
+	sort.Strings(input.EndpointHosts)
+	return input
+}
+
+func cloneRules(input map[string]OptionRule) map[string]OptionRule {
+	output := make(map[string]OptionRule, len(input))
+	for key, rule := range input {
+		rule.Enum = append([]string(nil), rule.Enum...)
+		sort.Strings(rule.Enum)
+		output[key] = rule
+	}
+	return output
+}
+
+func cloneCapabilities(input CapabilitySet) CapabilitySet {
+	output := make(CapabilitySet, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
+}
+
+func cloneAnyMap(input map[string]any) map[string]any {
+	if input == nil {
+		return map[string]any{}
+	}
+	data, _ := json.Marshal(input)
+	var output map[string]any
+	_ = json.Unmarshal(data, &output)
+	return output
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
+}

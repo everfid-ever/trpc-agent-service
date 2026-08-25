@@ -34,7 +34,7 @@ func TestPublishedControlPlaneDrivesLocalDispatcher(t *testing.T) {
 	tasks := gatewaymemory.NewTaskStore()
 	sessions := sessionmemory.New()
 	model := mockmodel.New()
-	dispatcher := gateway.LocalDispatcher{Tasks: tasks, Bindings: configs, Executor: worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: model}}
+	dispatcher := gateway.LocalDispatcher{Tasks: tasks, Bindings: configs, Executor: worker.DeterministicTestExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: model}}
 	tc := tenant.Context{TenantID: "tenant-a", TenantVersion: published.Tenant.Version, AgentAppID: "app", SubjectID: "user", Channel: "fake", TrustedSource: "channel_binding:fake-account"}
 	handle, err := dispatcher.Dispatch(context.Background(), gateway.DispatchRequest{Tenant: tc, RequestID: "request", SessionID: "session", UserID: "user", PayloadRef: "payload://request"})
 	if err != nil {
@@ -102,7 +102,7 @@ func TestConfigPublishAndRollbackOnlyAffectNewRequests(t *testing.T) {
 	oldKey := profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: oldExecution.Envelope.ConfigVersion, PolicyVersion: oldExecution.Envelope.PolicyVersion}
 	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: oldKey, TenantVersion: oldExecution.Envelope.TenantVersion, AgentAppVersion: oldExecution.Envelope.AgentAppVersion, ContentDigest: revision.ContentDigest})
 	model := mockmodel.New()
-	executor := worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessionmemory.New(), Model: model}
+	executor := worker.DeterministicTestExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessionmemory.New(), Model: model}
 	if err := executor.Execute(ctx, oldExecution.Envelope); err != nil || model.Calls("tenant-a", "request-old") != 1 {
 		t.Fatalf("old execution err=%v calls=%d", err, model.Calls("tenant-a", "request-old"))
 	}

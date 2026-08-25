@@ -14,13 +14,12 @@ const (
 )
 
 type BackendBinding struct {
-	TenantID          string
-	Domain            Domain
-	BackendType       string
-	BackendRef        string
-	CredentialRef     string
-	CredentialVersion int64
-	Capabilities      CapabilitySet
+	TenantID         string
+	ConfigVersion    int64
+	Domain           Domain
+	BackendProfileID string
+	BackendVersion   int64
+	Required         CapabilitySet
 }
 
 type ScopedBackend interface{ TenantID() string }

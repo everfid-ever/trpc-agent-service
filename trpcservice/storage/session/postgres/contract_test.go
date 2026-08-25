@@ -70,12 +70,11 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	}
 	inboxes := messagingpostgres.New(db)
 	inboxKey := messaging.InboxKey{TenantID: key.TenantID, Channel: "fake", ExternalAccountID: "contract-account", ExternalMessageID: "prepare-message"}
-	claim := messaging.ClaimInboxRequest{InboxKey: inboxKey, RequestID: "prepare-request", AgentAppID: key.AgentAppID, SessionID: key.SessionID, PayloadRef: "payload://prepare", PayloadDigest: strings.Repeat("d", 64), KeyVersion: 1, InitialState: messaging.InboxDispatchPending}
+	claim := messaging.ClaimInboxRequest{InboxKey: inboxKey, AgentAppID: key.AgentAppID, SessionID: key.SessionID, PayloadDigest: strings.Repeat("d", 64), KeyVersion: 1, InitialState: messaging.InboxDispatchPending}
 	first, err := inboxes.ClaimInbox(ctx, claim)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim.RequestID = "ignored-duplicate-request"
 	again, err := inboxes.ClaimInbox(ctx, claim)
 	if err != nil || again.RequestID != first.RequestID {
 		t.Fatalf("duplicate claim=%#v err=%v", again, err)
@@ -88,7 +87,7 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	request := gateway.PrepareDispatchRequest{
 		Tenant:    tenant.Context{TenantID: key.TenantID, TenantVersion: tenantVersion, AgentAppID: key.AgentAppID, SubjectID: "user", Channel: "fake", TrustedSource: "channel_binding:contract"},
 		Binding:   tenant.ExecutionBinding{AgentAppVersion: 2, AgentAppRevision: 1, AgentContentDigest: strings.Repeat("a", 64), ConfigVersion: 1, PolicyVersion: 1},
-		RequestID: first.RequestID, SessionID: key.SessionID, UserID: "user", PayloadRef: "payload://prepare",
+		RequestID: first.RequestID, SessionID: key.SessionID, UserID: "user", PayloadRef: first.PayloadRef,
 	}
 	prepared, err := tasks.PrepareDispatch(ctx, request)
 	if err != nil || !prepared.Accepted || prepared.Envelope.InputSeq != 1 {
@@ -127,7 +126,7 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 		t.Fatal(err)
 	}
 	deniedKey := messaging.InboxKey{TenantID: key.TenantID, Channel: "fake", ExternalAccountID: "contract-account", ExternalMessageID: "suspended-message"}
-	deniedClaim, err := inboxes.ClaimInbox(ctx, messaging.ClaimInboxRequest{InboxKey: deniedKey, RequestID: "suspended-request", AgentAppID: key.AgentAppID, SessionID: "suspended-session", PayloadRef: "payload://suspended", PayloadDigest: strings.Repeat("f", 64), KeyVersion: 1, InitialState: messaging.InboxDispatchPending})
+	deniedClaim, err := inboxes.ClaimInbox(ctx, messaging.ClaimInboxRequest{InboxKey: deniedKey, AgentAppID: key.AgentAppID, SessionID: "suspended-session", PayloadDigest: strings.Repeat("f", 64), KeyVersion: 1, InitialState: messaging.InboxDispatchPending})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +176,11 @@ func prepareContractFixture(tb testing.TB, db *sql.DB, key sessionstore.SessionK
 		`INSERT INTO agent_app(tenant_id,agent_app_id,agent_app_key,display_name,status,current_revision,next_revision,version)
 VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','app_01ARZ3NDEKTSV4RRFFQ69G5FAV','atomic-contract','Atomic Contract','disabled',NULL,2,1)
 ON CONFLICT DO NOTHING`,
+		`INSERT INTO model_profile(tenant_id,model_profile_id,profile_key,display_name,status) VALUES
+('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','model','atomic-model','Atomic Model','active') ON CONFLICT DO NOTHING`,
+		`INSERT INTO model_profile_revision(tenant_id,model_profile_id,profile_version,schema_version,provider,model_name,content_digest) VALUES
+('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','model',1,1,'contract','contract',repeat('a',64)) ON CONFLICT DO NOTHING`,
+		`UPDATE model_profile SET current_version=1 WHERE tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAV' AND model_profile_id='model' AND current_version IS NULL`,
 		`INSERT INTO agent_app_revision(tenant_id,agent_app_id,revision,state,draft_version,agent_kind,schema_version,instruction,model_profile_id,model_profile_version,content_digest,published_at)
 VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','app_01ARZ3NDEKTSV4RRFFQ69G5FAV',1,'published',1,'llm',1,'contract','model',1,repeat('a',64),now())
 ON CONFLICT DO NOTHING`,

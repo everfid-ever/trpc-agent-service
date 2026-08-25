@@ -35,7 +35,8 @@ type Handler struct {
 }
 
 func NewHandler(dispatcher gateway.Dispatcher, bindings ...Binding) *Handler {
-	h := &Handler{Dispatcher: dispatcher, Payloads: messagingmemory.New(), bindings: make(map[string]Binding)}
+	store := messagingmemory.New()
+	h := &Handler{Dispatcher: dispatcher, Inbox: store, Payloads: store, bindings: make(map[string]Binding)}
 	for _, binding := range bindings {
 		h.bindings[binding.Locator] = binding
 	}
@@ -79,16 +80,32 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if externalAccountID == "" {
 		externalAccountID = binding.Locator
 	}
-	requestID := stableID("req", binding.Tenant.TenantID, binding.Tenant.Channel, externalAccountID, in.ExternalMessageID)
 	payload, _ := json.Marshal(in)
 	userID := hmacID("u1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalUserID)
 	sessionID := hmacID("s1", binding.IdentityKey, binding.Tenant.TenantID, in.ExternalChatID)
-	payloadRef := "fake-payload://" + requestID
 	digest := sha256.Sum256(payload)
-	if h.Payloads == nil {
+	if h.Payloads == nil || h.Inbox == nil {
 		http.Error(w, "payload store unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	claimed, err := h.Inbox.ClaimInbox(r.Context(), messaging.ClaimInboxRequest{
+		InboxKey: messaging.InboxKey{
+			TenantID: binding.Tenant.TenantID, Channel: binding.Tenant.Channel,
+			ExternalAccountID: externalAccountID, ExternalMessageID: in.ExternalMessageID,
+		},
+		AgentAppID: binding.Tenant.AgentAppID, SessionID: sessionID,
+		PayloadDigest: hex.EncodeToString(digest[:]), KeyVersion: 1,
+		InitialState: messaging.InboxDispatchPending,
+	})
+	if err != nil {
+		if errors.Is(err, runtime.ErrIdempotencyCollision) {
+			http.Error(w, "idempotency collision", http.StatusConflict)
+			return
+		}
+		http.Error(w, "inbox claim failed", http.StatusInternalServerError)
+		return
+	}
+	requestID, payloadRef := claimed.RequestID, claimed.PayloadRef
 	if err := h.Payloads.PutPayload(r.Context(), messaging.PayloadRecord{TenantID: binding.Tenant.TenantID, RequestID: requestID, PayloadRef: payloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: payload, KeyVersion: 1}); err != nil {
 		if errors.Is(err, runtime.ErrIdempotencyCollision) {
 			http.Error(w, "idempotency collision", http.StatusConflict)
@@ -96,26 +113,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "payload persistence failed", http.StatusInternalServerError)
 		return
-	}
-	if h.Inbox != nil {
-		claimed, err := h.Inbox.ClaimInbox(r.Context(), messaging.ClaimInboxRequest{
-			InboxKey: messaging.InboxKey{
-				TenantID: binding.Tenant.TenantID, Channel: binding.Tenant.Channel,
-				ExternalAccountID: externalAccountID, ExternalMessageID: in.ExternalMessageID,
-			},
-			RequestID: requestID, AgentAppID: binding.Tenant.AgentAppID, SessionID: sessionID,
-			PayloadRef: payloadRef, PayloadDigest: hex.EncodeToString(digest[:]), KeyVersion: 1,
-			InitialState: messaging.InboxDispatchPending,
-		})
-		if err != nil {
-			if errors.Is(err, runtime.ErrIdempotencyCollision) {
-				http.Error(w, "idempotency collision", http.StatusConflict)
-				return
-			}
-			http.Error(w, "inbox claim failed", http.StatusInternalServerError)
-			return
-		}
-		requestID = claimed.RequestID
 	}
 	handle, err := h.Dispatcher.Dispatch(r.Context(), gateway.DispatchRequest{Tenant: binding.Tenant, RequestID: requestID, SessionID: sessionID, UserID: userID, PayloadRef: payloadRef})
 	if err != nil {
@@ -138,6 +135,8 @@ func (h *Handler) Payload(requestID string) ([]byte, bool) {
 	return nil, false
 }
 
+// stableID remains for identity compatibility tests; request identity used by
+// the handler itself comes only from InboxClaimer.
 func stableID(prefix string, parts ...string) string {
 	h := sha256.New()
 	for _, part := range parts {
@@ -148,6 +147,7 @@ func stableID(prefix string, parts ...string) string {
 	}
 	return prefix + "_" + hex.EncodeToString(h.Sum(nil)[:16])
 }
+
 func hmacID(prefix string, key []byte, parts ...string) string {
 	m := hmac.New(sha256.New, key)
 	for _, part := range parts {

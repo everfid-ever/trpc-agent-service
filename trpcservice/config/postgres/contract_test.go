@@ -28,6 +28,15 @@ func TestConfigPublishCASRollbackAndImmutabilityPostgreSQL16(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profile(tenant_id,model_profile_id,profile_key,display_name,status) VALUES($1,'model','config-model','Config Model','active')`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profile_revision(tenant_id,model_profile_id,profile_version,schema_version,provider,model_name,content_digest) VALUES($1,'model',1,1,'contract','contract',repeat('a',64))`, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE model_profile SET current_version=1 WHERE tenant_id=$1 AND model_profile_id='model'`, tenantID); err != nil {
+		t.Fatal(err)
+	}
 	appRepository := agentpostgres.New(db)
 	appMetadata := agentapp.ChangeMetadata{ActorType: "test", ActorID: "config", Reason: "contract", CorrelationID: "contract", TraceID: "contract"}
 	app, err := appRepository.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: tenantID, AgentAppID: appID, AgentAppKey: "config-contract", DisplayName: "Config Contract"}, ChangeMetadata: appMetadata})

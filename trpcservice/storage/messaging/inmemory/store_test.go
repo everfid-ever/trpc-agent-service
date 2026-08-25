@@ -20,7 +20,7 @@ func TestConcurrentClaimReturnsOneStableRequest(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			record, err := store.ClaimInbox(context.Background(), messaging.ClaimInboxRequest{InboxKey: key, RequestID: "request", AgentAppID: "app", SessionID: "session", PayloadRef: "payload", PayloadDigest: "digest", KeyVersion: 1, InitialState: messaging.InboxDispatchPending})
+			record, err := store.ClaimInbox(context.Background(), messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: "app", SessionID: "session", PayloadDigest: "digest", KeyVersion: 1, InitialState: messaging.InboxDispatchPending})
 			if err != nil {
 				t.Errorf("claim: %v", err)
 				return
@@ -30,8 +30,9 @@ func TestConcurrentClaimReturnsOneStableRequest(t *testing.T) {
 	}
 	wg.Wait()
 	close(results)
+	want, _ := messaging.StableInboxIdentity(key)
 	for requestID := range results {
-		if requestID != "request" {
+		if requestID != want {
 			t.Fatalf("request=%q", requestID)
 		}
 	}
@@ -40,11 +41,11 @@ func TestConcurrentClaimReturnsOneStableRequest(t *testing.T) {
 func TestClaimRejectsDigestCollision(t *testing.T) {
 	store := New()
 	key := messaging.InboxKey{TenantID: "t", Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}
-	base := messaging.ClaimInboxRequest{InboxKey: key, RequestID: "r1", AgentAppID: "app", PayloadRef: "payload", PayloadDigest: "digest-1", KeyVersion: 1, InitialState: messaging.InboxPreprocessPending}
+	base := messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: "app", PayloadDigest: "digest-1", KeyVersion: 1, InitialState: messaging.InboxPreprocessPending}
 	if _, err := store.ClaimInbox(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
-	base.RequestID, base.PayloadDigest = "r2", "digest-2"
+	base.PayloadDigest = "digest-2"
 	if _, err := store.ClaimInbox(context.Background(), base); !errors.Is(err, runtime.ErrIdempotencyCollision) {
 		t.Fatalf("got %v", err)
 	}

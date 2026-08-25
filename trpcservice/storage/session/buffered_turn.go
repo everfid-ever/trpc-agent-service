@@ -19,8 +19,8 @@ type EventRefEncoder func(context.Context, *agentevent.Event) (string, string, e
 type BufferedTurn struct {
 	mu           sync.Mutex
 	store        AtomicSessionStore
-	backing      agentsession.Service
 	key          SessionKey
+	appName      string
 	userID       string
 	encode       EventRefEncoder
 	events       []BufferedEvent
@@ -34,10 +34,20 @@ type BufferedTurn struct {
 }
 
 func NewBufferedTurn(store AtomicSessionStore, backing agentsession.Service, key SessionKey, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
-	if store == nil || backing == nil || encode == nil || key.TenantID == "" || key.AgentAppID == "" || key.SessionID == "" || userID == "" {
+	return NewBufferedTurnScoped(store, backing, key, key.AgentAppID, userID, encode)
+}
+
+func NewBufferedTurnScoped(store AtomicSessionStore, backing agentsession.Service, key SessionKey, appName, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
+	return NewDurableBufferedTurnScoped(store, key, appName, userID, encode)
+}
+
+// NewDurableBufferedTurnScoped reconstructs the base session exclusively from
+// the authoritative AtomicSessionStore. No process-local session is involved.
+func NewDurableBufferedTurnScoped(store AtomicSessionStore, key SessionKey, appName, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
+	if store == nil || encode == nil || key.TenantID == "" || key.AgentAppID == "" || key.SessionID == "" || appName == "" || userID == "" {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	turn := &BufferedTurn{store: store, backing: backing, key: key, userID: userID, encode: encode, state: StateDelta{}}
+	turn := &BufferedTurn{store: store, key: key, appName: appName, userID: userID, encode: encode, state: StateDelta{}}
 	turn.service = &bufferedSessionService{turn: turn}
 	return turn, nil
 }
@@ -144,7 +154,7 @@ func cloneStateDelta(in StateDelta) StateDelta {
 type bufferedSessionService struct{ turn *BufferedTurn }
 
 func (s *bufferedSessionService) validateKey(key agentsession.Key) error {
-	if key.AppName != s.turn.key.AgentAppID || key.UserID != s.turn.userID || key.SessionID != s.turn.key.SessionID {
+	if key.AppName != s.turn.appName || key.UserID != s.turn.userID || key.SessionID != s.turn.key.SessionID {
 		return runtime.ErrTenantScope
 	}
 	return nil
@@ -164,11 +174,28 @@ func (s *bufferedSessionService) GetSession(ctx context.Context, key agentsessio
 	if err := s.validateKey(key); err != nil {
 		return nil, err
 	}
-	session, err := s.turn.backing.GetSession(ctx, key, options...)
+	snapshot, err := s.turn.store.LoadSession(ctx, s.turn.key)
+	if err == runtime.ErrNotFound {
+		return &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID, State: agentsession.StateMap{}}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	copy := session.Clone()
+	copy := &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID, State: agentsession.StateMap{}}
+	for name, value := range snapshot.Head.State {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, runtime.ErrInvariantViolation
+		}
+		copy.State[name] = encoded
+	}
+	for _, raw := range snapshot.Events {
+		var event agentevent.Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return nil, runtime.ErrInvariantViolation
+		}
+		copy.Events = append(copy.Events, event)
+	}
 	s.turn.mu.Lock()
 	defer s.turn.mu.Unlock()
 	if copy.State == nil {
@@ -186,10 +213,14 @@ func (s *bufferedSessionService) GetSession(ctx context.Context, key agentsessio
 }
 
 func (s *bufferedSessionService) ListSessions(ctx context.Context, key agentsession.UserKey, options ...agentsession.Option) ([]*agentsession.Session, error) {
-	if key.AppName != s.turn.key.AgentAppID || key.UserID != s.turn.userID {
+	if key.AppName != s.turn.appName || key.UserID != s.turn.userID {
 		return nil, runtime.ErrTenantScope
 	}
-	return s.turn.backing.ListSessions(ctx, key, options...)
+	value, err := s.GetSession(ctx, agentsession.Key{AppName: key.AppName, UserID: key.UserID, SessionID: s.turn.key.SessionID}, options...)
+	if err != nil {
+		return nil, err
+	}
+	return []*agentsession.Session{value}, nil
 }
 
 func (s *bufferedSessionService) DeleteSession(context.Context, agentsession.Key, ...agentsession.Option) error {
@@ -202,19 +233,19 @@ func (s *bufferedSessionService) DeleteAppState(context.Context, string, string)
 	return runtime.ErrCapabilityUnsupported
 }
 func (s *bufferedSessionService) ListAppStates(ctx context.Context, app string) (agentsession.StateMap, error) {
-	if app != s.turn.key.AgentAppID {
+	if app != s.turn.appName {
 		return nil, runtime.ErrTenantScope
 	}
-	return s.turn.backing.ListAppStates(ctx, app)
+	return nil, runtime.ErrCapabilityUnsupported
 }
 func (s *bufferedSessionService) UpdateUserState(context.Context, agentsession.UserKey, agentsession.StateMap) error {
 	return runtime.ErrCapabilityUnsupported
 }
 func (s *bufferedSessionService) ListUserStates(ctx context.Context, key agentsession.UserKey) (agentsession.StateMap, error) {
-	if key.AppName != s.turn.key.AgentAppID || key.UserID != s.turn.userID {
+	if key.AppName != s.turn.appName || key.UserID != s.turn.userID {
 		return nil, runtime.ErrTenantScope
 	}
-	return s.turn.backing.ListUserStates(ctx, key)
+	return nil, runtime.ErrCapabilityUnsupported
 }
 func (s *bufferedSessionService) DeleteUserState(context.Context, agentsession.UserKey, string) error {
 	return runtime.ErrCapabilityUnsupported
@@ -252,13 +283,17 @@ func (s *bufferedSessionService) AppendEvent(ctx context.Context, session *agent
 	if value.ID == "" || eventType == "" || payloadRef == "" {
 		return runtime.ErrCommitConflict
 	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
 	s.turn.mu.Lock()
 	defer s.turn.mu.Unlock()
 	if s.turn.closed {
 		return runtime.ErrCommitConflict
 	}
 	eventSeq := s.turn.eventSeqBase + uint64(len(s.turn.events)+1)
-	s.turn.events = append(s.turn.events, BufferedEvent{EventID: value.ID, EventType: eventType, PayloadRef: payloadRef, EventSeq: eventSeq})
+	s.turn.events = append(s.turn.events, BufferedEvent{EventID: value.ID, EventType: eventType, PayloadRef: payloadRef, EventSeq: eventSeq, Payload: payload})
 	s.turn.agentEvents = append(s.turn.agentEvents, *value.Clone())
 	for name, delta := range value.StateDelta {
 		s.turn.state[name] = json.RawMessage(append([]byte(nil), delta...))
@@ -282,7 +317,7 @@ func (s *bufferedSessionService) EnqueueSummaryJob(context.Context, *agentsessio
 	return runtime.ErrCapabilityUnsupported
 }
 func (s *bufferedSessionService) GetSessionSummaryText(ctx context.Context, session *agentsession.Session, options ...agentsession.SummaryOption) (string, bool) {
-	return s.turn.backing.GetSessionSummaryText(ctx, session, options...)
+	return "", false
 }
 func (s *bufferedSessionService) Close() error { return nil }
 

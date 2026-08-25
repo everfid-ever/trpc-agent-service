@@ -11,26 +11,30 @@ import (
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 )
 
-type Model interface {
+// DeterministicTestModel is the narrow model seam used by unit tests that do
+// not exercise tRPC-Agent-Go Runner behavior.
+type DeterministicTestModel interface {
 	Generate(context.Context, runtime.ExecutionEnvelope, profile.ExecutionProfileSnapshot) (string, error)
 }
 
-type LocalExecutor struct {
+// DeterministicTestExecutor is test scaffolding for Dispatcher/storage
+// contracts. Runtime and integration paths must use RunnerExecutor.
+type DeterministicTestExecutor struct {
 	Tasks    gateway.TaskStore
 	Profiles profile.ExecutionProfileResolver
 	Sessions sessionstore.AtomicSessionStore
-	Model    Model
+	Model    DeterministicTestModel
 }
 
-func (w LocalExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEnvelope) error {
+func (w DeterministicTestExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEnvelope) error {
 	return w.ExecuteWithFence(ctx, envelope, 1)
 }
 
-func (w LocalExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
+func (w DeterministicTestExecutor) ExecuteWithFence(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64) error {
 	return w.ExecuteWithLease(ctx, envelope, fence, nil)
 }
 
-func (w LocalExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
+func (w DeterministicTestExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
 	if err := envelope.Validate(); err != nil {
 		return err
 	}

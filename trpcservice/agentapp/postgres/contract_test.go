@@ -21,6 +21,7 @@ func TestAgentAppRepositoryContractPostgreSQL16(t *testing.T) {
 		if _, err := db.ExecContext(context.Background(), `INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES($1,$2,'Agent Contract')`, tenantID, tenantKey); err != nil {
 			tb.Fatal(err)
 		}
+		insertActiveModelProfile(tb, db, tenantID)
 		return New(db)
 	})
 }
@@ -33,6 +34,7 @@ func TestPublishedRevisionDatabaseGuardsPostgreSQL16(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES($1,'agent-guard','Agent Guard')`, tenantID); err != nil {
 		t.Fatal(err)
 	}
+	insertActiveModelProfile(t, db, tenantID)
 	repository := New(db)
 	metadata := agentapp.ChangeMetadata{ActorType: "test", ActorID: "guard", Reason: "guard", CorrelationID: "guard", TraceID: "guard"}
 	app, err := repository.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: tenantID, AgentAppID: appID, AgentAppKey: "guard", DisplayName: "Guard"}, ChangeMetadata: metadata})
@@ -51,6 +53,20 @@ func TestPublishedRevisionDatabaseGuardsPostgreSQL16(t *testing.T) {
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO agent_app_revision_tool(tenant_id,agent_app_id,revision,tool_id,tool_version) VALUES($1,$2,$3,'late-tool',1)`, tenantID, appID, draft.Revision); sqlState(err) != "55000" {
 		t.Fatalf("published child insert err=%v state=%s", err, sqlState(err))
+	}
+}
+
+func insertActiveModelProfile(tb testing.TB, db *sql.DB, tenantID string) {
+	tb.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profile(tenant_id,model_profile_id,profile_key,display_name,status) VALUES($1,'model','contract-model','Contract Model','active')`, tenantID); err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO model_profile_revision(tenant_id,model_profile_id,profile_version,schema_version,provider,model_name,content_digest) VALUES($1,'model',1,1,'contract','contract',repeat('a',64))`, tenantID); err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE model_profile SET current_version=1 WHERE tenant_id=$1 AND model_profile_id='model'`, tenantID); err != nil {
+		tb.Fatal(err)
 	}
 }
 

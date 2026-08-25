@@ -4,9 +4,20 @@ package upstream
 
 import (
 	"trpc.group/trpc-go/trpc-agent-go/agent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/graphagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
+	"trpc.group/trpc-go/trpc-agent-go/agent/parallelagent"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
+	"trpc.group/trpc-go/trpc-agent-go/knowledge"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
+	openaiserver "trpc.group/trpc-go/trpc-agent-go/server/openai"
+	trpcagentserver "trpc.group/trpc-go/trpc-agent-go/server/trpcagent"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -19,6 +30,22 @@ const ModuleVersion = "v1.11.2"
 var (
 	_ = runner.NewRunnerWithAgentFactory
 	_ = runner.WithAwaitUserReplyRouting
+	_ = llmagent.New
+	_ = graphagent.New
+	_ = chainagent.New
+	_ = parallelagent.New
+	_ = cycleagent.New
+	_ = llmagent.WithSkills
+	_ = llmagent.WithSkillRepositoryProvider
+	_ = llmagent.WithSkillScopeMode
+	_ = llmagent.WithSkillFilter
+	_ = llmagent.WithAgentCallbacks
+	_ = llmagent.WithModelCallbacks
+	_ = llmagent.WithToolCallbacks
+	_ = graphagent.WithAgentCallbacks
+	_ = chainagent.WithAgentCallbacks
+	_ = parallelagent.WithAgentCallbacks
+	_ = cycleagent.WithAgentCallbacks
 	_ = agent.WithAppName
 	_ = agent.WithRequestID
 	_ = agent.WithModel
@@ -30,6 +57,20 @@ var (
 	_ = graph.CfgKeyCheckpointID
 	_ = model.NewToolMessage
 	_ = tool.PermissionActionAsk
+	_ = skill.NewFSRepository
+	_ = knowledge.New
+	_ = plugin.NewManager
+	_ = openaiserver.New
+	_ = openaiserver.WithRunner
+	_ = a2aserver.New
+	_ = a2aserver.WithRunner
+	_ = trpcagentserver.New
+	_ = trpcagentserver.WithRunner
+)
+
+var (
+	_ skill.RepositoryProvider = skill.RepositoryProviderFunc(nil)
+	_ knowledge.Knowledge      = nil
 )
 
 // resumeMap keeps the ResumeMap field itself in the compatibility contract;

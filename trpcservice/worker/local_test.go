@@ -30,7 +30,7 @@ func TestWorkerRedeliveryAfterCommitDoesNotRepeatModelEffect(t *testing.T) {
 	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
 	snapshot := profile.ExecutionProfileSnapshot{Key: key, TenantVersion: envelope.TenantVersion, AgentAppVersion: envelope.AgentAppVersion, ContentDigest: envelope.AgentContentDigest}
 	model := mockmodel.New()
-	executor := LocalExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profilememory.NewResolver(snapshot), Sessions: sessionmemory.New(), Model: model}
+	executor := DeterministicTestExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profilememory.NewResolver(snapshot), Sessions: sessionmemory.New(), Model: model}
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := executor.ExecuteWithLease(context.Background(), envelope, 1, func(context.Context) error { return nil }); err != nil {
 			t.Fatalf("attempt %d: %v", attempt, err)
@@ -52,7 +52,7 @@ func TestWorkerRejectsEnvelopeVersionForgery(t *testing.T) {
 	authoritative := runtime.ExecutionEnvelope{SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1, AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1, RequestID: "request", SessionID: "session", UserID: "user", Channel: "fake", InputSeq: 1, PayloadRef: "payload://request", CreatedAt: time.Now().UTC()}
 	forged := authoritative
 	forged.ConfigVersion = 2
-	err := (LocalExecutor{Tasks: taskStub{envelope: authoritative}}).Execute(context.Background(), forged)
+	err := (DeterministicTestExecutor{Tasks: taskStub{envelope: authoritative}}).Execute(context.Background(), forged)
 	if !errors.Is(err, runtime.ErrVersionMismatch) {
 		t.Fatalf("got %v", err)
 	}

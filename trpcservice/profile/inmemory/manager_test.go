@@ -9,13 +9,19 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 )
+
+type fakeBundle struct{}
+
+func (fakeBundle) NewRunner(session.Service) (runner.Runner, error) { return nil, nil }
 
 func TestBundleManagerBuildsOnceAndClosesAfterLastLease(t *testing.T) {
 	var builds, closes atomic.Int32
 	manager := NewBundleManager(func(context.Context, profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		builds.Add(1)
-		return "bundle", func(context.Context) error { closes.Add(1); return nil }, nil
+		return fakeBundle{}, func(context.Context) error { closes.Add(1); return nil }, nil
 	})
 	key := profile.ExecutionProfileKey{TenantID: "t", AgentAppID: "a", AgentAppRevision: 1, ContentDigest: "d", ConfigVersion: 1, PolicyVersion: 1}
 	var wg sync.WaitGroup

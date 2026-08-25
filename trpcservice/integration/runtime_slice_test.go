@@ -17,6 +17,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
@@ -29,6 +30,8 @@ import (
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
+	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
@@ -40,6 +43,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
 	redisclient "github.com/redis/go-redis/v9"
+	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 const (
@@ -79,6 +84,11 @@ func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
 	tenants := tenantpostgres.New(db)
 	apps := agentpostgres.New(db)
 	configs := configpostgres.New(db, tenants)
+	catalog, err := provider.NewCatalog(provider.Schema{Kind: provider.KindModel, Name: "mock", SchemaVersion: 1, AllowedModels: []string{"mock"}, SecretRequirement: "forbidden"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerProfiles := providerpostgres.New(db, catalog)
 	var appTable, revisionTable, configTable bool
 	if err := db.QueryRow(`SELECT to_regclass('public.agent_app') IS NOT NULL,
 to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_snapshot') IS NOT NULL`).
@@ -89,8 +99,8 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		t.Fatalf("migration tables app=%t revision=%t config=%t", appTable, revisionTable, configTable)
 	}
 	snapshots := []profile.ExecutionProfileSnapshot{
-		prepareTenant(t, tenants, apps, configs, tenantA, "runtime-a", "fake-a"),
-		prepareTenant(t, tenants, apps, configs, tenantB, "runtime-b", "fake-b"),
+		prepareTenant(t, providerProfiles, tenants, apps, configs, tenantA, "runtime-a", "fake-a"),
+		prepareTenant(t, providerProfiles, tenants, apps, configs, tenantB, "runtime-b", "fake-b"),
 	}
 	profiles := profilememory.NewResolver(snapshots...)
 	tasks := gatewaypostgres.NewTaskStore(db)
@@ -98,7 +108,18 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	inbox := messagingpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
 	model := &delayedModel{inner: mockmodel.New(), delay: 40 * time.Millisecond}
-
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}}
+	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
+		snapshot, err := profiles.Resolve(ctx, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		root, err := agentFactory.Build(ctx, snapshot)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root}, nil, nil
+	})
 	workersDone := make(chan error, 2)
 	usedWorkers := &workerSet{ids: make(map[string]struct{})}
 	executionStarted := make(chan executionStart, 32)
@@ -109,11 +130,20 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		workerStops[workerID] = stopWorker
 		executor := recordingExecutor{
 			workerID: workerID, used: usedWorkers, started: executionStarted,
-			inner: worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: model},
+			inner: worker.RunnerExecutor{
+				Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
+				Payloads: payloads, Inputs: worker.JSONTextInputDecoder{},
+				EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
+					return "runner", "event://" + value.ID, nil
+				},
+			},
 		}
 		consumer := worker.Consumer{
 			WorkerID: workerID, Shards: shards, Broker: streamBroker, Leases: leases,
 			Sessions: sessions, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
+			OnDeliveryError: func(_ context.Context, delivery broker.Delivery, err error) {
+				t.Logf("worker delivery error request=%s: %v", delivery.Envelope.RequestID, err)
+			},
 		}
 		go func(ctx context.Context) { workersDone <- consumer.Run(ctx) }(workerCtx)
 	}
@@ -217,6 +247,14 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		if calls := model.inner.Calls(status.Envelope.TenantID, handle.RequestID); calls != 1 {
 			t.Fatalf("request=%s model calls=%d", handle.RequestID, calls)
 		}
+		stored, err := payloads.GetResult(context.Background(), status.Envelope.TenantID, handle.RequestID)
+		if err != nil || stored.ResultRef != status.ResultRef || len(stored.Content) == 0 {
+			t.Fatalf("request=%s result payload=%#v err=%v", handle.RequestID, stored, err)
+		}
+		var replies int
+		if err := db.QueryRow(`SELECT count(*) FROM outbox WHERE tenant_id=$1 AND aggregate_id=$2 AND kind='reply' AND payload_ref=$3`, status.Envelope.TenantID, handle.RequestID, status.ResultRef).Scan(&replies); err != nil || replies != 1 {
+			t.Fatalf("request=%s reply outbox=%d err=%v", handle.RequestID, replies, err)
+		}
 	}
 
 	var sessionID string
@@ -246,6 +284,10 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handl
 	if len(sequences) != 2 || sequences[1] != sequences[0]+1 {
 		t.Fatalf("same-session sequences=%v", sequences)
 	}
+	var durableEvents int
+	if err := db.QueryRow(`SELECT count(*) FROM session_event WHERE tenant_id=$1 AND session_id=$2 AND event_payload IS NOT NULL`, tenantA, sessionID).Scan(&durableEvents); err != nil || durableEvents == 0 {
+		t.Fatalf("durable session events=%d err=%v", durableEvents, err)
+	}
 	if usedWorkers.count() != 2 {
 		t.Fatalf("expected both workers to execute, used=%v", usedWorkers.snapshot())
 	}
@@ -266,13 +308,16 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handl
 	}
 }
 
-func prepareTenant(t *testing.T, tenants *tenantpostgres.Repository, apps *agentpostgres.Repository, configs *configpostgres.Repository, tenantID, tenantKey, bindingID string) profile.ExecutionProfileSnapshot {
+func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, tenants *tenantpostgres.Repository, apps *agentpostgres.Repository, configs *configpostgres.Repository, tenantID, tenantKey, bindingID string) profile.ExecutionProfileSnapshot {
 	t.Helper()
 	ctx := context.Background()
 	meta := tenant.ChangeMetadata{ActorType: "test", ActorID: "slice", ReasonCode: "setup", CorrelationID: tenantKey, TraceID: tenantKey}
 	created, err := tenants.Create(ctx, tenant.CreateInput{Tenant: tenant.Tenant{TenantID: tenantID, TenantKey: tenantKey, DisplayName: tenantKey}, ChangeMetadata: meta})
 	if err != nil {
 		t.Fatalf("create tenant %s: %v", tenantID, err)
+	}
+	if _, err := providerProfiles.PublishModel(ctx, provider.ModelProfileSnapshot{TenantID: tenantID, ProfileID: "mock", ProfileKey: "runtime-model", DisplayName: "Runtime Model", Status: "active", SchemaVersion: 1, Provider: "mock", Model: "mock", Version: 1}); err != nil {
+		t.Fatal(err)
 	}
 	appMeta := agentapp.ChangeMetadata{ActorType: "test", ActorID: "slice", Reason: "setup", CorrelationID: tenantKey, TraceID: tenantKey}
 	app, err := apps.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: tenantID, AgentAppID: appID, AgentAppKey: "assistant", DisplayName: "Assistant"}, ChangeMetadata: appMeta})
@@ -311,7 +356,8 @@ func prepareTenant(t *testing.T, tenants *tenantpostgres.Repository, apps *agent
 	}
 	return profile.ExecutionProfileSnapshot{
 		Key: key, TenantVersion: publishedConfig.Tenant.Version, AgentAppVersion: publishedApp.App.Version,
-		ContentDigest: key.ContentDigest, AgentKind: "llm", Instruction: "help", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1},
+		ContentDigest: key.ContentDigest, AppName: tenantID + "/" + appID,
+		AgentKind: agentapp.AgentKindLLM, Instruction: "help", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1},
 	}
 }
 
@@ -407,15 +453,23 @@ type delayedModel struct {
 	delay time.Duration
 }
 
-func (m *delayedModel) Generate(ctx context.Context, envelope runtime.ExecutionEnvelope, snapshot profile.ExecutionProfileSnapshot) (string, error) {
+func (m *delayedModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
 	timer := time.NewTimer(m.delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return nil, ctx.Err()
 	case <-timer.C:
-		return m.inner.Generate(ctx, envelope, snapshot)
+		return m.inner.GenerateContent(ctx, request)
 	}
+}
+
+func (m *delayedModel) Info() model.Info { return m.inner.Info() }
+
+type staticModelResolver struct{ model model.Model }
+
+func (r staticModelResolver) ResolveModel(context.Context, string, profile.VersionedRef) (model.Model, error) {
+	return r.model, nil
 }
 
 type workerSet struct {
@@ -449,7 +503,7 @@ type recordingExecutor struct {
 	workerID string
 	used     *workerSet
 	started  chan<- executionStart
-	inner    worker.LocalExecutor
+	inner    worker.LeaseExecutor
 }
 
 type executionStart struct{ workerID, requestID string }

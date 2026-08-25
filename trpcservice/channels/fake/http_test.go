@@ -31,7 +31,7 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 		snapshots = append(snapshots, profile.ExecutionProfileSnapshot{Key: key, TenantVersion: 1, AgentAppVersion: 1, ContentDigest: b.AgentContentDigest, AgentKind: "llm", Instruction: "help", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1}})
 	}
 	profiles := profilememory.NewResolver(snapshots...)
-	executor := worker.LocalExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: models}
+	executor := worker.DeterministicTestExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessions, Model: models}
 	dispatcher := gateway.LocalDispatcher{Tasks: tasks, Bindings: bindings, Executor: executor}
 	handler := NewHandler(dispatcher,
 		Binding{Locator: "a", Tenant: tenant.Context{TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", SubjectID: "subject", Channel: "fake", TrustedSource: "binding:a"}, IdentityKey: []byte("a-key")},

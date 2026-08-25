@@ -85,3 +85,44 @@ func TestBufferedTurnRollbackDropsEffects(t *testing.T) {
 		t.Fatal("rollback retained events")
 	}
 }
+
+func TestDurableBufferedTurnRestoresCommittedHistory(t *testing.T) {
+	ctx := context.Background()
+	atomic := sessionmemory.New()
+	storageKey := sessionstore.SessionKey{TenantID: "tenant", AgentAppID: "app", SessionID: "session"}
+	head, err := atomic.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: storageKey, RequestID: "request-1", InputSeq: 1, Fence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoder := func(_ context.Context, value *agentevent.Event) (string, string, error) {
+		return "agent_event", "event://" + value.ID, nil
+	}
+	first, err := sessionstore.NewDurableBufferedTurnScoped(atomic, storageKey, "app", "user", encoder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := first.SessionService().GetSession(ctx, agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.SessionService().AppendEvent(ctx, session, &agentevent.Event{ID: "event-1", StateDelta: map[string][]byte{"answer": []byte(`"ready"`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Commit(ctx, sessionstore.CommitTurnRequest{RequestID: "request-1", CommitID: "request-1:terminal:0", Stage: "terminal", InputSeq: 1, Fence: 1, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := atomic.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: storageKey, RequestID: "request-2", InputSeq: 2, Fence: 2}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessionstore.NewDurableBufferedTurnScoped(atomic, storageKey, "app", "user", encoder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := second.SessionService().GetSession(ctx, agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Events) != 1 || restored.Events[0].ID != "event-1" || string(restored.State["answer"]) != `"ready"` {
+		t.Fatalf("restored=%#v", restored)
+	}
+}

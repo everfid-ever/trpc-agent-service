@@ -80,6 +80,12 @@ func run() error {
 	if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err != nil {
 		return fmt.Errorf("run from repository root: %w", err)
 	}
+	if err := verifyLegacyBackendUpgrade(ctx, runner, db); err != nil {
+		return fmt.Errorf("legacy backend upgrade: %w", err)
+	}
+	if err := runner.DownAll(ctx); err != nil {
+		return err
+	}
 	if err := verifyUp(ctx, runner, db, probes, repoRoot, testDSN); err != nil {
 		return err
 	}
@@ -100,6 +106,34 @@ func run() error {
 		return err
 	}
 	fmt.Printf("PostgreSQL 16 migration matrix passed for %s\n", databaseName)
+	return nil
+}
+
+func verifyLegacyBackendUpgrade(ctx context.Context, runner *migrations.Runner, db *sql.DB) error {
+	if err := runner.UpTo(ctx, "000005"); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAZ','legacy-upgrade','Legacy Upgrade')`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO config_snapshot(tenant_id,config_version,schema_version,payload,content_digest,state,actor_id,reason_code,correlation_id,trace_id,published_at) VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAZ',1,1,'{}',repeat('a',64),'published','migration','upgrade','upgrade','upgrade',now())`); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO backend_binding(tenant_id,config_version,domain,backend_type,backend_ref,credential_ref,credential_version,capabilities) VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAZ',1,'session','postgres','postgres://legacy','secret://legacy',3,ARRAY['atomic_turn_commit'])`); err != nil {
+		return err
+	}
+	if err := runner.UpTo(ctx, "000006"); err != nil {
+		return err
+	}
+	var status, provider, backendRef string
+	var version int64
+	err := db.QueryRowContext(ctx, `SELECT p.status,v.provider,v.configuration->>'backend_ref',b.backend_version FROM backend_binding b JOIN backend_profile p USING(tenant_id,backend_profile_id) JOIN backend_profile_revision v USING(tenant_id,backend_profile_id) WHERE b.tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAZ' AND b.config_version=1 AND b.domain='session'`).Scan(&status, &provider, &backendRef, &version)
+	if err != nil {
+		return err
+	}
+	if status != "suspended" || provider != "postgres" || backendRef != "postgres://legacy" || version != 1 {
+		return fmt.Errorf("unexpected migrated binding status=%s provider=%s ref=%s version=%d", status, provider, backendRef, version)
+	}
 	return nil
 }
 

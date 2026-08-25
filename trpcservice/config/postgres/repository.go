@@ -42,13 +42,25 @@ func (r *Repository) Validate(ctx context.Context, in config.ValidateInput) erro
 	}
 	domains := map[string]struct{}{}
 	for _, binding := range in.Payload.BackendBindings {
-		if binding.Domain == "" || binding.BackendType == "" || binding.BackendRef == "" || binding.CredentialRef.Ref == "" || binding.CredentialRef.Version < 1 {
+		if binding.Domain == "" || binding.BackendProfileID == "" || binding.BackendVersion < 1 {
 			return config.ErrInvalid
 		}
 		if _, ok := domains[binding.Domain]; ok {
 			return config.ErrInvalid
 		}
 		domains[binding.Domain] = struct{}{}
+		var status string
+		var digest string
+		var capabilitiesSatisfied bool
+		if err := r.db.QueryRowContext(ctx, `SELECT p.status,v.content_digest,
+NOT EXISTS (SELECT capability FROM unnest($4::text[]) capability EXCEPT SELECT capability FROM unnest(v.capabilities) capability)
+FROM backend_profile p JOIN backend_profile_revision v USING (tenant_id,backend_profile_id)
+WHERE p.tenant_id=$1 AND p.backend_profile_id=$2 AND v.profile_version=$3`, in.TenantID, binding.BackendProfileID, binding.BackendVersion, binding.Required).Scan(&status, &digest, &capabilitiesSatisfied); err != nil {
+			return classify(err)
+		}
+		if status != "active" || len(digest) != 64 || !capabilitiesSatisfied {
+			return config.ErrInvalid
+		}
 	}
 	for appID := range apps {
 		var status string

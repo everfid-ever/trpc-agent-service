@@ -15,10 +15,50 @@ type Store struct {
 	inbox      map[messaging.InboxKey]messaging.InboxRecord
 	deliveries map[messaging.DeliveryKey]messaging.DeliveryRecord
 	payloads   map[string]messaging.PayloadRecord
+	results    map[string]messaging.ResultRecord
 }
 
 func New() *Store {
-	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord)}
+	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord), results: make(map[string]messaging.ResultRecord)}
+}
+
+func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.TenantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+		return runtime.ErrCommitConflict
+	}
+	if in.KeyVersion < 1 {
+		in.KeyVersion = 1
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := in.TenantID + "\x00" + in.RequestID
+	if old, ok := s.results[key]; ok {
+		if old.ResultRef != in.ResultRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
+			return runtime.ErrIdempotencyCollision
+		}
+		return nil
+	}
+	in.Content = append([]byte(nil), in.Content...)
+	in.CreatedAt = time.Now().UTC()
+	s.results[key] = in
+	return nil
+}
+
+func (s *Store) GetResult(ctx context.Context, tenantID, requestID string) (messaging.ResultRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.ResultRecord{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.results[tenantID+"\x00"+requestID]
+	if !ok {
+		return messaging.ResultRecord{}, runtime.ErrNotFound
+	}
+	record.Content = append([]byte(nil), record.Content...)
+	return record, nil
 }
 
 func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) error {
@@ -67,20 +107,21 @@ func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) 
 	if in.TenantID == "" || in.Channel == "" || in.ExternalAccountID == "" || in.ExternalMessageID == "" {
 		return messaging.InboxRecord{}, runtime.ErrTenantScope
 	}
-	if in.RequestID == "" || in.AgentAppID == "" || in.PayloadRef == "" || in.PayloadDigest == "" || in.KeyVersion < 1 ||
+	if in.AgentAppID == "" || in.PayloadDigest == "" || in.KeyVersion < 1 ||
 		(in.InitialState != messaging.InboxPreprocessPending && in.InitialState != messaging.InboxDispatchPending) {
 		return messaging.InboxRecord{}, runtime.ErrCommitConflict
 	}
+	requestID, payloadRef := messaging.StableInboxIdentity(in.InboxKey)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.inbox[in.InboxKey]; ok {
-		if old.PayloadDigest != in.PayloadDigest || old.PayloadRef != in.PayloadRef || old.AgentAppID != in.AgentAppID || old.SessionID != in.SessionID {
+		if old.PayloadDigest != in.PayloadDigest || old.PayloadRef != payloadRef || old.AgentAppID != in.AgentAppID || old.SessionID != in.SessionID {
 			return messaging.InboxRecord{}, runtime.ErrIdempotencyCollision
 		}
 		return old, nil
 	}
 	now := time.Now().UTC()
-	record := messaging.InboxRecord{InboxKey: in.InboxKey, RequestID: in.RequestID, AgentAppID: in.AgentAppID, SessionID: in.SessionID, State: in.InitialState, PayloadRef: in.PayloadRef, PayloadDigest: in.PayloadDigest, KeyVersion: in.KeyVersion, CreatedAt: now, UpdatedAt: now}
+	record := messaging.InboxRecord{InboxKey: in.InboxKey, RequestID: requestID, AgentAppID: in.AgentAppID, SessionID: in.SessionID, State: in.InitialState, PayloadRef: payloadRef, PayloadDigest: in.PayloadDigest, KeyVersion: in.KeyVersion, CreatedAt: now, UpdatedAt: now}
 	s.inbox[in.InboxKey] = record
 	return record, nil
 }
@@ -135,4 +176,5 @@ func (s *Store) RecordDelivery(ctx context.Context, in messaging.DeliveryRecord,
 
 var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
+var _ messaging.ResultStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)

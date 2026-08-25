@@ -24,11 +24,10 @@ type ChannelBinding struct {
 }
 
 type BackendBinding struct {
-	Domain        string            `json:"domain"`
-	BackendType   string            `json:"backend_type"`
-	BackendRef    string            `json:"backend_ref"`
-	CredentialRef secrets.SecretRef `json:"credential_ref"`
-	Capabilities  []string          `json:"capabilities,omitempty"`
+	Domain           string   `json:"domain"`
+	BackendProfileID string   `json:"backend_profile_id"`
+	BackendVersion   int64    `json:"backend_version"`
+	Required         []string `json:"required,omitempty"`
 }
 
 type ConfigV1 struct {
@@ -76,8 +75,8 @@ func NormalizeV1(in ConfigV1) ConfigV1 {
 	out.ChannelBindings = append([]ChannelBinding(nil), in.ChannelBindings...)
 	out.BackendBindings = append([]BackendBinding(nil), in.BackendBindings...)
 	for i := range out.BackendBindings {
-		out.BackendBindings[i].Capabilities = append([]string(nil), in.BackendBindings[i].Capabilities...)
-		sort.Strings(out.BackendBindings[i].Capabilities)
+		out.BackendBindings[i].Required = append([]string(nil), in.BackendBindings[i].Required...)
+		sort.Strings(out.BackendBindings[i].Required)
 	}
 	sort.Slice(out.ChannelBindings, func(i, j int) bool { return out.ChannelBindings[i].BindingID < out.ChannelBindings[j].BindingID })
 	sort.Slice(out.BackendBindings, func(i, j int) bool { return out.BackendBindings[i].Domain < out.BackendBindings[j].Domain })

@@ -4,6 +4,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -29,6 +30,13 @@ type SessionHead struct {
 type BufferedEvent struct {
 	EventID, EventType, PayloadRef string
 	EventSeq                       uint64
+	// Payload is the canonical upstream event representation. It is committed
+	// with the event row so another Worker can reconstruct conversation history.
+	Payload json.RawMessage
+}
+type SessionSnapshot struct {
+	Head   SessionHead
+	Events []json.RawMessage
 }
 type StateDelta map[string]any
 type SummaryCandidate struct {
@@ -67,4 +75,5 @@ type AtomicSessionStore interface {
 	CommitTurn(context.Context, CommitTurnRequest) (CommitTurnResult, error)
 	GetTerminalByInputSeq(context.Context, TerminalKey) (CommitTurnResult, error)
 	ReadLastFence(context.Context, SessionKey) (uint64, error)
+	LoadSession(context.Context, SessionKey) (SessionSnapshot, error)
 }

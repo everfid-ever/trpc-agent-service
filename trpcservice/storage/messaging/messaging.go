@@ -3,6 +3,9 @@ package messaging
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"time"
 )
 
@@ -21,10 +24,24 @@ const (
 
 type ClaimInboxRequest struct {
 	InboxKey
-	RequestID, AgentAppID, SessionID string
-	PayloadRef, PayloadDigest        string
-	KeyVersion                       int64
-	InitialState                     InboxState
+	AgentAppID, SessionID string
+	PayloadDigest         string
+	KeyVersion            int64
+	InitialState          InboxState
+}
+
+// StableInboxIdentity is the single service-owned identity derivation used by
+// every Inbox repository implementation.
+func StableInboxIdentity(key InboxKey) (requestID, payloadRef string) {
+	h := sha256.New()
+	for _, part := range []string{key.TenantID, key.Channel, key.ExternalAccountID, key.ExternalMessageID} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(part)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write([]byte(part))
+	}
+	requestID = "req_" + hex.EncodeToString(h.Sum(nil)[:16])
+	return requestID, "inbound://" + key.TenantID + "/" + requestID
 }
 
 type InboxRecord struct {
@@ -50,11 +67,25 @@ type PayloadRecord struct {
 	CreatedAt                                      time.Time
 }
 
-// PayloadStore persists normalized inbound payloads before the inbox claim so
-// a dispatcher can recover them after process restart.
+// PayloadStore persists normalized inbound payloads before durable ACK so a
+// dispatcher can recover them after process restart.
 type PayloadStore interface {
 	PutPayload(context.Context, PayloadRecord) error
 	GetPayload(context.Context, string, string) (PayloadRecord, error)
+}
+
+type ResultRecord struct {
+	TenantID, RequestID, ResultRef, ContentDigest string
+	Content                                       []byte
+	KeyVersion                                    int64
+	CreatedAt                                     time.Time
+}
+
+// ResultStore owns immutable terminal response payloads referenced by reply
+// Outbox records.
+type ResultStore interface {
+	PutResult(context.Context, ResultRecord) error
+	GetResult(context.Context, string, string) (ResultRecord, error)
 }
 
 type OutboxState string

@@ -12,22 +12,31 @@ import (
 
 type Provider struct {
 	mu     sync.RWMutex
-	values map[secrets.SecretRef][]byte
+	values map[key][]byte
 }
 
-func New() *Provider { return &Provider{values: make(map[secrets.SecretRef][]byte)} }
-func (p *Provider) Put(ref secrets.SecretRef, value []byte) {
+type key struct {
+	Scope secrets.Scope
+	Ref   secrets.SecretRef
+}
+
+func New() *Provider { return &Provider{values: make(map[key][]byte)} }
+func (p *Provider) Put(scope secrets.Scope, ref secrets.SecretRef, value []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.values[ref] = append([]byte(nil), value...)
+	p.values[key{Scope: scope, Ref: ref}] = append([]byte(nil), value...)
 }
-func (p *Provider) Resolve(ctx context.Context, ref secrets.SecretRef) (secrets.SecretValue, error) {
+func (p *Provider) Resolve(ctx context.Context, scope secrets.Scope, ref secrets.SecretRef) (secrets.SecretValue, error) {
 	if err := ctx.Err(); err != nil {
 		return secrets.SecretValue{}, err
 	}
+	if scope.TenantID == "" || scope.Subject == "" || scope.Purpose == "" || scope.ResourceID == "" ||
+		scope.ResourceVersion < 1 || ref.Ref == "" || ref.Version < 1 {
+		return secrets.SecretValue{}, runtime.ErrTenantScope
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	value, ok := p.values[ref]
+	value, ok := p.values[key{Scope: scope, Ref: ref}]
 	if !ok {
 		return secrets.SecretValue{}, runtime.ErrNotFound
 	}

@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 4 {
+	if len(all) != 7 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,61 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestProviderProfileMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[5]
+	if migration.Version != "000006" || migration.Name != "provider_profiles" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.model_profile (", "CREATE TABLE public.model_profile_revision (", "CREATE TABLE public.backend_profile_revision (", "backend_binding_profile_version_fk", "guard_profile_revision_immutable"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if strings.Contains(migration.Up, "legacy direct backend bindings must be republished") || !strings.Contains(migration.Up, "Migrated ") {
+		t.Fatal("legacy backend bindings are not deterministically migrated")
+	}
+}
+
+func TestDurableSessionHistoryMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[6]
+	if migration.Version != "000007" || migration.Name != "durable_session_history" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"ADD COLUMN event_payload jsonb", "CREATE TABLE public.result_payload (", "agent_revision_model_profile_version_fk", "agent_model_profile_publish_guard"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestAgentDefinitionV1MigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[4]
+	if migration.Version != "000005" || migration.Name != "agent_definition_v1" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"ADD COLUMN agent_spec jsonb", "agent_kind IN ('llm', 'graph', 'chain', 'parallel', 'cycle')",
+		"CREATE TABLE agent_app_revision_child (", "CREATE TABLE agent_app_revision_skill (",
+		"guard_agent_app_revision_child", "guard_revision_child_write",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

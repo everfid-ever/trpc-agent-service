@@ -1,10 +1,17 @@
 package profile
 
-import "context"
+import (
+	"context"
 
-// RuntimeBundle is deliberately opaque to shared contracts. Concrete Workers
-// type-assert only capabilities owned by their bundle factory.
-type RuntimeBundle interface{}
+	"trpc.group/trpc-go/trpc-agent-go/runner"
+	"trpc.group/trpc-go/trpc-agent-go/session"
+)
+
+// RuntimeBundle owns an immutable Agent graph and creates a request runner
+// only with an explicitly injected tenant-scoped session service.
+type RuntimeBundle interface {
+	NewRunner(session.Service) (runner.Runner, error)
+}
 
 type BundleLease interface {
 	Bundle() RuntimeBundle

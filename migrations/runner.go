@@ -14,6 +14,12 @@ type Runner struct{ db *sql.DB }
 func NewRunner(db *sql.DB) *Runner { return &Runner{db: db} }
 
 func (r *Runner) Up(ctx context.Context) error {
+	return r.UpTo(ctx, "")
+}
+
+// UpTo applies migrations through target (inclusive). An empty target applies
+// all migrations. It is primarily useful for controlled upgrade rehearsals.
+func (r *Runner) UpTo(ctx context.Context, target string) error {
 	if _, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS public.schema_migrations(
 version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return err
@@ -22,7 +28,22 @@ version text PRIMARY KEY, checksum text NOT NULL, applied_at timestamptz NOT NUL
 	if err != nil {
 		return err
 	}
+	if target != "" {
+		found := false
+		for _, migration := range all {
+			if migration.Version == target {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("migration target %s does not exist", target)
+		}
+	}
 	for _, migration := range all {
+		if target != "" && migration.Version > target {
+			break
+		}
 		checksum := migrationChecksum(migration.Up)
 		var applied string
 		err := r.db.QueryRowContext(ctx, `SELECT checksum FROM public.schema_migrations WHERE version=$1`, migration.Version).Scan(&applied)

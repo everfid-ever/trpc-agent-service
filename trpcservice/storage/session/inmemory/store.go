@@ -169,6 +169,24 @@ func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) 
 	}
 	return head.LastFence, nil
 }
+func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (sessionstore.SessionSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return sessionstore.SessionSnapshot{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	head, ok := s.heads[key]
+	if !ok {
+		return sessionstore.SessionSnapshot{}, runtime.ErrNotFound
+	}
+	snapshot := sessionstore.SessionSnapshot{Head: cloneHead(head)}
+	for _, event := range s.events[key] {
+		if len(event.Payload) > 0 {
+			snapshot.Events = append(snapshot.Events, append([]byte(nil), event.Payload...))
+		}
+	}
+	return snapshot, nil
+}
 func cloneHead(in sessionstore.SessionHead) sessionstore.SessionHead {
 	out := in
 	out.State = make(map[string]any, len(in.State))
@@ -181,6 +199,9 @@ func cloneHead(in sessionstore.SessionHead) sessionstore.SessionHead {
 func cloneCommit(in sessionstore.CommitTurnRequest) sessionstore.CommitTurnRequest {
 	out := in
 	out.Events = append([]sessionstore.BufferedEvent(nil), in.Events...)
+	for i := range out.Events {
+		out.Events[i].Payload = append([]byte(nil), in.Events[i].Payload...)
+	}
 	out.Outbox = append([]sessionstore.OutboxEvent(nil), in.Outbox...)
 	if in.StateDelta != nil {
 		out.StateDelta = make(sessionstore.StateDelta, len(in.StateDelta))

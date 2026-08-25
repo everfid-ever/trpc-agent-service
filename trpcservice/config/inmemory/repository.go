@@ -51,7 +51,7 @@ func (r *Repository) Validate(ctx context.Context, in config.ValidateInput) erro
 	}
 	seenDomains := map[string]struct{}{}
 	for _, binding := range in.Payload.BackendBindings {
-		if binding.Domain == "" || binding.BackendType == "" || binding.BackendRef == "" || binding.CredentialRef.Ref == "" || binding.CredentialRef.Version < 1 {
+		if binding.Domain == "" || binding.BackendProfileID == "" || binding.BackendVersion < 1 {
 			return config.ErrInvalid
 		}
 		if _, ok := seenDomains[binding.Domain]; ok {

@@ -15,6 +15,7 @@ import (
 
 type DB interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 type Store struct{ db DB }
@@ -78,7 +79,11 @@ func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnReques
 	}
 	events := make([]map[string]any, 0, len(in.Events))
 	for _, event := range in.Events {
-		events = append(events, map[string]any{"event_id": event.EventID, "event_type": event.EventType, "payload_ref": event.PayloadRef, "event_seq": event.EventSeq})
+		wrapper, err := json.Marshal(map[string]any{"ref": event.PayloadRef, "payload": event.Payload})
+		if err != nil {
+			return sessionstore.CommitTurnResult{}, err
+		}
+		events = append(events, map[string]any{"event_id": event.EventID, "event_type": event.EventType, "payload_ref": string(wrapper), "event_seq": event.EventSeq})
 	}
 	outboxes := make([]map[string]any, 0, len(in.Outbox))
 	for _, event := range in.Outbox {
@@ -146,6 +151,33 @@ func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) 
 		return 0, translate(err)
 	}
 	return fence, nil
+}
+
+func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (sessionstore.SessionSnapshot, error) {
+	var snapshot sessionstore.SessionSnapshot
+	snapshot.Head.SessionKey = key
+	var state []byte
+	err := s.db.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,state_json FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, key.TenantID, key.AgentAppID, key.SessionID).
+		Scan(&snapshot.Head.Version, &snapshot.Head.LastFence, &snapshot.Head.LastSessionSeq, &snapshot.Head.NextInputSeq, &state)
+	if err != nil {
+		return sessionstore.SessionSnapshot{}, translate(err)
+	}
+	if err := json.Unmarshal(state, &snapshot.Head.State); err != nil {
+		return sessionstore.SessionSnapshot{}, runtime.ErrInvariantViolation
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT event_payload FROM session_event WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 ORDER BY session_seq`, key.TenantID, key.AgentAppID, key.SessionID)
+	if err != nil {
+		return sessionstore.SessionSnapshot{}, translate(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return sessionstore.SessionSnapshot{}, err
+		}
+		snapshot.Events = append(snapshot.Events, append([]byte(nil), raw...))
+	}
+	return snapshot, rows.Err()
 }
 
 func nullable(value string) any {

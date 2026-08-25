@@ -11,7 +11,26 @@ type SecretValue struct {
 	Bytes   []byte
 	Version int64
 }
+
+type Purpose string
+
+const (
+	PurposeChannelVerify  Purpose = "channel_verify"
+	PurposeChannelSend    Purpose = "channel_send"
+	PurposeModelCall      Purpose = "model_call"
+	PurposeToolCall       Purpose = "tool_call"
+	PurposeBackendConnect Purpose = "backend_connect"
+)
+
+type Scope struct {
+	TenantID        string
+	Subject         string
+	Purpose         Purpose
+	ResourceID      string
+	ResourceVersion int64
+}
+
 type Provider interface {
-	Resolve(context.Context, SecretRef) (SecretValue, error)
+	Resolve(context.Context, Scope, SecretRef) (SecretValue, error)
 }
 type SecretProvider = Provider
