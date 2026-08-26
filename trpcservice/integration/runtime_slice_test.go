@@ -22,6 +22,8 @@ import (
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	channeldelivery "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/fake"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
@@ -33,6 +35,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
+	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
@@ -255,6 +258,85 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		if err := db.QueryRow(`SELECT count(*) FROM outbox WHERE tenant_id=$1 AND aggregate_id=$2 AND kind='reply' AND payload_ref=$3`, status.Envelope.TenantID, handle.RequestID, status.ResultRef).Scan(&replies); err != nil || replies != 1 {
 			t.Fatalf("request=%s reply outbox=%d err=%v", handle.RequestID, replies, err)
 		}
+	}
+
+	// Reply publication is at-least-once. Inject a crash after Redis XADD but
+	// before the Outbox mark, then prove the Delivery Ledger suppresses the
+	// duplicate provider effect for the repeated delivery key.
+	businessPublisher, err := relayredis.NewPublisher(redisClient, relayredis.Config{Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerAdapter := &deliveryAdapterStub{}
+	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryAdapterResolver{adapter: providerAdapter}}
+	delivering := deliveringReplyPublisher{stream: businessPublisher, delivery: deliveryService}
+	flakyReplyOutbox := &failFirstPublishedMark{inner: inbox}
+	replyRelay := relay.ReplyRelay{Outbox: flakyReplyOutbox, Results: payloads, Routes: inbox, Replies: delivering,
+		Owner: "runtime-reply-relay", ClaimTTL: 40 * time.Millisecond, ClaimRenewInterval: 10 * time.Millisecond}
+	if count, err := replyRelay.RunOnce(context.Background()); err == nil || count != len(handles)-1 {
+		// One publish succeeds but its injected mark fails; the other rows are
+		// marked normally in the same batch.
+		t.Fatalf("first reply relay count=%d want=%d err=%v", count, len(handles)-1, err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if count, err := replyRelay.RunOnce(context.Background()); err != nil || count != 1 {
+		t.Fatalf("replayed reply relay count=%d err=%v", count, err)
+	}
+	if calls := providerAdapter.callCount(); calls != len(handles) {
+		t.Fatalf("provider effects=%d want=%d", calls, len(handles))
+	}
+	var publishedReplies int
+	if err := db.QueryRow(`SELECT count(*) FROM outbox WHERE kind='reply' AND state='published'`).Scan(&publishedReplies); err != nil || publishedReplies != len(handles) {
+		t.Fatalf("published replies=%d want=%d err=%v", publishedReplies, len(handles), err)
+	}
+
+	// A node receiving stale/out-of-order TenantControl events must reload the
+	// authoritative tenant row and converge directly to the newest version.
+	currentTenant, err := tenants.Get(context.Background(), tenantA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := tenant.ChangeMetadata{ActorType: "test", ActorID: "slice", ReasonCode: "control", CorrelationID: "control", TraceID: "control"}
+	suspended, err := tenants.TransitionStatus(context.Background(), tenant.TransitionStatusInput{TenantID: tenantA, ExpectedVersion: currentTenant.Version, NextStatus: tenant.StatusSuspended, ChangeMetadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := tenants.TransitionStatus(context.Background(), tenant.TransitionStatusInput{TenantID: tenantA, ExpectedVersion: suspended.Tenant.Version, NextStatus: tenant.StatusActive, ChangeMetadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlVersions := []uint64{uint64(suspended.Tenant.Version), uint64(currentTenant.Version), uint64(active.Tenant.Version)}
+	for _, version := range controlVersions {
+		event := relay.TenantControlEvent{TenantID: tenantA, Kind: "tenant-control", AggregateID: tenantA,
+			IdempotencyKey: fmt.Sprintf("control:%d", version), PayloadRef: fmt.Sprintf("tenant://%s/%d", tenantA, version), Version: version}
+		if err := businessPublisher.PublishTenantControl(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controlMessages, err := redisClient.XRange(context.Background(), businessPublisher.TenantControlStream(), "-", "+").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlSink := &tenantControlSinkStub{}
+	controlConsumer := &relay.MonotonicTenantControlConsumer{Reader: postgresTenantControlReader{tenants: tenants}, Sink: controlSink}
+	for _, message := range controlMessages {
+		encoded, ok := redisValueString(message.Values["event"])
+		if !ok {
+			t.Fatalf("control event payload=%#v", message.Values)
+		}
+		var event relay.TenantControlEvent
+		if err := json.Unmarshal([]byte(encoded), &event); err != nil {
+			t.Fatal(err)
+		}
+		if err := controlConsumer.Consume(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if watermark := controlConsumer.Watermark(tenantA, "tenant-control", tenantA); watermark != uint64(active.Tenant.Version) {
+		t.Fatalf("tenant control watermark=%d want=%d", watermark, active.Tenant.Version)
+	}
+	if applied := controlSink.snapshot(); len(applied) != 1 || applied[0] != uint64(active.Tenant.Version) {
+		t.Fatalf("tenant control applied=%v", applied)
 	}
 
 	var sessionID string
@@ -548,4 +630,88 @@ func (s *failFirstPublishedMark) failures() int {
 		return 1
 	}
 	return 0
+}
+
+type deliveringReplyPublisher struct {
+	stream   channel.ReplyPublisher
+	delivery channeldelivery.Service
+}
+
+func (p deliveringReplyPublisher) PublishReply(ctx context.Context, destination channel.ReplyDestination, event channel.ReplyEvent) error {
+	if err := p.stream.PublishReply(ctx, destination, event); err != nil {
+		return err
+	}
+	return p.delivery.Deliver(ctx, event)
+}
+
+type deliveryAdapterResolver struct{ adapter channel.Adapter }
+
+func (r deliveryAdapterResolver) ResolveAdapter(context.Context, string, string) (channel.Adapter, error) {
+	return r.adapter, nil
+}
+
+type deliveryAdapterStub struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (*deliveryAdapterStub) ID() string                                            { return "fake-delivery" }
+func (*deliveryAdapterStub) Run(context.Context) error                             { return nil }
+func (*deliveryAdapterStub) Verify(context.Context, channel.CallbackRequest) error { return nil }
+func (*deliveryAdapterStub) Decode(context.Context, channel.CallbackRequest) ([]channel.ProviderEvent, error) {
+	return nil, nil
+}
+func (a *deliveryAdapterStub) Deliver(_ context.Context, request channel.DeliveryRequest) (channel.DeliveryResult, error) {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	return channel.DeliveryResult{ProviderMessageID: "provider:" + request.Event.DeliveryKey, Delivered: true}, nil
+}
+func (*deliveryAdapterStub) Capabilities() channel.Capabilities {
+	return channel.Capabilities{Text: true}
+}
+func (a *deliveryAdapterStub) callCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+type postgresTenantControlReader struct{ tenants *tenantpostgres.Repository }
+
+func (r postgresTenantControlReader) ReadTenantControl(ctx context.Context, event relay.TenantControlEvent) (relay.TenantControlState, error) {
+	current, err := r.tenants.Get(ctx, event.TenantID)
+	if err != nil {
+		return relay.TenantControlState{}, err
+	}
+	return relay.TenantControlState{TenantID: current.TenantID, Kind: event.Kind, AggregateID: event.AggregateID,
+		Status: string(current.Status), Version: uint64(current.Version)}, nil
+}
+
+type tenantControlSinkStub struct {
+	mu       sync.Mutex
+	versions []uint64
+}
+
+func (s *tenantControlSinkStub) ApplyTenantControl(_ context.Context, state relay.TenantControlState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.versions = append(s.versions, state.Version)
+	return nil
+}
+
+func (s *tenantControlSinkStub) snapshot() []uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uint64(nil), s.versions...)
+}
+
+func redisValueString(value any) (string, bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case []byte:
+		return string(typed), true
+	default:
+		return "", false
+	}
 }
