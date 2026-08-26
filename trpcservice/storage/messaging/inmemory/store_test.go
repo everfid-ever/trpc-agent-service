@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
@@ -35,6 +36,44 @@ func TestConcurrentClaimReturnsOneStableRequest(t *testing.T) {
 		if requestID != want {
 			t.Fatalf("request=%q", requestID)
 		}
+	}
+}
+
+func TestDeliveryLedgerClaimFinishAndIdempotentReplay(t *testing.T) {
+	store := New()
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: "digest", SegmentCount: 1}
+	claimed, acquired, err := store.ClaimDelivery(context.Background(), key, plan)
+	if err != nil || !acquired || claimed.State != messaging.DeliverySending || claimed.Attempt != 1 {
+		t.Fatalf("claimed=%#v acquired=%t err=%v", claimed, acquired, err)
+	}
+	if duplicate, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || duplicate.Version != claimed.Version {
+		t.Fatalf("duplicate=%#v acquired=%t err=%v", duplicate, acquired, err)
+	}
+	claimed.State = messaging.DeliverySent
+	claimed.ProviderMessageID = "provider-message"
+	sent, err := store.FinishDelivery(context.Background(), claimed, claimed.Version)
+	if err != nil || sent.State != messaging.DeliverySent {
+		t.Fatalf("sent=%#v err=%v", sent, err)
+	}
+	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || replay.State != messaging.DeliverySent {
+		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
+	}
+}
+
+func TestDeliveryLedgerRetryWaitHonorsNotBefore(t *testing.T) {
+	store := New()
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_retry", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: "digest", SegmentCount: 1}
+	claimed, _, _ := store.ClaimDelivery(context.Background(), key, plan)
+	claimed.State = messaging.DeliveryRetryWait
+	claimed.NotBefore = time.Now().Add(time.Hour)
+	retry, err := store.FinishDelivery(context.Background(), claimed, claimed.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || replay.Version != retry.Version {
+		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
 	}
 }
 

@@ -16,10 +16,38 @@ type Store struct {
 	deliveries map[messaging.DeliveryKey]messaging.DeliveryRecord
 	payloads   map[string]messaging.PayloadRecord
 	results    map[string]messaging.ResultRecord
+	routes     map[string]messaging.ReplyRoute
 }
 
 func New() *Store {
-	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord), results: make(map[string]messaging.ResultRecord)}
+	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord), results: make(map[string]messaging.ResultRecord), routes: make(map[string]messaging.ReplyRoute)}
+}
+
+func (s *Store) PutReplyRoute(route messaging.ReplyRoute) error {
+	if route.TenantID == "" || route.RequestID == "" || route.Channel == "" || route.ChannelBindingID == "" || route.ExternalAccountID == "" || route.ConfigVersion < 1 {
+		return runtime.ErrTenantScope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := route.TenantID + "\x00" + route.RequestID
+	if old, ok := s.routes[key]; ok && old != route {
+		return runtime.ErrIdempotencyCollision
+	}
+	s.routes[key] = route
+	return nil
+}
+
+func (s *Store) ResolveReplyRoute(ctx context.Context, tenantID, requestID string) (messaging.ReplyRoute, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.ReplyRoute{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	route, ok := s.routes[tenantID+"\x00"+requestID]
+	if !ok {
+		return messaging.ReplyRoute{}, runtime.ErrNotFound
+	}
+	return route, nil
 }
 
 func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error {
@@ -152,29 +180,65 @@ func (s *Store) GetDelivery(ctx context.Context, key messaging.DeliveryKey) (mes
 	return record, nil
 }
 
-func (s *Store) RecordDelivery(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
+func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, plan messaging.DeliveryPlan) (messaging.DeliveryRecord, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.DeliveryRecord{}, false, err
+	}
+	if err := validateDeliveryPlan(key, plan); err != nil {
+		return messaging.DeliveryRecord{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	record, exists := s.deliveries[key]
+	if !exists {
+		record = messaging.DeliveryRecord{DeliveryKey: key, State: messaging.DeliverySending, Plan: plan, Attempt: 1, Version: 1, UpdatedAt: now}
+		s.deliveries[key] = record
+		return record, true, nil
+	}
+	if record.Plan != plan {
+		return messaging.DeliveryRecord{}, false, runtime.ErrIdempotencyCollision
+	}
+	if record.State != messaging.DeliveryPending && (record.State != messaging.DeliveryRetryWait || record.NotBefore.After(now)) {
+		return record, false, nil
+	}
+	record.State, record.Attempt, record.Version, record.UpdatedAt = messaging.DeliverySending, record.Attempt+1, record.Version+1, now
+	s.deliveries[key] = record
+	return record, true, nil
+}
+
+func (s *Store) FinishDelivery(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return messaging.DeliveryRecord{}, err
 	}
-	if in.TenantID == "" || in.DeliveryKey.DeliveryKey == "" || in.SegmentNo < 0 || in.State == "" {
-		return messaging.DeliveryRecord{}, runtime.ErrTenantScope
+	if in.State != messaging.DeliverySent && in.State != messaging.DeliveryRetryWait && in.State != messaging.DeliveryAmbiguous && in.State != messaging.DeliveryFailed {
+		return messaging.DeliveryRecord{}, runtime.ErrCommitConflict
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, exists := s.deliveries[in.DeliveryKey]
-	if exists && old.Version != expectedVersion {
-		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
-	}
-	if !exists && expectedVersion != 0 {
+	if !exists || old.Version != expectedVersion || old.State != messaging.DeliverySending || old.Plan != in.Plan {
 		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
 	}
 	in.Version = expectedVersion + 1
+	in.Attempt = old.Attempt
 	in.UpdatedAt = time.Now().UTC()
 	s.deliveries[in.DeliveryKey] = in
 	return in, nil
 }
 
+func validateDeliveryPlan(key messaging.DeliveryKey, plan messaging.DeliveryPlan) error {
+	if key.TenantID == "" || key.DeliveryKey == "" || key.SegmentNo < 0 {
+		return runtime.ErrTenantScope
+	}
+	if plan.RendererVersion == "" || plan.FormatVersion == "" || plan.ContentDigest == "" || plan.SegmentCount < 1 || key.SegmentNo >= plan.SegmentCount {
+		return runtime.ErrCommitConflict
+	}
+	return nil
+}
+
 var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
 var _ messaging.ResultStore = (*Store)(nil)
+var _ messaging.ReplyRouteStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)

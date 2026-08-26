@@ -93,6 +93,10 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	if err != nil || !prepared.Accepted || prepared.Envelope.InputSeq != 1 {
 		t.Fatalf("prepare=%#v err=%v", prepared, err)
 	}
+	route, err := inboxes.ResolveReplyRoute(ctx, key.TenantID, first.RequestID)
+	if err != nil || route.ChannelBindingID != "contract-binding" || route.ExternalAccountID != "contract-account" || route.ConfigVersion != 1 {
+		t.Fatalf("reply route=%#v err=%v", route, err)
+	}
 	repeated, err := tasks.PrepareDispatch(ctx, request)
 	if err != nil || repeated.Envelope != prepared.Envelope {
 		t.Fatalf("repeat prepare=%#v err=%v", repeated, err)
@@ -138,6 +142,33 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	}
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM execution_record WHERE tenant_id=$1 AND request_id=$2`, key.TenantID, deniedClaim.RequestID).Scan(&dispatchCount); err != nil || dispatchCount != 0 {
 		t.Fatalf("suspended execution count=%d err=%v", dispatchCount, err)
+	}
+}
+
+func TestDeliveryLedgerPostgreSQL16(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `TRUNCATE delivery_ledger`); err != nil {
+		t.Fatal(err)
+	}
+	store := messagingpostgres.New(db)
+	key := messaging.DeliveryKey{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", DeliveryKey: "r1_contract", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: strings.Repeat("a", 64), SegmentCount: 1}
+	claimed, acquired, err := store.ClaimDelivery(ctx, key, plan)
+	if err != nil || !acquired || claimed.State != messaging.DeliverySending {
+		t.Fatalf("claimed=%#v acquired=%t err=%v", claimed, acquired, err)
+	}
+	if duplicate, acquired, err := store.ClaimDelivery(ctx, key, plan); err != nil || acquired || duplicate.Version != claimed.Version {
+		t.Fatalf("duplicate=%#v acquired=%t err=%v", duplicate, acquired, err)
+	}
+	claimed.State = messaging.DeliveryAmbiguous
+	claimed.LastErrorClass = "response_lost"
+	ambiguous, err := store.FinishDelivery(ctx, claimed, claimed.Version)
+	if err != nil || ambiguous.State != messaging.DeliveryAmbiguous {
+		t.Fatalf("ambiguous=%#v err=%v", ambiguous, err)
+	}
+	if replay, acquired, err := store.ClaimDelivery(ctx, key, plan); err != nil || acquired || replay.State != messaging.DeliveryAmbiguous {
+		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
 	}
 }
 
@@ -188,6 +219,9 @@ ON CONFLICT DO NOTHING`,
 WHERE tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAV' AND agent_app_id='app_01ARZ3NDEKTSV4RRFFQ69G5FAV' AND current_revision IS NULL`,
 		`INSERT INTO config_snapshot(tenant_id,config_version,schema_version,payload,content_digest,state,actor_id,reason_code,correlation_id,trace_id,published_at)
 VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAV',1,1,'{"policy_version":1}'::jsonb,repeat('b',64),'published','contract','test','contract','contract',now())
+ON CONFLICT DO NOTHING`,
+		`INSERT INTO channel_binding(tenant_id,config_version,binding_id,channel,external_account_id,agent_app_id,secret_ref,secret_version)
+VALUES('t_01ARZ3NDEKTSV4RRFFQ69G5FAV',1,'contract-binding','fake','contract-account','app_01ARZ3NDEKTSV4RRFFQ69G5FAV','secret://contract',1)
 ON CONFLICT DO NOTHING`,
 	}
 	for _, statement := range statements {

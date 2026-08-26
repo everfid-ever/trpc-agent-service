@@ -42,6 +42,12 @@ type ReplyEvent struct {
 	Final                                              bool
 	TraceParent                                        string
 }
+type ReplyDestination struct {
+	TenantID, Channel, ChannelBindingID, ExternalAccountID string
+}
+type ReplyPublisher interface {
+	PublishReply(context.Context, ReplyDestination, ReplyEvent) error
+}
 type DeliveryRequest struct{ Event ReplyEvent }
 type DeliveryResult struct {
 	ProviderMessageID string

@@ -158,12 +158,19 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			return err
 		}
 	}
+	replyID, err := messaging.StableReplyID(messaging.ReplyCoordinate{
+		TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+		InputSeq: envelope.InputSeq, Stage: "terminal", Ordinal: 0,
+	})
+	if err != nil {
+		return err
+	}
 	_, err = turn.Commit(ctx, sessionstore.CommitTurnRequest{
 		SessionKey: sessionKey, RequestID: envelope.RequestID,
 		CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal",
 		InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version,
 		Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1",
-		Outbox: []sessionstore.OutboxEvent{{Kind: "reply", IdempotencyKey: envelope.RequestID + ":reply:1", PayloadRef: resultRef, EventSeq: 1}},
+		Outbox: []sessionstore.OutboxEvent{{Kind: "reply", IdempotencyKey: replyID, PayloadRef: resultRef, EventSeq: 1}},
 	})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
