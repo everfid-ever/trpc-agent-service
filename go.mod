@@ -4,6 +4,7 @@ go 1.21
 
 require (
 	github.com/jackc/pgx/v5 v5.7.2
+	github.com/larksuite/oapi-sdk-go/v3 v3.10.0
 	github.com/redis/go-redis/v9 v9.11.0
 	trpc.group/trpc-go/trpc-agent-go v1.11.2
 )

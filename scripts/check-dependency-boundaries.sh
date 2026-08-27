@@ -6,10 +6,18 @@ cd "$repo_root"
 
 required_module="trpc.group/trpc-go/trpc-agent-go"
 required_version="v1.11.2"
+required_feishu_module="github.com/larksuite/oapi-sdk-go/v3"
+required_feishu_version="v3.10.0"
 
 actual_version="$(go list -m -f '{{.Version}}' "$required_module")"
 if [[ "$actual_version" != "$required_version" ]]; then
   echo "dependency baseline mismatch: $required_module=$actual_version, want $required_version" >&2
+  exit 1
+fi
+
+actual_feishu_version="$(go list -m -f '{{.Version}}' "$required_feishu_module")"
+if [[ "$actual_feishu_version" != "$required_feishu_version" ]]; then
+  echo "dependency baseline mismatch: $required_feishu_module=$actual_feishu_version, want $required_feishu_version" >&2
   exit 1
 fi
 
