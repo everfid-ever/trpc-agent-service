@@ -12,6 +12,7 @@ var (
 	ErrVersionConflict       = errors.New("version conflict")
 	ErrStaleFence            = errors.New("stale fence")
 	ErrInputNotReady         = errors.New("input is not ready")
+	ErrInputBlocked          = errors.New("input park deadline or attempts exhausted")
 	ErrAlreadyTerminal       = errors.New("input is already terminal")
 	ErrLeaseLost             = errors.New("lease lost")
 	ErrCommitConflict        = errors.New("commit conflict")

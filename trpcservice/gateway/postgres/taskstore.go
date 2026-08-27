@@ -12,9 +12,24 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
-type TaskStore struct{ db *sql.DB }
+type TaskStore struct {
+	db         *sql.DB
+	parkPolicy gateway.ParkPolicy
+}
 
-func NewTaskStore(db *sql.DB) *TaskStore { return &TaskStore{db: db} }
+func NewTaskStore(db *sql.DB) *TaskStore {
+	return &TaskStore{db: db, parkPolicy: gateway.DefaultParkPolicy()}
+}
+
+func NewTaskStoreWithParkPolicy(db *sql.DB, policy gateway.ParkPolicy) (*TaskStore, error) {
+	if db == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, err
+	}
+	return &TaskStore{db: db, parkPolicy: policy}, nil
+}
 
 func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispatchRequest) (gateway.PreparedDispatch, error) {
 	if err := in.Tenant.Validate(); err != nil {
@@ -78,9 +93,101 @@ func (s *TaskStore) RequestCancel(ctx context.Context, in gateway.CancelRequest)
 	return result, translate(err)
 }
 
-func (s *TaskStore) ParkInput(ctx context.Context, in gateway.ParkRequest) error {
-	_, err := s.db.ExecContext(ctx, `SELECT park_execution($1,$2,$3,$4)`, in.TenantID, in.RequestID, in.InputSeq, in.Attempt)
-	return translate(err)
+func (s *TaskStore) ParkInput(ctx context.Context, in gateway.ParkRequest) (gateway.ParkResult, error) {
+	if in.TenantID == "" || in.RequestID == "" {
+		return gateway.ParkResult{}, runtime.ErrTenantScope
+	}
+	if in.InputSeq < 1 {
+		return gateway.ParkResult{}, runtime.ErrCommitConflict
+	}
+	var result gateway.ParkResult
+	var notBefore, deadline sql.NullTime
+	policy := s.parkPolicy
+	if err := policy.Validate(); err != nil {
+		return gateway.ParkResult{}, err
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT disposition,attempt,execution_version,not_before,deadline
+FROM park_execution($1,$2,$3,$4,$5,$6,$7)`, in.TenantID, in.RequestID, in.InputSeq,
+		int64(policy.BaseDelay/time.Second), int64(policy.MaxDelay/time.Second),
+		int64(policy.Deadline/time.Second), policy.MaxAttempts).
+		Scan(&result.Disposition, &result.Attempt, &result.Version, &notBefore, &deadline)
+	result.NotBefore, result.Deadline = notBefore.Time, deadline.Time
+	return result, translate(err)
+}
+
+func (s *TaskStore) InspectWakeup(ctx context.Context, key gateway.ExecutionKey) (gateway.WakeupCandidate, error) {
+	if key.TenantID == "" || key.RequestID == "" {
+		return gateway.WakeupCandidate{}, runtime.ErrTenantScope
+	}
+	var result gateway.WakeupCandidate
+	var created time.Time
+	result.Execution.Envelope.SchemaVersion = runtime.CurrentEnvelopeSchemaVersion
+	err := s.db.QueryRowContext(ctx, `SELECT tenant_id,tenant_version,agent_app_id,agent_app_version,
+agent_app_revision,agent_content_digest,config_version,policy_version,request_id,session_id,user_id,channel,
+input_seq,payload_ref,COALESCE(traceparent,''),outcome,COALESCE(result_ref,''),created_at,ready,blocked,execution_version
+FROM inspect_execution_wakeup($1,$2)`, key.TenantID, key.RequestID).
+		Scan(&result.Execution.Envelope.TenantID, &result.Execution.Envelope.TenantVersion,
+			&result.Execution.Envelope.AgentAppID, &result.Execution.Envelope.AgentAppVersion,
+			&result.Execution.Envelope.AgentAppRevision, &result.Execution.Envelope.AgentContentDigest,
+			&result.Execution.Envelope.ConfigVersion, &result.Execution.Envelope.PolicyVersion,
+			&result.Execution.Envelope.RequestID, &result.Execution.Envelope.SessionID,
+			&result.Execution.Envelope.UserID, &result.Execution.Envelope.Channel,
+			&result.Execution.Envelope.InputSeq, &result.Execution.Envelope.PayloadRef,
+			&result.Execution.Envelope.TraceParent, &result.Execution.Outcome,
+			&result.Execution.ResultRef, &created, &result.Ready, &result.Blocked, &result.Version)
+	if err != nil {
+		return gateway.WakeupCandidate{}, translate(err)
+	}
+	result.Execution.Envelope.CreatedAt = created
+	return result, nil
+}
+
+func (s *TaskStore) MarkWoken(ctx context.Context, key gateway.ExecutionKey, expectedVersion int64) error {
+	if key.TenantID == "" || key.RequestID == "" {
+		return runtime.ErrTenantScope
+	}
+	if expectedVersion < 0 {
+		return runtime.ErrVersionConflict
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE execution_record SET outcome='queued',version=version+1
+WHERE tenant_id=$1 AND request_id=$2 AND outcome='pending' AND version=$3`, key.TenantID, key.RequestID, expectedVersion)
+	if err != nil {
+		return translate(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return runtime.ErrVersionConflict
+	}
+	return nil
+}
+
+func (s *TaskStore) ListActionableParkedInputs(ctx context.Context, before time.Time, limit int) ([]gateway.ExecutionKey, error) {
+	if before.IsZero() || limit < 1 {
+		return nil, runtime.ErrCommitConflict
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.tenant_id,e.request_id
+FROM execution_record e
+JOIN session_head h ON h.tenant_id=e.tenant_id AND h.agent_app_id=e.agent_app_id AND h.session_id=e.session_id
+WHERE e.outcome='pending' AND ((e.input_seq=h.next_input_seq AND COALESCE(e.not_before,'-infinity'::timestamptz)<=$1)
+  OR (e.park_deadline IS NOT NULL AND e.park_deadline<=$1))
+ORDER BY COALESCE(e.park_deadline,'infinity'::timestamptz),e.not_before,e.created_at
+LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []gateway.ExecutionKey
+	for rows.Next() {
+		var key gateway.ExecutionKey
+		if err := rows.Scan(&key.TenantID, &key.RequestID); err != nil {
+			return nil, err
+		}
+		result = append(result, key)
+	}
+	return result, rows.Err()
 }
 
 func nullable(value string) any {
@@ -108,6 +215,8 @@ func translate(err error) error {
 			return runtime.ErrIdempotencyCollision
 		case "42501":
 			return runtime.ErrTenantScope
+		case "XX001":
+			return runtime.ErrInvariantViolation
 		case "P0002":
 			return runtime.ErrNotFound
 		case "55000":
@@ -121,3 +230,4 @@ func translate(err error) error {
 }
 
 var _ gateway.TaskStore = (*TaskStore)(nil)
+var _ gateway.WakeupStore = (*TaskStore)(nil)

@@ -46,7 +46,9 @@ func (s taskStub) GetExecution(context.Context, gateway.ExecutionKey) (gateway.E
 func (s taskStub) RequestCancel(context.Context, gateway.CancelRequest) (gateway.CancelResult, error) {
 	panic("unexpected call")
 }
-func (s taskStub) ParkInput(context.Context, gateway.ParkRequest) error { panic("unexpected call") }
+func (s taskStub) ParkInput(context.Context, gateway.ParkRequest) (gateway.ParkResult, error) {
+	panic("unexpected call")
+}
 
 func TestWorkerRejectsEnvelopeVersionForgery(t *testing.T) {
 	authoritative := runtime.ExecutionEnvelope{SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1, AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1, RequestID: "request", SessionID: "session", UserID: "user", Channel: "fake", InputSeq: 1, PayloadRef: "payload://request", CreatedAt: time.Now().UTC()}

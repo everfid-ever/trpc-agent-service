@@ -94,6 +94,8 @@ func (p *Publisher) WakeupStream() string {
 	return fmt.Sprintf("trpc:{%s}:wakeup", p.config.Environment)
 }
 
+func (p *Publisher) WakeupDeadLetterStream() string { return p.WakeupStream() + ":dead-letter" }
+
 func (p *Publisher) TenantControlStream() string {
 	return fmt.Sprintf("trpc:{%s}:tenant-control", p.config.Environment)
 }

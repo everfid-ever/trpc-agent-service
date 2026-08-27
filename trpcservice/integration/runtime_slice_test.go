@@ -4,7 +4,9 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/fake"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
 	coordredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
@@ -40,6 +43,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
+	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
@@ -82,6 +86,10 @@ func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	businessPublisher, err := relayredis.NewPublisher(redisClient, relayredis.Config{Environment: environment})
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { cleanupRedisNamespace(redisClient, environment) })
 
 	tenants := tenantpostgres.New(db)
@@ -110,7 +118,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	sessions := sessionpostgres.New(db)
 	inbox := messagingpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
-	model := &delayedModel{inner: mockmodel.New(), delay: 40 * time.Millisecond}
+	model := &delayedModel{inner: mockmodel.New(), delay: 150 * time.Millisecond}
 	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, err := profiles.Resolve(ctx, key)
@@ -143,7 +151,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		}
 		consumer := worker.Consumer{
 			WorkerID: workerID, Shards: shards, Broker: streamBroker, Leases: leases,
-			Sessions: sessions, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
+			Sessions: sessions, Parker: tasks, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
 			OnDeliveryError: func(_ context.Context, delivery broker.Delivery, err error) {
 				t.Logf("worker delivery error request=%s: %v", delivery.Envelope.RequestID, err)
 			},
@@ -171,15 +179,25 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		tenantRows[tenantID] = row
 	}
 	relayCtx, stopRelay := context.WithCancel(context.Background())
-	relayDone := make(chan error, 1)
+	relayDone := make(chan error, 3)
 	flakyOutbox := &failFirstPublishedMark{inner: inbox}
 	dispatchRelay := relay.DispatchRelay{Outbox: flakyOutbox, Tasks: tasks, Broker: streamBroker, Owner: "runtime-relay", ShardCount: 4, PollInterval: 5 * time.Millisecond, ClaimTTL: 40 * time.Millisecond, ClaimRenewInterval: 10 * time.Millisecond}
 	go func() { relayDone <- dispatchRelay.Run(relayCtx) }()
+	wakeupQueue, err := relayredis.NewWakeupQueue(redisClient, businessPublisher, relayredis.WakeupQueueConfig{Group: "wakeup-workers", ReadBlock: 20 * time.Millisecond, ReclaimIdle: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakeupRelay := relay.WakeupRelay{Outbox: inbox, Wakeups: businessPublisher, Owner: "runtime-wakeup-relay", PollInterval: 5 * time.Millisecond, ClaimTTL: 40 * time.Millisecond, ClaimRenewInterval: 10 * time.Millisecond}
+	wakeupDispatcher := relay.WakeupDispatcher{ConsumerID: "runtime-wakeup-dispatcher", Wakeups: wakeupQueue, Store: tasks, Dispatch: streamBroker, ShardCount: 4, ReclaimInterval: 10 * time.Millisecond}
+	go func() { relayDone <- wakeupRelay.Run(relayCtx) }()
+	go func() { relayDone <- wakeupDispatcher.Run(relayCtx) }()
 	t.Cleanup(func() {
 		stopRelay()
-		select {
-		case <-relayDone:
-		case <-time.After(2 * time.Second):
+		for index := 0; index < 3; index++ {
+			select {
+			case <-relayDone:
+			case <-time.After(2 * time.Second):
+			}
 		}
 	})
 	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configs}
@@ -200,7 +218,6 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 			t.Fatalf("first execution start=%#v request=%s", started, first.RequestID)
 		}
 		killedWorker = started.workerID
-		workerStops[killedWorker]()
 	case <-time.After(2 * time.Second):
 		t.Fatal("first execution did not start")
 	}
@@ -241,6 +258,21 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		result := <-concurrent
 		concurrentHandles[result.index] = result.handle
 	}
+	for _, handle := range concurrentHandles[:2] {
+		status, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: handle.RequestID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		parked, err := tasks.ParkInput(context.Background(), gateway.ParkRequest{TenantID: tenantA, RequestID: handle.RequestID, InputSeq: status.Envelope.InputSeq})
+		if err != nil || parked.Disposition != gateway.ParkedInput {
+			t.Fatalf("park request=%s result=%#v err=%v", handle.RequestID, parked, err)
+		}
+	}
+	// Keep the first owner alive while the other Worker receives input 2/3,
+	// then kill it. The surviving Worker must durably park both future inputs
+	// before reclaiming input 1 and waking them in order.
+	time.Sleep(20 * time.Millisecond)
+	workerStops[killedWorker]()
 	handles := append([]gateway.ExecutionHandle{first, crossTenant}, concurrentHandles...)
 	for _, handle := range handles {
 		status := waitForTerminal(t, tasks, tenantForRequest(handle.RequestID, first.RequestID, crossTenant.RequestID), handle.RequestID)
@@ -263,10 +295,6 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	// Reply publication is at-least-once. Inject a crash after Redis XADD but
 	// before the Outbox mark, then prove the Delivery Ledger suppresses the
 	// duplicate provider effect for the repeated delivery key.
-	businessPublisher, err := relayredis.NewPublisher(redisClient, relayredis.Config{Environment: environment})
-	if err != nil {
-		t.Fatal(err)
-	}
 	providerAdapter := &deliveryAdapterStub{}
 	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryAdapterResolver{adapter: providerAdapter}}
 	delivering := deliveringReplyPublisher{stream: businessPublisher, delivery: deliveryService}
@@ -341,15 +369,17 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 
 	var sessionID string
 	var sequences []uint64
-	rows, err := db.Query(`SELECT session_id,input_seq FROM execution_record
-WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handles[2].RequestID, handles[3].RequestID)
+	var parkAttempts []int
+	rows, err := db.Query(`SELECT session_id,input_seq,park_attempt FROM execution_record
+WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, first.RequestID, handles[2].RequestID, handles[3].RequestID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for rows.Next() {
 		var value uint64
 		var currentSession string
-		if err := rows.Scan(&currentSession, &value); err != nil {
+		var parkAttempt int
+		if err := rows.Scan(&currentSession, &value, &parkAttempt); err != nil {
 			rows.Close()
 			t.Fatal(err)
 		}
@@ -359,12 +389,35 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3) ORDER BY input_seq`, tenantA, handl
 		}
 		sessionID = currentSession
 		sequences = append(sequences, value)
+		parkAttempts = append(parkAttempts, parkAttempt)
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(sequences) != 2 || sequences[1] != sequences[0]+1 {
-		t.Fatalf("same-session sequences=%v", sequences)
+	if len(sequences) != 3 || sequences[1] != sequences[0]+1 || sequences[2] != sequences[1]+1 || parkAttempts[1] < 1 || parkAttempts[2] < 1 {
+		t.Fatalf("same-session sequences=%v park_attempts=%v", sequences, parkAttempts)
+	}
+	// Lose both Redis coordination keys, then prove the durable PostgreSQL
+	// watermark calibrates the recreated counter before a new owner acquires.
+	coordinationKey := coordination.SessionKey{TenantID: tenantA, AgentAppID: appID, SessionID: sessionID}
+	persistedFence, err := sessions.ReadLastFence(context.Background(), sessionstore.SessionKey(coordinationKey))
+	if err != nil || persistedFence == 0 {
+		t.Fatalf("persisted fence=%d err=%v", persistedFence, err)
+	}
+	digest := sha256.Sum256([]byte(coordinationKey.TenantID + "\x00" + coordinationKey.AgentAppID + "\x00" + coordinationKey.SessionID))
+	prefix := fmt.Sprintf("trpc:%s:{%s}", environment, hex.EncodeToString(digest[:]))
+	if err := redisClient.Del(context.Background(), prefix+":lease", prefix+":fence").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := leases.EnsureFenceAtLeast(context.Background(), coordinationKey, persistedFence); err != nil {
+		t.Fatal(err)
+	}
+	recoveredLease, err := leases.Acquire(context.Background(), coordinationKey, "recovery-worker", time.Second)
+	if err != nil || recoveredLease.Fence <= persistedFence {
+		t.Fatalf("recovered lease=%#v persisted=%d err=%v", recoveredLease, persistedFence, err)
+	}
+	if err := leases.Release(context.Background(), recoveredLease); err != nil {
+		t.Fatal(err)
 	}
 	var durableEvents int
 	if err := db.QueryRow(`SELECT count(*) FROM session_event WHERE tenant_id=$1 AND session_id=$2 AND event_payload IS NOT NULL`, tenantA, sessionID).Scan(&durableEvents); err != nil || durableEvents == 0 {

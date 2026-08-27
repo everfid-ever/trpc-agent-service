@@ -48,7 +48,9 @@ func (s relayTaskStub) GetExecution(context.Context, gateway.ExecutionKey) (gate
 func (relayTaskStub) RequestCancel(context.Context, gateway.CancelRequest) (gateway.CancelResult, error) {
 	panic("unexpected call")
 }
-func (relayTaskStub) ParkInput(context.Context, gateway.ParkRequest) error { panic("unexpected call") }
+func (relayTaskStub) ParkInput(context.Context, gateway.ParkRequest) (gateway.ParkResult, error) {
+	panic("unexpected call")
+}
 
 type relayBrokerStub struct {
 	fail      bool

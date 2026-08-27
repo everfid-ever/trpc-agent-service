@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -39,12 +40,63 @@ type CancelResult struct {
 type ParkRequest struct {
 	TenantID, RequestID string
 	InputSeq            uint64
-	Attempt             int
+}
+
+type ParkDisposition string
+
+const (
+	ParkedInput       ParkDisposition = "parked"
+	ParkInputReady    ParkDisposition = "ready"
+	ParkInputTerminal ParkDisposition = "terminal"
+	ParkInputBlocked  ParkDisposition = "blocked"
+)
+
+type ParkResult struct {
+	Disposition ParkDisposition
+	Attempt     int
+	Version     int64
+	NotBefore   time.Time
+	Deadline    time.Time
+}
+
+type ParkPolicy struct {
+	BaseDelay   time.Duration
+	MaxDelay    time.Duration
+	Deadline    time.Duration
+	MaxAttempts int
+}
+
+func DefaultParkPolicy() ParkPolicy {
+	return ParkPolicy{BaseDelay: time.Second, MaxDelay: 5 * time.Minute, Deadline: 15 * time.Minute, MaxAttempts: 8}
+}
+
+func (p ParkPolicy) Validate() error {
+	if p.BaseDelay < time.Second || p.MaxDelay < p.BaseDelay || p.Deadline < p.MaxDelay || p.MaxAttempts < 1 {
+		return runtime.ErrInvariantViolation
+	}
+	return nil
+}
+
+type WakeupCandidate struct {
+	Execution ExecutionStatus
+	Ready     bool
+	Blocked   bool
+	Version   int64
+}
+
+type InputParker interface {
+	ParkInput(context.Context, ParkRequest) (ParkResult, error)
+}
+
+type WakeupStore interface {
+	InspectWakeup(context.Context, ExecutionKey) (WakeupCandidate, error)
+	MarkWoken(context.Context, ExecutionKey, int64) error
+	ListActionableParkedInputs(context.Context, time.Time, int) ([]ExecutionKey, error)
 }
 
 type TaskStore interface {
 	PrepareDispatch(context.Context, PrepareDispatchRequest) (PreparedDispatch, error)
 	GetExecution(context.Context, ExecutionKey) (ExecutionStatus, error)
 	RequestCancel(context.Context, CancelRequest) (CancelResult, error)
-	ParkInput(context.Context, ParkRequest) error
+	InputParker
 }

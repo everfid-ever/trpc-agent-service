@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 8 {
+	if len(all) != 9 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestInputParkWakeupMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[8]
+	if migration.Version != "000009" || migration.Name != "input_park_wakeup" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"park_deadline timestamptz", "'blocked'", "CREATE FUNCTION public.park_execution(", "enqueue_next_parked_wakeup", "session_head_wakeup_next_parked", "inspect_execution_wakeup"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

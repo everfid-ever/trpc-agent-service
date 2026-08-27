@@ -8,6 +8,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 )
@@ -22,6 +23,7 @@ type Consumer struct {
 	Broker          broker.Broker
 	Leases          coordination.LeaseManager
 	Sessions        sessionstore.AtomicSessionStore
+	Parker          gateway.InputParker
 	Executor        LeaseExecutor
 	LeaseTTL        time.Duration
 	RenewInterval   time.Duration
@@ -170,7 +172,37 @@ func (w Consumer) handle(ctx context.Context, delivery broker.Delivery) error {
 		}
 		return nil
 	}
-	executeErr := w.Executor.ExecuteWithLease(executionCtx, delivery.Envelope, lease.Fence, beforeCommit)
+	var executeErr error
+	for {
+		executeErr = w.Executor.ExecuteWithLease(executionCtx, delivery.Envelope, lease.Fence, beforeCommit)
+		if !errors.Is(executeErr, runtime.ErrInputNotReady) {
+			break
+		}
+		if w.Parker == nil {
+			executeErr = runtime.ErrCapabilityUnsupported
+			break
+		}
+		parked, parkErr := w.Parker.ParkInput(executionCtx, gateway.ParkRequest{
+			TenantID: delivery.Envelope.TenantID, RequestID: delivery.Envelope.RequestID,
+			InputSeq: delivery.Envelope.InputSeq,
+		})
+		if parkErr != nil {
+			executeErr = parkErr
+			break
+		}
+		switch parked.Disposition {
+		case gateway.ParkInputReady:
+			continue
+		case gateway.ParkedInput, gateway.ParkInputTerminal:
+			executeErr = nil
+		case gateway.ParkInputBlocked:
+			w.report(executionCtx, delivery, runtime.ErrInputBlocked)
+			executeErr = nil
+		default:
+			executeErr = runtime.ErrInvariantViolation
+		}
+		break
+	}
 	close(stopRenewal)
 	<-renewalDone
 	select {

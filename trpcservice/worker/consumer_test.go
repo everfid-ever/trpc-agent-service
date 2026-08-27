@@ -9,6 +9,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	sessionmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/inmemory"
 )
@@ -95,6 +96,34 @@ type leaseExecutorFunc func(context.Context, runtime.ExecutionEnvelope, uint64, 
 
 func (f leaseExecutorFunc) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, guard func(context.Context) error) error {
 	return f(ctx, envelope, fence, guard)
+}
+
+type parkerStub struct {
+	result gateway.ParkResult
+	calls  int
+}
+
+func (s *parkerStub) ParkInput(context.Context, gateway.ParkRequest) (gateway.ParkResult, error) {
+	s.calls++
+	return s.result, nil
+}
+
+func TestConsumerDurablyParksFutureInputBeforeAck(t *testing.T) {
+	leases := &leaseStub{}
+	messages := &brokerStub{}
+	parker := &parkerStub{result: gateway.ParkResult{Disposition: gateway.ParkedInput, Attempt: 1}}
+	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), Parker: parker,
+		LeaseTTL: time.Second, RenewInterval: time.Hour,
+		Executor: leaseExecutorFunc(func(context.Context, runtime.ExecutionEnvelope, uint64, func(context.Context) error) error {
+			return runtime.ErrInputNotReady
+		})}
+	delivery := broker.Delivery{ID: "message", Envelope: runtime.ExecutionEnvelope{TenantID: "tenant", AgentAppID: "app", SessionID: "session", RequestID: "request", InputSeq: 2}}
+	if err := consumer.handle(context.Background(), delivery); err != nil {
+		t.Fatal(err)
+	}
+	if parker.calls != 1 || !messages.acked {
+		t.Fatalf("park calls=%d acked=%t", parker.calls, messages.acked)
+	}
 }
 
 func TestConsumerRenewsSlowExecutionAndValidatesBeforeCommit(t *testing.T) {

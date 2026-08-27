@@ -29,7 +29,9 @@ func (*contractTasks) GetExecution(context.Context, ExecutionKey) (ExecutionStat
 func (*contractTasks) RequestCancel(context.Context, CancelRequest) (CancelResult, error) {
 	panic("unexpected call")
 }
-func (*contractTasks) ParkInput(context.Context, ParkRequest) error { panic("unexpected call") }
+func (*contractTasks) ParkInput(context.Context, ParkRequest) (ParkResult, error) {
+	panic("unexpected call")
+}
 
 type contractExecutor struct{ calls int }
 

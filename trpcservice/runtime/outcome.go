@@ -6,6 +6,7 @@ const (
 	OutcomePending             Outcome = "pending"
 	OutcomeQueued              Outcome = "queued"
 	OutcomeRunning             Outcome = "running"
+	OutcomeBlocked             Outcome = "blocked"
 	OutcomeWaitingConfirmation Outcome = "waiting_confirmation"
 	OutcomeSucceeded           Outcome = "succeeded"
 	OutcomeDenied              Outcome = "denied"

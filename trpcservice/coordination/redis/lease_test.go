@@ -42,6 +42,11 @@ func TestRedisLeaseFenceContract(t *testing.T) {
 	if err := manager.Release(context.Background(), renewed); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate loss/restoration of the Redis coordination dataset. PostgreSQL's
+	// durable last_fence is supplied as the calibration minimum.
+	if err := client.Del(context.Background(), fenceKey).Err(); err != nil {
+		t.Fatal(err)
+	}
 	if err := manager.EnsureFenceAtLeast(context.Background(), key, 10); err != nil {
 		t.Fatal(err)
 	}

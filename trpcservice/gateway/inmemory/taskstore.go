@@ -18,10 +18,11 @@ type TaskStore struct {
 	mu         sync.RWMutex
 	executions map[executionKey]gateway.ExecutionStatus
 	nextInput  map[sessionKey]uint64
+	parks      map[executionKey]gateway.ParkResult
 }
 
 func NewTaskStore() *TaskStore {
-	return &TaskStore{executions: make(map[executionKey]gateway.ExecutionStatus), nextInput: make(map[sessionKey]uint64)}
+	return &TaskStore{executions: make(map[executionKey]gateway.ExecutionStatus), nextInput: make(map[sessionKey]uint64), parks: make(map[executionKey]gateway.ParkResult)}
 }
 
 func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispatchRequest) (gateway.PreparedDispatch, error) {
@@ -97,18 +98,32 @@ func (s *TaskStore) RequestCancel(ctx context.Context, in gateway.CancelRequest)
 	return gateway.CancelResult{Accepted: true, Version: in.ExpectedVersion + 1}, nil
 }
 
-func (s *TaskStore) ParkInput(ctx context.Context, in gateway.ParkRequest) error {
+func (s *TaskStore) ParkInput(ctx context.Context, in gateway.ParkRequest) (gateway.ParkResult, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return gateway.ParkResult{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := executionKey{in.TenantID, in.RequestID}
 	status, ok := s.executions[k]
 	if !ok {
-		return runtime.ErrNotFound
+		return gateway.ParkResult{}, runtime.ErrNotFound
+	}
+	if status.Envelope.InputSeq != in.InputSeq {
+		return gateway.ParkResult{}, runtime.ErrCommitConflict
+	}
+	if status.Outcome.Terminal() {
+		return gateway.ParkResult{Disposition: gateway.ParkInputTerminal}, nil
+	}
+	// nextInput is the allocator, while the in-memory SessionStore owns the
+	// execution gate. The local implementation therefore preserves an existing
+	// park idempotently and is used only by local contract tests.
+	if existing, exists := s.parks[k]; exists && status.Outcome == runtime.OutcomePending {
+		return existing, nil
 	}
 	status.Outcome = runtime.OutcomePending
 	s.executions[k] = status
-	return nil
+	result := gateway.ParkResult{Disposition: gateway.ParkedInput, Attempt: 1, Version: 1, NotBefore: time.Now().UTC()}
+	s.parks[k] = result
+	return result, nil
 }
