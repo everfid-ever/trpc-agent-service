@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -122,4 +123,101 @@ func TestWakeupQueueDeadLettersPoisonWithoutStopping(t *testing.T) {
 	t.Cleanup(func() {
 		_ = client.Del(context.Background(), publisher.WakeupStream(), publisher.WakeupDeadLetterStream()).Err()
 	})
+}
+
+func TestReplyQueueReclaimsAdapterCrashWithoutEarlyACK(t *testing.T) {
+	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
+	if address == "" {
+		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
+	}
+	client := redisclient.NewClient(&redisclient.Options{Addr: address})
+	t.Cleanup(func() { _ = client.Close() })
+	publisher, err := NewPublisher(client, Config{Environment: fmt.Sprintf("reply_reclaim_%d", time.Now().UnixNano())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: "result://request", Final: true}
+	if err := publisher.PublishReply(context.Background(), destination, event); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewReplyQueue(client, publisher, ReplyQueueConfig{Group: "adapter-owners", ReadBlock: 10 * time.Millisecond, ReclaimIdle: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crash := errors.New("adapter crashed")
+	err = queue.ConsumeReplies(context.Background(), destination, channel.ReplyConsumerOptions{ConsumerID: "owner-1"}, func(context.Context, channel.ReplyDelivery) error {
+		return crash
+	})
+	if !errors.Is(err, crash) {
+		t.Fatalf("consume err=%v", err)
+	}
+	pending, err := client.XPending(context.Background(), publisher.ReplyStream(destination), "adapter-owners").Result()
+	if err != nil || pending.Count != 1 {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	reclaimed, err := queue.ReclaimReplies(context.Background(), destination, channel.ReplyConsumerOptions{ConsumerID: "owner-2"})
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].Event != event {
+		t.Fatalf("reclaimed=%#v err=%v", reclaimed, err)
+	}
+	if err := queue.AckReply(context.Background(), destination, reclaimed[0]); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = client.XPending(context.Background(), publisher.ReplyStream(destination), "adapter-owners").Result()
+	if err != nil || pending.Count != 0 {
+		t.Fatalf("pending after ACK=%#v err=%v", pending, err)
+	}
+	t.Cleanup(func() {
+		_ = client.Del(context.Background(), publisher.ReplyStream(destination), publisher.ReplyStream(destination)+":dead-letter").Err()
+	})
+}
+
+func TestReplyQueueDeadLettersCrossBindingEntry(t *testing.T) {
+	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
+	if address == "" {
+		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
+	}
+	client := redisclient.NewClient(&redisclient.Options{Addr: address})
+	t.Cleanup(func() { _ = client.Close() })
+	publisher, err := NewPublisher(client, Config{Environment: fmt.Sprintf("reply_poison_%d", time.Now().UnixNano())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
+	stream := publisher.ReplyStream(destination)
+	if err := client.XAdd(context.Background(), &redisclient.XAddArgs{Stream: stream, Values: map[string]any{
+		"schema_version": "1", "event": `{"schema_version":1,"tenant_id":"other"}`, "tenant_id": "other", "binding_id": "binding", "delivery_key": "reply",
+	}}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewReplyQueue(client, publisher, ReplyQueueConfig{Group: "adapter-owners", ReadBlock: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- queue.ConsumeReplies(ctx, destination, channel.ReplyConsumerOptions{ConsumerID: "owner"}, func(context.Context, channel.ReplyDelivery) error {
+			t.Error("poison reply reached Adapter")
+			return nil
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if length, _ := client.XLen(context.Background(), stream+":dead-letter").Result(); length == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if length, err := client.XLen(context.Background(), stream+":dead-letter").Result(); err != nil || length != 1 {
+		t.Fatalf("dead-letter length=%d err=%v", length, err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reply consumer did not stop")
+	}
+	t.Cleanup(func() { _ = client.Del(context.Background(), stream, stream+":dead-letter").Err() })
 }

@@ -286,7 +286,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	// before the Outbox mark, then prove the Delivery Ledger suppresses the
 	// duplicate provider effect for the repeated delivery key.
 	providerAdapter := &deliveryAdapterStub{}
-	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryAdapterResolver{adapter: providerAdapter}}
+	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryAdapterResolver{adapter: providerAdapter}, Owner: "runtime-adapter"}
 	delivering := deliveringReplyPublisher{stream: businessPublisher, delivery: deliveryService}
 	flakyReplyOutbox := &failFirstPublishedMark{inner: inbox}
 	replyRelay := relay.ReplyRelay{Outbox: flakyReplyOutbox, Results: payloads, Routes: inbox, Replies: delivering,

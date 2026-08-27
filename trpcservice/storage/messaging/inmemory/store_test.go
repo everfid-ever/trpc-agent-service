@@ -43,11 +43,12 @@ func TestDeliveryLedgerClaimFinishAndIdempotentReplay(t *testing.T) {
 	store := New()
 	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
 	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: "digest", SegmentCount: 1}
-	claimed, acquired, err := store.ClaimDelivery(context.Background(), key, plan)
+	claim := messaging.DeliveryClaim{Owner: "adapter-1", TTL: time.Hour}
+	claimed, acquired, err := store.ClaimDelivery(context.Background(), key, plan, claim)
 	if err != nil || !acquired || claimed.State != messaging.DeliverySending || claimed.Attempt != 1 {
 		t.Fatalf("claimed=%#v acquired=%t err=%v", claimed, acquired, err)
 	}
-	if duplicate, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || duplicate.Version != claimed.Version {
+	if duplicate, acquired, err := store.ClaimDelivery(context.Background(), key, plan, claim); err != nil || acquired || duplicate.Version != claimed.Version {
 		t.Fatalf("duplicate=%#v acquired=%t err=%v", duplicate, acquired, err)
 	}
 	claimed.State = messaging.DeliverySent
@@ -56,7 +57,7 @@ func TestDeliveryLedgerClaimFinishAndIdempotentReplay(t *testing.T) {
 	if err != nil || sent.State != messaging.DeliverySent {
 		t.Fatalf("sent=%#v err=%v", sent, err)
 	}
-	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || replay.State != messaging.DeliverySent {
+	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan, claim); err != nil || acquired || replay.State != messaging.DeliverySent {
 		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
 	}
 }
@@ -65,15 +66,31 @@ func TestDeliveryLedgerRetryWaitHonorsNotBefore(t *testing.T) {
 	store := New()
 	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_retry", SegmentNo: 0}
 	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: "digest", SegmentCount: 1}
-	claimed, _, _ := store.ClaimDelivery(context.Background(), key, plan)
+	claim := messaging.DeliveryClaim{Owner: "adapter-1", TTL: time.Hour}
+	claimed, _, _ := store.ClaimDelivery(context.Background(), key, plan, claim)
 	claimed.State = messaging.DeliveryRetryWait
 	claimed.NotBefore = time.Now().Add(time.Hour)
 	retry, err := store.FinishDelivery(context.Background(), claimed, claimed.Version)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan); err != nil || acquired || replay.Version != retry.Version {
+	if replay, acquired, err := store.ClaimDelivery(context.Background(), key, plan, claim); err != nil || acquired || replay.Version != retry.Version {
 		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
+	}
+}
+
+func TestDeliveryLedgerExpiredSendingBecomesAmbiguous(t *testing.T) {
+	store := New()
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_crash", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: "digest", SegmentCount: 1}
+	claimed, acquired, err := store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Nanosecond})
+	if err != nil || !acquired {
+		t.Fatalf("claimed=%#v acquired=%t err=%v", claimed, acquired, err)
+	}
+	time.Sleep(time.Millisecond)
+	recovered, acquired, err := store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "new-owner", TTL: time.Hour})
+	if err != nil || acquired || recovered.State != messaging.DeliveryAmbiguous || recovered.LastErrorClass != "owner_lost" || recovered.ClaimOwner != "" || recovered.ClientRequestID != claimed.ClientRequestID {
+		t.Fatalf("recovered=%#v acquired=%t err=%v", recovered, acquired, err)
 	}
 }
 

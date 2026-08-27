@@ -342,35 +342,52 @@ func (s *Store) GetDelivery(ctx context.Context, key messaging.DeliveryKey) (mes
 	var record messaging.DeliveryRecord
 	record.DeliveryKey = key
 	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(provider_message_id,''),state,renderer_version,format_version,content_digest,segment_count,
-attempt,not_before,COALESCE(last_error_class,''),version,updated_at FROM delivery_ledger
+attempt,not_before,COALESCE(last_error_class,''),client_request_id,COALESCE(claim_owner,''),COALESCE(claim_until,'epoch'::timestamptz),version,updated_at FROM delivery_ledger
 WHERE tenant_id=$1 AND delivery_key=$2 AND segment_no=$3`, key.TenantID, key.DeliveryKey, key.SegmentNo).
 		Scan(&record.ProviderMessageID, &record.State, &record.Plan.RendererVersion, &record.Plan.FormatVersion,
 			&record.Plan.ContentDigest, &record.Plan.SegmentCount, &record.Attempt, &record.NotBefore,
-			&record.LastErrorClass, &record.Version, &record.UpdatedAt)
+			&record.LastErrorClass, &record.ClientRequestID, &record.ClaimOwner, &record.ClaimUntil, &record.Version, &record.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return messaging.DeliveryRecord{}, runtime.ErrNotFound
 	}
 	return record, err
 }
 
-func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, plan messaging.DeliveryPlan) (messaging.DeliveryRecord, bool, error) {
+func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, plan messaging.DeliveryPlan, claim messaging.DeliveryClaim) (messaging.DeliveryRecord, bool, error) {
 	if err := validateDeliveryPlan(key, plan); err != nil {
 		return messaging.DeliveryRecord{}, false, err
 	}
-	record := messaging.DeliveryRecord{DeliveryKey: key, Plan: plan}
-	err := s.db.QueryRowContext(ctx, `INSERT INTO delivery_ledger(
-tenant_id,delivery_key,segment_no,state,renderer_version,format_version,content_digest,segment_count,attempt)
-VALUES($1,$2,$3,'sending',$4,$5,$6,$7,1)
+	if claim.Owner == "" || claim.TTL <= 0 {
+		return messaging.DeliveryRecord{}, false, runtime.ErrCommitConflict
+	}
+	clientRequestID, err := messaging.StableDeliveryRequestID(key)
+	if err != nil {
+		return messaging.DeliveryRecord{}, false, err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE delivery_ledger SET state='ambiguous',last_error_class='owner_lost',
+claim_owner=NULL,claim_until=NULL,version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND delivery_key=$2 AND segment_no=$3 AND state='sending' AND claim_until<=now()`, key.TenantID, key.DeliveryKey, key.SegmentNo); err != nil {
+		return messaging.DeliveryRecord{}, false, err
+	}
+	record := messaging.DeliveryRecord{DeliveryKey: key, Plan: plan, ClientRequestID: clientRequestID}
+	err = s.db.QueryRowContext(ctx, `INSERT INTO delivery_ledger(
+tenant_id,delivery_key,segment_no,state,renderer_version,format_version,content_digest,segment_count,attempt,client_request_id,claim_owner,claim_until)
+VALUES($1,$2,$3,'sending',$4,$5,$6,$7,1,$8,$9,now()+($10 * interval '1 microsecond'))
 ON CONFLICT (tenant_id,delivery_key,segment_no) DO UPDATE SET
-  state='sending',attempt=delivery_ledger.attempt+1,version=delivery_ledger.version+1,updated_at=now()
+  state='sending',attempt=delivery_ledger.attempt+1,claim_owner=EXCLUDED.claim_owner,claim_until=EXCLUDED.claim_until,
+  version=delivery_ledger.version+1,updated_at=now()
 WHERE delivery_ledger.state IN ('pending','retry_wait') AND delivery_ledger.not_before<=now()
   AND delivery_ledger.renderer_version=EXCLUDED.renderer_version
   AND delivery_ledger.format_version=EXCLUDED.format_version
   AND delivery_ledger.content_digest=EXCLUDED.content_digest
   AND delivery_ledger.segment_count=EXCLUDED.segment_count
-RETURNING COALESCE(provider_message_id,''),state,attempt,not_before,COALESCE(last_error_class,''),version,updated_at`,
-		key.TenantID, key.DeliveryKey, key.SegmentNo, plan.RendererVersion, plan.FormatVersion, plan.ContentDigest, plan.SegmentCount).
-		Scan(&record.ProviderMessageID, &record.State, &record.Attempt, &record.NotBefore, &record.LastErrorClass, &record.Version, &record.UpdatedAt)
+  AND delivery_ledger.client_request_id=EXCLUDED.client_request_id
+RETURNING COALESCE(provider_message_id,''),state,attempt,not_before,COALESCE(last_error_class,''),client_request_id,
+COALESCE(claim_owner,''),COALESCE(claim_until,'epoch'::timestamptz),version,updated_at`,
+		key.TenantID, key.DeliveryKey, key.SegmentNo, plan.RendererVersion, plan.FormatVersion, plan.ContentDigest, plan.SegmentCount,
+		clientRequestID, claim.Owner, claim.TTL.Microseconds()).
+		Scan(&record.ProviderMessageID, &record.State, &record.Attempt, &record.NotBefore, &record.LastErrorClass,
+			&record.ClientRequestID, &record.ClaimOwner, &record.ClaimUntil, &record.Version, &record.UpdatedAt)
 	if err == nil {
 		return record, true, nil
 	}
@@ -395,13 +412,35 @@ func (s *Store) FinishDelivery(ctx context.Context, in messaging.DeliveryRecord,
 		in.NotBefore = time.Now().UTC()
 	}
 	err := s.db.QueryRowContext(ctx, `UPDATE delivery_ledger SET provider_message_id=$4,state=$5,not_before=$6,last_error_class=$7,
-version=version+1,updated_at=now() WHERE tenant_id=$1 AND delivery_key=$2 AND segment_no=$3 AND version=$8 AND state='sending'
+claim_owner=NULL,claim_until=NULL,version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND delivery_key=$2 AND segment_no=$3 AND version=$8 AND state='sending' AND claim_owner=$9 AND client_request_id=$10
 RETURNING attempt,version,updated_at`, in.TenantID, in.DeliveryKey.DeliveryKey, in.SegmentNo, nullable(in.ProviderMessageID),
-		in.State, in.NotBefore, nullable(in.LastErrorClass), expectedVersion).
+		in.State, in.NotBefore, nullable(in.LastErrorClass), expectedVersion, in.ClaimOwner, in.ClientRequestID).
 		Scan(&in.Attempt, &in.Version, &in.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
 	}
+	in.ClaimOwner, in.ClaimUntil = "", time.Time{}
+	return in, err
+}
+
+func (s *Store) ReconcileDelivery(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
+	if in.State != messaging.DeliverySent && in.State != messaging.DeliveryRetryWait && in.State != messaging.DeliveryFailed {
+		return messaging.DeliveryRecord{}, runtime.ErrCommitConflict
+	}
+	if in.NotBefore.IsZero() {
+		in.NotBefore = time.Now().UTC()
+	}
+	err := s.db.QueryRowContext(ctx, `UPDATE delivery_ledger SET provider_message_id=$4,state=$5,not_before=$6,last_error_class=$7,
+version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND delivery_key=$2 AND segment_no=$3 AND version=$8 AND state='ambiguous' AND client_request_id=$9
+RETURNING attempt,version,updated_at`, in.TenantID, in.DeliveryKey.DeliveryKey, in.SegmentNo, nullable(in.ProviderMessageID),
+		in.State, in.NotBefore, nullable(in.LastErrorClass), expectedVersion, in.ClientRequestID).
+		Scan(&in.Attempt, &in.Version, &in.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
+	}
+	in.ClaimOwner, in.ClaimUntil = "", time.Time{}
 	return in, err
 }
 

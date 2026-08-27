@@ -197,16 +197,36 @@ type DeliveryPlan struct {
 
 type DeliveryRecord struct {
 	DeliveryKey
-	ProviderMessageID, LastErrorClass string
-	State                             DeliveryState
-	Plan                              DeliveryPlan
-	Attempt                           int
-	Version                           int64
-	NotBefore, UpdatedAt              time.Time
+	ProviderMessageID, LastErrorClass, ClientRequestID, ClaimOwner string
+	State                                                          DeliveryState
+	Plan                                                           DeliveryPlan
+	Attempt                                                        int
+	Version                                                        int64
+	NotBefore, ClaimUntil, UpdatedAt                               time.Time
+}
+
+type DeliveryClaim struct {
+	Owner string
+	TTL   time.Duration
 }
 
 type DeliveryLedger interface {
 	GetDelivery(context.Context, DeliveryKey) (DeliveryRecord, error)
-	ClaimDelivery(context.Context, DeliveryKey, DeliveryPlan) (DeliveryRecord, bool, error)
+	ClaimDelivery(context.Context, DeliveryKey, DeliveryPlan, DeliveryClaim) (DeliveryRecord, bool, error)
 	FinishDelivery(context.Context, DeliveryRecord, int64) (DeliveryRecord, error)
+	ReconcileDelivery(context.Context, DeliveryRecord, int64) (DeliveryRecord, error)
+}
+
+func StableDeliveryRequestID(key DeliveryKey) (string, error) {
+	if key.TenantID == "" || key.DeliveryKey == "" || key.SegmentNo < 0 {
+		return "", runtime.ErrTenantScope
+	}
+	h := sha256.New()
+	for _, part := range []string{key.TenantID, key.DeliveryKey, strconv.Itoa(key.SegmentNo)} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(part)))
+		_, _ = h.Write(size[:])
+		_, _ = h.Write([]byte(part))
+	}
+	return "d1_" + base64.RawURLEncoding.EncodeToString(h.Sum(nil)), nil
 }

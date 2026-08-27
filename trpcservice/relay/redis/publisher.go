@@ -47,12 +47,14 @@ func (p *Publisher) PublishReply(ctx context.Context, destination channel.ReplyD
 		return err
 	}
 	return p.xadd(ctx, p.ReplyStream(destination), map[string]any{
-		"schema_version": strconv.FormatUint(uint64(event.SchemaVersion), 10),
-		"event":          payload,
-		"tenant_id":      event.TenantID,
-		"binding_id":     event.ChannelBindingID,
-		"delivery_key":   event.DeliveryKey,
-		"traceparent":    event.TraceParent,
+		"schema_version":      strconv.FormatUint(uint64(event.SchemaVersion), 10),
+		"event":               payload,
+		"tenant_id":           event.TenantID,
+		"channel":             destination.Channel,
+		"binding_id":          event.ChannelBindingID,
+		"external_account_id": destination.ExternalAccountID,
+		"delivery_key":        event.DeliveryKey,
+		"traceparent":         event.TraceParent,
 	})
 }
 

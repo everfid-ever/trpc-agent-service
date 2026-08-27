@@ -180,11 +180,18 @@ func (s *Store) GetDelivery(ctx context.Context, key messaging.DeliveryKey) (mes
 	return record, nil
 }
 
-func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, plan messaging.DeliveryPlan) (messaging.DeliveryRecord, bool, error) {
+func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, plan messaging.DeliveryPlan, claim messaging.DeliveryClaim) (messaging.DeliveryRecord, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return messaging.DeliveryRecord{}, false, err
 	}
 	if err := validateDeliveryPlan(key, plan); err != nil {
+		return messaging.DeliveryRecord{}, false, err
+	}
+	if claim.Owner == "" || claim.TTL <= 0 {
+		return messaging.DeliveryRecord{}, false, runtime.ErrCommitConflict
+	}
+	clientRequestID, err := messaging.StableDeliveryRequestID(key)
+	if err != nil {
 		return messaging.DeliveryRecord{}, false, err
 	}
 	s.mu.Lock()
@@ -192,17 +199,26 @@ func (s *Store) ClaimDelivery(ctx context.Context, key messaging.DeliveryKey, pl
 	now := time.Now().UTC()
 	record, exists := s.deliveries[key]
 	if !exists {
-		record = messaging.DeliveryRecord{DeliveryKey: key, State: messaging.DeliverySending, Plan: plan, Attempt: 1, Version: 1, UpdatedAt: now}
+		record = messaging.DeliveryRecord{DeliveryKey: key, State: messaging.DeliverySending, Plan: plan, Attempt: 1, Version: 1,
+			ClientRequestID: clientRequestID, ClaimOwner: claim.Owner, ClaimUntil: now.Add(claim.TTL), UpdatedAt: now}
 		s.deliveries[key] = record
 		return record, true, nil
 	}
-	if record.Plan != plan {
+	if record.Plan != plan || record.ClientRequestID != clientRequestID {
 		return messaging.DeliveryRecord{}, false, runtime.ErrIdempotencyCollision
+	}
+	if record.State == messaging.DeliverySending && !record.ClaimUntil.After(now) {
+		record.State, record.LastErrorClass = messaging.DeliveryAmbiguous, "owner_lost"
+		record.ClaimOwner, record.ClaimUntil = "", time.Time{}
+		record.Version, record.UpdatedAt = record.Version+1, now
+		s.deliveries[key] = record
+		return record, false, nil
 	}
 	if record.State != messaging.DeliveryPending && (record.State != messaging.DeliveryRetryWait || record.NotBefore.After(now)) {
 		return record, false, nil
 	}
 	record.State, record.Attempt, record.Version, record.UpdatedAt = messaging.DeliverySending, record.Attempt+1, record.Version+1, now
+	record.ClaimOwner, record.ClaimUntil = claim.Owner, now.Add(claim.TTL)
 	s.deliveries[key] = record
 	return record, true, nil
 }
@@ -217,12 +233,33 @@ func (s *Store) FinishDelivery(ctx context.Context, in messaging.DeliveryRecord,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, exists := s.deliveries[in.DeliveryKey]
-	if !exists || old.Version != expectedVersion || old.State != messaging.DeliverySending || old.Plan != in.Plan {
+	if !exists || old.Version != expectedVersion || old.State != messaging.DeliverySending || old.Plan != in.Plan ||
+		old.ClaimOwner == "" || old.ClaimOwner != in.ClaimOwner || old.ClientRequestID != in.ClientRequestID {
 		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
 	}
+	in.ClaimOwner, in.ClaimUntil = "", time.Time{}
 	in.Version = expectedVersion + 1
 	in.Attempt = old.Attempt
 	in.UpdatedAt = time.Now().UTC()
+	s.deliveries[in.DeliveryKey] = in
+	return in, nil
+}
+
+func (s *Store) ReconcileDelivery(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.DeliveryRecord{}, err
+	}
+	if in.State != messaging.DeliverySent && in.State != messaging.DeliveryRetryWait && in.State != messaging.DeliveryFailed {
+		return messaging.DeliveryRecord{}, runtime.ErrCommitConflict
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, exists := s.deliveries[in.DeliveryKey]
+	if !exists || old.Version != expectedVersion || old.State != messaging.DeliveryAmbiguous || old.Plan != in.Plan || old.ClientRequestID != in.ClientRequestID {
+		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
+	}
+	in.ClaimOwner, in.ClaimUntil = "", time.Time{}
+	in.Version, in.Attempt, in.UpdatedAt = expectedVersion+1, old.Attempt, time.Now().UTC()
 	s.deliveries[in.DeliveryKey] = in
 	return in, nil
 }

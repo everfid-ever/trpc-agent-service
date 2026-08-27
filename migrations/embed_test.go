@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 11 {
+	if len(all) != 12 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestDeliveryAttemptRecoveryMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[11]
+	if migration.Version != "000012" || migration.Name != "delivery_attempt_recovery" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"client_request_id text", "claim_owner text", "claim_until timestamptz", "delivery_ledger_claim_check", "delivery_ledger_claim_expiry_idx", "state='ambiguous'"} {
+		if !strings.Contains(migration.Up+migration.Down, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

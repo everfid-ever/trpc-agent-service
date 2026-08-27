@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
@@ -11,8 +12,9 @@ import (
 )
 
 type adapterStub struct {
-	calls int
-	err   error
+	calls            int
+	err              error
+	clientRequestIDs []string
 }
 
 func (*adapterStub) ID() string                                            { return "fake" }
@@ -21,14 +23,29 @@ func (*adapterStub) Verify(context.Context, channel.CallbackRequest) error { ret
 func (*adapterStub) Decode(context.Context, channel.CallbackRequest) ([]channel.ProviderEvent, error) {
 	return nil, nil
 }
-func (s *adapterStub) Deliver(context.Context, channel.DeliveryRequest) (channel.DeliveryResult, error) {
+func (s *adapterStub) Deliver(_ context.Context, request channel.DeliveryRequest) (channel.DeliveryResult, error) {
 	s.calls++
+	s.clientRequestIDs = append(s.clientRequestIDs, request.ClientRequestID)
 	if s.err != nil {
 		return channel.DeliveryResult{}, s.err
 	}
 	return channel.DeliveryResult{ProviderMessageID: "provider-message", Delivered: true}, nil
 }
 func (*adapterStub) Capabilities() channel.Capabilities { return channel.Capabilities{Text: true} }
+
+type reconcilingAdapter struct {
+	adapterStub
+	result         channel.ReconciliationResult
+	reconcileCalls int
+}
+
+func (a *reconcilingAdapter) ReconcileDelivery(_ context.Context, request channel.ReconciliationRequest) (channel.ReconciliationResult, error) {
+	a.reconcileCalls++
+	if request.ClientRequestID == "" {
+		return channel.ReconciliationResult{}, errors.New("missing client request id")
+	}
+	return a.result, nil
+}
 
 type resolverStub struct{ adapter channel.Adapter }
 
@@ -43,7 +60,7 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &adapterStub{}
-	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
 	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
 	if err := service.Deliver(context.Background(), event); err != nil {
 		t.Fatal(err)
@@ -54,6 +71,57 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	if adapter.calls != 1 {
 		t.Fatalf("provider calls=%d", adapter.calls)
 	}
+	if len(adapter.clientRequestIDs) != 1 || adapter.clientRequestIDs[0] == "" {
+		t.Fatalf("client request IDs=%#v", adapter.clientRequestIDs)
+	}
+}
+
+func TestExpiredOwnerReconcilesDeliveredWithoutResend(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "terminal-text-v1", FormatVersion: "text-v1", ContentDigest: result.ContentDigest, SegmentCount: 1}
+	if _, acquired, err := store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Nanosecond}); err != nil || !acquired {
+		t.Fatalf("preclaim acquired=%t err=%v", acquired, err)
+	}
+	time.Sleep(time.Millisecond)
+	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationDelivered, ProviderMessageID: "provider-existing"}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner"}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.GetDelivery(context.Background(), key)
+	if err != nil || record.State != messaging.DeliverySent || record.ProviderMessageID != "provider-existing" || adapter.calls != 0 || adapter.reconcileCalls != 1 {
+		t.Fatalf("record=%#v calls=%d reconcile=%d err=%v", record, adapter.calls, adapter.reconcileCalls, err)
+	}
+}
+
+func TestExpiredOwnerReconcilesNotDeliveredThenRetriesSameRequestID(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "terminal-text-v1", FormatVersion: "text-v1", ContentDigest: result.ContentDigest, SegmentCount: 1}
+	claimed, acquired, err := store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Nanosecond})
+	if err != nil || !acquired {
+		t.Fatalf("preclaim=%#v acquired=%t err=%v", claimed, acquired, err)
+	}
+	time.Sleep(time.Millisecond)
+	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationNotDelivered}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner"}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	var deferred DeferredError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
+		t.Fatalf("reconcile err=%v", err)
+	}
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.calls != 1 || len(adapter.clientRequestIDs) != 1 || adapter.clientRequestIDs[0] != claimed.ClientRequestID {
+		t.Fatalf("calls=%d IDs=%#v claimed=%s", adapter.calls, adapter.clientRequestIDs, claimed.ClientRequestID)
+	}
 }
 
 func TestAmbiguousDeliveryIsNotBlindlyRetried(t *testing.T) {
@@ -61,13 +129,32 @@ func TestAmbiguousDeliveryIsNotBlindlyRetried(t *testing.T) {
 	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{err: AmbiguousError{Err: errors.New("response lost")}}
-	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
 	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
 	if err := service.Deliver(context.Background(), event); err == nil {
 		t.Fatal("expected ambiguous delivery error")
 	}
 	if err := service.Deliver(context.Background(), event); err == nil {
 		t.Fatal("expected unresolved ambiguous state")
+	}
+	if adapter.calls != 1 {
+		t.Fatalf("provider calls=%d", adapter.calls)
+	}
+}
+
+func TestRetryWaitIsDeferredInsteadOfReportedAsDelivered(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	adapter := &adapterStub{err: RetryAfterError{Err: errors.New("rate limited")}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", DefaultRetryDelay: time.Hour}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	if err := service.Deliver(context.Background(), event); err == nil {
+		t.Fatal("expected first provider error")
+	}
+	var deferred DeferredError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
+		t.Fatalf("expected deferred retry, got %v", err)
 	}
 	if adapter.calls != 1 {
 		t.Fatalf("provider calls=%d", adapter.calls)

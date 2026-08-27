@@ -48,10 +48,57 @@ type ReplyDestination struct {
 type ReplyPublisher interface {
 	PublishReply(context.Context, ReplyDestination, ReplyEvent) error
 }
-type DeliveryRequest struct{ Event ReplyEvent }
+
+type ReplyDelivery struct {
+	ID          string
+	Destination ReplyDestination
+	Event       ReplyEvent
+}
+
+type ReplyConsumerOptions struct {
+	ConsumerID string
+	Limit      int
+}
+
+// ReplyQueue is the durable account-level handoff between Reply Relay and a
+// Channel Adapter owner. A delivery is ACKed only after Delivery Ledger has
+// reached a durable state that makes replay safe.
+type ReplyQueue interface {
+	ConsumeReplies(context.Context, ReplyDestination, ReplyConsumerOptions, func(context.Context, ReplyDelivery) error) error
+	AckReply(context.Context, ReplyDestination, ReplyDelivery) error
+	ReclaimReplies(context.Context, ReplyDestination, ReplyConsumerOptions) ([]ReplyDelivery, error)
+}
+type DeliveryRequest struct {
+	Event           ReplyEvent
+	ClientRequestID string
+}
 type DeliveryResult struct {
 	ProviderMessageID string
 	Delivered         bool
+}
+
+type ReconciliationStatus string
+
+const (
+	ReconciliationDelivered    ReconciliationStatus = "delivered"
+	ReconciliationNotDelivered ReconciliationStatus = "not_delivered"
+	ReconciliationUnknown      ReconciliationStatus = "unknown"
+)
+
+type ReconciliationRequest struct {
+	Event           ReplyEvent
+	ClientRequestID string
+}
+
+type ReconciliationResult struct {
+	Status            ReconciliationStatus
+	ProviderMessageID string
+}
+
+// DeliveryReconciler is optional. Adapters without a provider query or stable
+// idempotency facility leave ambiguous deliveries pending for manual repair.
+type DeliveryReconciler interface {
+	ReconcileDelivery(context.Context, ReconciliationRequest) (ReconciliationResult, error)
 }
 
 type Adapter interface {

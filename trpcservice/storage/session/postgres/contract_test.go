@@ -154,11 +154,12 @@ func TestDeliveryLedgerPostgreSQL16(t *testing.T) {
 	store := messagingpostgres.New(db)
 	key := messaging.DeliveryKey{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", DeliveryKey: "r1_contract", SegmentNo: 0}
 	plan := messaging.DeliveryPlan{RendererVersion: "renderer-v1", FormatVersion: "text-v1", ContentDigest: strings.Repeat("a", 64), SegmentCount: 1}
-	claimed, acquired, err := store.ClaimDelivery(ctx, key, plan)
+	claim := messaging.DeliveryClaim{Owner: "adapter-1", TTL: time.Minute}
+	claimed, acquired, err := store.ClaimDelivery(ctx, key, plan, claim)
 	if err != nil || !acquired || claimed.State != messaging.DeliverySending {
 		t.Fatalf("claimed=%#v acquired=%t err=%v", claimed, acquired, err)
 	}
-	if duplicate, acquired, err := store.ClaimDelivery(ctx, key, plan); err != nil || acquired || duplicate.Version != claimed.Version {
+	if duplicate, acquired, err := store.ClaimDelivery(ctx, key, plan, claim); err != nil || acquired || duplicate.Version != claimed.Version {
 		t.Fatalf("duplicate=%#v acquired=%t err=%v", duplicate, acquired, err)
 	}
 	claimed.State = messaging.DeliveryAmbiguous
@@ -167,8 +168,24 @@ func TestDeliveryLedgerPostgreSQL16(t *testing.T) {
 	if err != nil || ambiguous.State != messaging.DeliveryAmbiguous {
 		t.Fatalf("ambiguous=%#v err=%v", ambiguous, err)
 	}
-	if replay, acquired, err := store.ClaimDelivery(ctx, key, plan); err != nil || acquired || replay.State != messaging.DeliveryAmbiguous {
+	if replay, acquired, err := store.ClaimDelivery(ctx, key, plan, claim); err != nil || acquired || replay.State != messaging.DeliveryAmbiguous {
 		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
+	}
+	ambiguous.State, ambiguous.ProviderMessageID = messaging.DeliverySent, "provider-reconciled"
+	reconciled, err := store.ReconcileDelivery(ctx, ambiguous, ambiguous.Version)
+	if err != nil || reconciled.State != messaging.DeliverySent || reconciled.ProviderMessageID != "provider-reconciled" {
+		t.Fatalf("reconciled=%#v err=%v", reconciled, err)
+	}
+
+	crashKey := messaging.DeliveryKey{TenantID: key.TenantID, DeliveryKey: "r1_crash", SegmentNo: 0}
+	crashed, acquired, err := store.ClaimDelivery(ctx, crashKey, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Microsecond})
+	if err != nil || !acquired {
+		t.Fatalf("crashed=%#v acquired=%t err=%v", crashed, acquired, err)
+	}
+	time.Sleep(time.Millisecond)
+	recovered, acquired, err := store.ClaimDelivery(ctx, crashKey, plan, messaging.DeliveryClaim{Owner: "new-owner", TTL: time.Minute})
+	if err != nil || acquired || recovered.State != messaging.DeliveryAmbiguous || recovered.LastErrorClass != "owner_lost" || recovered.ClientRequestID != crashed.ClientRequestID {
+		t.Fatalf("recovered=%#v acquired=%t err=%v", recovered, acquired, err)
 	}
 }
 
