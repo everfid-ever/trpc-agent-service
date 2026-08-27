@@ -4,6 +4,8 @@ package contract
 import (
 	"context"
 	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 )
 
 // AmbiguousDeliveryError means the provider might have accepted a delivery,
@@ -100,8 +102,9 @@ type ScopedVerifierHandle interface {
 }
 
 type VerifiedBinding struct {
-	TenantID, AgentAppID, ChannelBindingID string
-	TenantVersion, BindingVersion          int64
+	TenantID, AgentAppID, ChannelBindingID, Channel, ExternalAccountID string
+	TenantVersion, BindingVersion                                      int64
+	IdentitySecretRef, SessionSecretRef                                secrets.SecretRef
 }
 
 type IngressBindingResolver interface {

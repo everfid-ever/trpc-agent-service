@@ -25,8 +25,9 @@ func (s *Store) PutBindingRoute(ctx context.Context, route ingress.BindingRoute)
 		return err
 	}
 	if route.OpaqueBindingID == "" || route.Channel == "" || route.RouteKeyDigest == "" || route.TenantID == "" ||
-		route.AgentAppID == "" || route.ChannelBindingID == "" || route.TenantVersion < 1 || route.BindingVersion < 1 ||
-		route.SecretRef.Ref == "" || route.SecretRef.Version < 1 {
+		route.AgentAppID == "" || route.ChannelBindingID == "" || route.ExternalAccountID == "" || route.TenantVersion < 1 || route.BindingVersion < 1 ||
+		route.SecretRef.Ref == "" || route.SecretRef.Version < 1 || route.IdentitySecretRef.Ref == "" || route.IdentitySecretRef.Version < 1 ||
+		route.SessionSecretRef.Ref == "" || route.SessionSecretRef.Version < 1 {
 		return runtime.ErrInvariantViolation
 	}
 	key := route.Channel + "\x00" + route.RouteKeyDigest

@@ -229,6 +229,8 @@ func translate(err error) error {
 			return runtime.ErrIdempotencyCollision
 		case "42501":
 			return runtime.ErrTenantScope
+		case "P0904":
+			return runtime.ErrPreprocessNotReady
 		case "XX001":
 			return runtime.ErrInvariantViolation
 		case "P0002":

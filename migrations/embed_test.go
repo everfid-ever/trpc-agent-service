@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 14 {
+	if len(all) != 15 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestChannelPreprocessPipelineMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[14]
+	if migration.Version != "000015" || migration.Name != "channel_preprocess_pipeline" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"identity_secret_ref", "session_secret_ref", "CREATE TABLE public.preprocess_job", "preprocess_job_claim_idx", "execution_requires_preprocess", "reject_unpreprocessed_execution", "ERRCODE = 'P0904'"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

@@ -152,8 +152,9 @@ func TestCandidateContextMutationAndRouteRotationAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	rotated := ingress.BindingRoute{OpaqueBindingID: "opaque-binding-0001", Channel: "feishu", RouteKeyDigest: "route-digest-0001",
-		TenantID: "tenant-a", AgentAppID: "app", ChannelBindingID: "binding", TenantVersion: 4, BindingVersion: 2,
-		SecretRef: secrets.SecretRef{Ref: "secret://feishu", Version: 1}, Enabled: true}
+		TenantID: "tenant-a", AgentAppID: "app", ChannelBindingID: "binding", ExternalAccountID: "account", TenantVersion: 4, BindingVersion: 2,
+		SecretRef: secrets.SecretRef{Ref: "secret://feishu", Version: 1}, IdentitySecretRef: secrets.SecretRef{Ref: "secret://identity", Version: 1},
+		SessionSecretRef: secrets.SecretRef{Ref: "secret://session", Version: 1}, Enabled: true}
 	if err := store.PutBindingRoute(context.Background(), rotated); err != nil {
 		t.Fatal(err)
 	}
@@ -210,8 +211,9 @@ func fixture(t *testing.T) (ingress.Resolver, *storememory.Store) {
 	secretProvider := secretmemory.New()
 	route := ingress.BindingRoute{
 		OpaqueBindingID: "opaque-binding-0001", Channel: "feishu", RouteKeyDigest: "route-digest-0001",
-		TenantID: "tenant-a", AgentAppID: "app", ChannelBindingID: "binding", TenantVersion: 3, BindingVersion: 1,
-		SecretRef: secrets.SecretRef{Ref: "secret://feishu", Version: 1}, Enabled: true,
+		TenantID: "tenant-a", AgentAppID: "app", ChannelBindingID: "binding", ExternalAccountID: "account", TenantVersion: 3, BindingVersion: 1,
+		SecretRef: secrets.SecretRef{Ref: "secret://feishu", Version: 1}, IdentitySecretRef: secrets.SecretRef{Ref: "secret://identity", Version: 1},
+		SessionSecretRef: secrets.SecretRef{Ref: "secret://session", Version: 1}, Enabled: true,
 	}
 	if err := store.PutBindingRoute(context.Background(), route); err != nil {
 		t.Fatal(err)

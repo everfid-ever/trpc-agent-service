@@ -32,8 +32,10 @@ const (
 type BindingRoute struct {
 	OpaqueBindingID, Channel, RouteKeyDigest string
 	TenantID, AgentAppID, ChannelBindingID   string
+	ExternalAccountID                        string
 	TenantVersion, BindingVersion            int64
 	SecretRef                                secrets.SecretRef
+	IdentitySecretRef, SessionSecretRef      secrets.SecretRef
 	Enabled                                  bool
 }
 
@@ -146,7 +148,9 @@ func (r Resolver) PromoteVerified(ctx context.Context, candidate channel.Candida
 	}
 	return channel.VerifiedBinding{
 		TenantID: route.TenantID, AgentAppID: route.AgentAppID, ChannelBindingID: route.ChannelBindingID,
+		Channel: route.Channel, ExternalAccountID: route.ExternalAccountID,
 		TenantVersion: route.TenantVersion, BindingVersion: route.BindingVersion,
+		IdentitySecretRef: route.IdentitySecretRef, SessionSecretRef: route.SessionSecretRef,
 	}, nil
 }
 

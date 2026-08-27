@@ -17,6 +17,8 @@ type Purpose string
 const (
 	PurposeChannelVerify  Purpose = "channel_verify"
 	PurposeChannelSend    Purpose = "channel_send"
+	PurposeTenantIdentity Purpose = "tenant_identity"
+	PurposeTenantSession  Purpose = "tenant_session"
 	PurposeModelCall      Purpose = "model_call"
 	PurposeToolCall       Purpose = "tool_call"
 	PurposeBackendConnect Purpose = "backend_connect"

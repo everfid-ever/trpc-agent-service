@@ -16,8 +16,9 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 func (s *Store) PutBindingRoute(ctx context.Context, route ingress.BindingRoute) error {
 	if s == nil || s.db == nil || route.OpaqueBindingID == "" || route.Channel == "" || route.RouteKeyDigest == "" ||
-		route.TenantID == "" || route.AgentAppID == "" || route.ChannelBindingID == "" || route.TenantVersion < 1 ||
-		route.BindingVersion < 1 || route.SecretRef.Ref == "" || route.SecretRef.Version < 1 {
+		route.TenantID == "" || route.AgentAppID == "" || route.ChannelBindingID == "" || route.ExternalAccountID == "" || route.TenantVersion < 1 ||
+		route.BindingVersion < 1 || route.SecretRef.Ref == "" || route.SecretRef.Version < 1 ||
+		route.IdentitySecretRef.Ref == "" || route.IdentitySecretRef.Version < 1 || route.SessionSecretRef.Ref == "" || route.SessionSecretRef.Version < 1 {
 		return runtime.ErrInvariantViolation
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -26,16 +27,16 @@ func (s *Store) PutBindingRoute(ctx context.Context, route ingress.BindingRoute)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var tenantVersion, secretVersion int64
-	var channel, agentAppID, secretRef string
-	err = tx.QueryRowContext(ctx, `SELECT t.version,cb.channel,cb.agent_app_id,cb.secret_ref,cb.secret_version
+	var channel, agentAppID, externalAccountID, secretRef string
+	err = tx.QueryRowContext(ctx, `SELECT t.version,cb.channel,cb.agent_app_id,cb.external_account_id,cb.secret_ref,cb.secret_version
 FROM channel_binding cb JOIN tenant t ON t.tenant_id=cb.tenant_id
 WHERE cb.tenant_id=$1 AND cb.config_version=$2 AND cb.binding_id=$3`,
 		route.TenantID, route.BindingVersion, route.ChannelBindingID).
-		Scan(&tenantVersion, &channel, &agentAppID, &secretRef, &secretVersion)
+		Scan(&tenantVersion, &channel, &agentAppID, &externalAccountID, &secretRef, &secretVersion)
 	if err != nil {
 		return classify(err)
 	}
-	if tenantVersion != route.TenantVersion || channel != route.Channel || agentAppID != route.AgentAppID ||
+	if tenantVersion != route.TenantVersion || channel != route.Channel || agentAppID != route.AgentAppID || externalAccountID != route.ExternalAccountID ||
 		secretRef != route.SecretRef.Ref || secretVersion != route.SecretRef.Version {
 		return runtime.ErrVersionMismatch
 	}
@@ -61,24 +62,31 @@ WHERE channel=$1 AND route_key_digest=$2 AND opaque_binding_id=$5 AND binding_ve
 			return classify(err)
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO channel_binding_locator(opaque_binding_id,tenant_id,config_version,binding_id)
-VALUES($1,$2,$3,$4) ON CONFLICT (opaque_binding_id) DO NOTHING`, route.OpaqueBindingID, route.TenantID,
-		route.BindingVersion, route.ChannelBindingID); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO channel_binding_locator(opaque_binding_id,tenant_id,config_version,binding_id,
+identity_secret_ref,identity_secret_version,session_secret_ref,session_secret_version)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (opaque_binding_id) DO NOTHING`, route.OpaqueBindingID, route.TenantID,
+		route.BindingVersion, route.ChannelBindingID, route.IdentitySecretRef.Ref, route.IdentitySecretRef.Version,
+		route.SessionSecretRef.Ref, route.SessionSecretRef.Version); err != nil {
 		return classify(err)
 	}
-	var tenantID, bindingID string
-	var configVersion int64
-	if err = tx.QueryRowContext(ctx, `SELECT tenant_id,config_version,binding_id FROM channel_binding_locator WHERE opaque_binding_id=$1 FOR UPDATE`,
-		route.OpaqueBindingID).Scan(&tenantID, &configVersion, &bindingID); err != nil {
+	var tenantID, bindingID, identityRef, sessionRef string
+	var configVersion, identityVersion, sessionVersion int64
+	if err = tx.QueryRowContext(ctx, `SELECT tenant_id,config_version,binding_id,identity_secret_ref,identity_secret_version,
+session_secret_ref,session_secret_version FROM channel_binding_locator WHERE opaque_binding_id=$1 FOR UPDATE`,
+		route.OpaqueBindingID).Scan(&tenantID, &configVersion, &bindingID, &identityRef, &identityVersion, &sessionRef, &sessionVersion); err != nil {
 		return classify(err)
 	}
-	if tenantID != route.TenantID || bindingID != route.ChannelBindingID || configVersion != route.BindingVersion {
+	if tenantID != route.TenantID || bindingID != route.ChannelBindingID || configVersion != route.BindingVersion ||
+		identityRef != route.IdentitySecretRef.Ref || identityVersion != route.IdentitySecretRef.Version ||
+		sessionRef != route.SessionSecretRef.Ref || sessionVersion != route.SessionSecretRef.Version {
 		if tenantID != route.TenantID || bindingID != route.ChannelBindingID || configVersion >= route.BindingVersion {
 			return runtime.ErrIdempotencyCollision
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE channel_binding_locator SET config_version=$2
+		if _, err = tx.ExecContext(ctx, `UPDATE channel_binding_locator SET config_version=$2,identity_secret_ref=$6,
+identity_secret_version=$7,session_secret_ref=$8,session_secret_version=$9
 WHERE opaque_binding_id=$1 AND tenant_id=$3 AND binding_id=$4 AND config_version=$5`, route.OpaqueBindingID,
-			route.BindingVersion, route.TenantID, route.ChannelBindingID, configVersion); err != nil {
+			route.BindingVersion, route.TenantID, route.ChannelBindingID, configVersion, route.IdentitySecretRef.Ref,
+			route.IdentitySecretRef.Version, route.SessionSecretRef.Ref, route.SessionSecretRef.Version); err != nil {
 			return classify(err)
 		}
 	}
@@ -253,13 +261,17 @@ func getRoute(ctx context.Context, q queryer, channel, routeDigest, opaqueID str
 	var route ingress.BindingRoute
 	var enabled bool
 	err := q.QueryRowContext(ctx, `SELECT pr.opaque_binding_id,pr.channel,pr.route_key_digest,l.tenant_id,cb.agent_app_id,
-cb.binding_id,t.version,pr.binding_version,cb.secret_ref,cb.secret_version,(pr.enabled AND t.active_config_version=l.config_version)
+cb.binding_id,cb.external_account_id,t.version,pr.binding_version,cb.secret_ref,cb.secret_version,
+COALESCE(l.identity_secret_ref,''),COALESCE(l.identity_secret_version,0),COALESCE(l.session_secret_ref,''),COALESCE(l.session_secret_version,0),
+(pr.enabled AND t.active_config_version=l.config_version)
 FROM channel_public_route pr JOIN channel_binding_locator l ON l.opaque_binding_id=pr.opaque_binding_id
 JOIN channel_binding cb ON cb.tenant_id=l.tenant_id AND cb.config_version=l.config_version AND cb.binding_id=l.binding_id
 JOIN tenant t ON t.tenant_id=l.tenant_id
 WHERE pr.channel=$1 AND pr.route_key_digest=$2 AND ($3='' OR pr.opaque_binding_id=$3)`, channel, routeDigest, opaqueID).
 		Scan(&route.OpaqueBindingID, &route.Channel, &route.RouteKeyDigest, &route.TenantID, &route.AgentAppID,
-			&route.ChannelBindingID, &route.TenantVersion, &route.BindingVersion, &route.SecretRef.Ref, &route.SecretRef.Version, &enabled)
+			&route.ChannelBindingID, &route.ExternalAccountID, &route.TenantVersion, &route.BindingVersion, &route.SecretRef.Ref,
+			&route.SecretRef.Version, &route.IdentitySecretRef.Ref, &route.IdentitySecretRef.Version,
+			&route.SessionSecretRef.Ref, &route.SessionSecretRef.Version, &enabled)
 	if err != nil {
 		return ingress.BindingRoute{}, classify(err)
 	}

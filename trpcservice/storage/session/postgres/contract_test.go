@@ -16,6 +16,8 @@ import (
 	ingresspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
+	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretmemory "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/inmemory"
@@ -108,7 +110,8 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	ingressStore := ingresspostgres.New(db)
 	bindingRoute := ingress.BindingRoute{OpaqueBindingID: "opaque-contract-binding", Channel: "fake", RouteKeyDigest: "route-digest-contract",
 		TenantID: key.TenantID, AgentAppID: key.AgentAppID, ChannelBindingID: "contract-binding", TenantVersion: tenantVersion,
-		BindingVersion: 1, SecretRef: secrets.SecretRef{Ref: "secret://contract", Version: 1}, Enabled: true}
+		ExternalAccountID: "contract-account", BindingVersion: 1, SecretRef: secrets.SecretRef{Ref: "secret://contract", Version: 1},
+		IdentitySecretRef: secrets.SecretRef{Ref: "secret://identity", Version: 1}, SessionSecretRef: secrets.SecretRef{Ref: "secret://session", Version: 1}, Enabled: true}
 	if err := ingressStore.PutBindingRoute(ctx, bindingRoute); err != nil {
 		t.Fatal(err)
 	}
@@ -165,6 +168,53 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	}
 	if _, err := expiryResolver.PromoteVerified(ctx, expiringCandidate, expiringReceipt); !errors.Is(err, runtime.ErrVersionConflict) {
 		t.Fatalf("expired verified candidate promoted: %v", err)
+	}
+	preprocessStore := preprocesspostgres.New(db)
+	preprocessKey := messaging.InboxKey{TenantID: key.TenantID, Channel: "fake", ExternalAccountID: "contract-account", ExternalMessageID: "preprocess-message"}
+	preprocessInbox, originalJob, err := preprocessStore.ClaimInboxAndSchedule(ctx, preprocess.ClaimRequest{
+		Inbox: messaging.ClaimInboxRequest{InboxKey: preprocessKey, AgentAppID: key.AgentAppID, SessionID: "preprocess-session",
+			ExternalChatID: "contract-chat", ExternalUserID: "contract-user", PayloadDigest: strings.Repeat("9", 64),
+			KeyVersion: 1, InitialState: messaging.InboxPreprocessPending},
+		TenantVersion: tenantVersion, UserID: "derived-user", TraceParent: "preprocess-trace",
+	})
+	if err != nil || originalJob.State != preprocess.Pending {
+		t.Fatalf("preprocess claim inbox=%#v job=%#v err=%v", preprocessInbox, originalJob, err)
+	}
+	traceRetry := preprocess.ClaimRequest{
+		Inbox: messaging.ClaimInboxRequest{InboxKey: preprocessKey, AgentAppID: key.AgentAppID, SessionID: "preprocess-session",
+			ExternalChatID: "contract-chat", ExternalUserID: "contract-user", PayloadDigest: strings.Repeat("9", 64),
+			KeyVersion: 1, InitialState: messaging.InboxPreprocessPending},
+		TenantVersion: tenantVersion, UserID: "derived-user", TraceParent: "retry-trace",
+	}
+	_, retriedJob, err := preprocessStore.ClaimInboxAndSchedule(ctx, traceRetry)
+	if err != nil || retriedJob.JobID != originalJob.JobID || retriedJob.TraceParent != originalJob.TraceParent {
+		t.Fatalf("trace-only retry job=%#v err=%v", retriedJob, err)
+	}
+	preprocessRequest := request
+	preprocessRequest.RequestID, preprocessRequest.SessionID, preprocessRequest.UserID = preprocessInbox.RequestID, originalJob.SessionID, originalJob.UserID
+	preprocessRequest.PayloadRef, preprocessRequest.TraceParent = preprocessInbox.PayloadRef, originalJob.TraceParent
+	if _, err := tasks.PrepareDispatch(ctx, preprocessRequest); !errors.Is(err, runtime.ErrPreprocessNotReady) {
+		t.Fatalf("preprocess bypass dispatch=%v", err)
+	}
+	claimClock := time.Now().UTC()
+	claimedJobs, err := preprocessStore.ClaimJobs(ctx, preprocess.ClaimOptions{Owner: "preprocess-contract", Now: claimClock, TTL: time.Minute, Limit: 10})
+	if err != nil || len(claimedJobs) != 1 || claimedJobs[0].JobID != originalJob.JobID {
+		t.Fatalf("claimed preprocess jobs=%#v err=%v", claimedJobs, err)
+	}
+	readyJob, err := preprocessStore.FinishReady(ctx, claimedJobs[0])
+	if err != nil || readyJob.State != preprocess.Ready {
+		t.Fatalf("ready preprocess job=%#v err=%v", readyJob, err)
+	}
+	preprocessPrepared, err := tasks.PrepareDispatch(ctx, preprocessRequest)
+	if err != nil || !preprocessPrepared.Accepted {
+		t.Fatalf("prepared after preprocess=%#v err=%v", preprocessPrepared, err)
+	}
+	readyJobs, err := preprocessStore.ClaimReadyForDispatch(ctx, preprocess.ClaimOptions{Owner: "dispatch-contract", Now: claimClock, TTL: time.Minute, Limit: 10})
+	if err != nil || len(readyJobs) != 1 {
+		t.Fatalf("ready jobs=%#v err=%v", readyJobs, err)
+	}
+	if _, err := preprocessStore.MarkDispatched(ctx, readyJobs[0], claimClock.Add(time.Second)); err != nil {
+		t.Fatal(err)
 	}
 	repeated, err := tasks.PrepareDispatch(ctx, request)
 	if err != nil || repeated.Envelope != prepared.Envelope {
