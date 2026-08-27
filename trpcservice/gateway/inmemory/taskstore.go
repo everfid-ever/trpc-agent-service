@@ -83,6 +83,15 @@ func (s *TaskStore) RequestCancel(ctx context.Context, in gateway.CancelRequest)
 	if err := ctx.Err(); err != nil {
 		return gateway.CancelResult{}, err
 	}
+	if in.TenantID == "" || in.RequestID == "" {
+		return gateway.CancelResult{}, runtime.ErrTenantScope
+	}
+	if in.ExpectedVersion < 0 {
+		return gateway.CancelResult{}, runtime.ErrVersionConflict
+	}
+	if in.ActorID == "" || in.ReasonCode == "" {
+		return gateway.CancelResult{}, runtime.ErrCommitConflict
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := executionKey{in.TenantID, in.RequestID}
@@ -91,11 +100,19 @@ func (s *TaskStore) RequestCancel(ctx context.Context, in gateway.CancelRequest)
 		return gateway.CancelResult{}, runtime.ErrNotFound
 	}
 	if status.Outcome.Terminal() {
-		return gateway.CancelResult{Accepted: false}, nil
+		return gateway.CancelResult{Accepted: false, Version: status.Version, CancelVersion: status.CancelVersion}, nil
 	}
-	status.Outcome = runtime.OutcomeCancelled
+	if status.CancelRequested {
+		return gateway.CancelResult{Accepted: true, Version: status.Version, CancelVersion: status.CancelVersion}, nil
+	}
+	if status.Version != in.ExpectedVersion {
+		return gateway.CancelResult{}, runtime.ErrVersionConflict
+	}
+	status.Version++
+	status.CancelRequested = true
+	status.CancelVersion++
 	s.executions[k] = status
-	return gateway.CancelResult{Accepted: true, Version: in.ExpectedVersion + 1}, nil
+	return gateway.CancelResult{Accepted: true, Version: status.Version, CancelVersion: status.CancelVersion}, nil
 }
 
 func (s *TaskStore) ParkInput(ctx context.Context, in gateway.ParkRequest) (gateway.ParkResult, error) {

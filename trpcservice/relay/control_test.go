@@ -14,6 +14,23 @@ func (s *controlPublisherStub) PublishTenantControl(_ context.Context, event Ten
 	return nil
 }
 
+type executionControlPublisherStub struct{ events []ExecutionControlEvent }
+
+func (s *executionControlPublisherStub) PublishExecutionControl(_ context.Context, event ExecutionControlEvent) error {
+	s.events = append(s.events, event)
+	return nil
+}
+
+func TestExecutionControlRelayPublishesCancellationHint(t *testing.T) {
+	outbox := &outboxStub{records: []messaging.OutboxRecord{{TenantID: "tenant", OutboxID: "control", Kind: "execution-control", AggregateID: "request", IdempotencyKey: "cancel:1", PayloadRef: "cancel-intent://tenant/request/1", EventSeq: 1, Version: 1}}}
+	publisher := &executionControlPublisherStub{}
+	r := ExecutionControlRelay{Outbox: outbox, Controls: publisher, Owner: "execution-control-relay"}
+	count, err := r.RunOnce(context.Background())
+	if err != nil || count != 1 || len(publisher.events) != 1 || publisher.events[0].Version != 1 || !outbox.published {
+		t.Fatalf("count=%d err=%v events=%#v published=%t", count, err, publisher.events, outbox.published)
+	}
+}
+
 func TestTenantControlRelayPublishesVersionedEvent(t *testing.T) {
 	outbox := &outboxStub{records: []messaging.OutboxRecord{{TenantID: "tenant", OutboxID: "control", Kind: "tenant-control", AggregateID: "tenant", IdempotencyKey: "tenant:4", PayloadRef: "tenant://tenant/4", EventSeq: 4, Version: 1}}}
 	publisher := &controlPublisherStub{}

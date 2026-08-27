@@ -207,6 +207,8 @@ func translate(err error) error {
 			return runtime.ErrInvariantViolation
 		case "55000":
 			return runtime.ErrInputNotReady
+		case "P0902":
+			return runtime.ErrCancelRequested
 		case "42501":
 			return runtime.ErrTenantScope
 		}

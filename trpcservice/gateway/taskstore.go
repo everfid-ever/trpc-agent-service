@@ -25,17 +25,24 @@ type PreparedDispatch struct {
 }
 type ExecutionKey struct{ TenantID, RequestID string }
 type ExecutionStatus struct {
-	Envelope  runtime.ExecutionEnvelope
-	Outcome   runtime.Outcome
-	ResultRef string
+	Envelope        runtime.ExecutionEnvelope
+	Outcome         runtime.Outcome
+	ResultRef       string
+	Version         int64
+	CancelRequested bool
+	CancelVersion   int64
 }
 type CancelRequest struct {
 	TenantID, RequestID string
 	ExpectedVersion     int64
+	ActorID             string
+	ReasonCode          string
+	TraceParent         string
 }
 type CancelResult struct {
-	Accepted bool
-	Version  int64
+	Accepted      bool
+	Version       int64
+	CancelVersion int64
 }
 type ParkRequest struct {
 	TenantID, RequestID string
@@ -98,9 +105,13 @@ type ParkedInputStore interface {
 	ListActionableParkedInputs(context.Context, time.Time, int) ([]ExecutionKey, error)
 }
 
+type ExecutionReader interface {
+	GetExecution(context.Context, ExecutionKey) (ExecutionStatus, error)
+}
+
 type TaskStore interface {
 	PrepareDispatch(context.Context, PrepareDispatchRequest) (PreparedDispatch, error)
-	GetExecution(context.Context, ExecutionKey) (ExecutionStatus, error)
+	ExecutionReader
 	RequestCancel(context.Context, CancelRequest) (CancelResult, error)
 	InputParker
 }

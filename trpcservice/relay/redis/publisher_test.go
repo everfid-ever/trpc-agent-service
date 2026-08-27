@@ -33,7 +33,37 @@ func TestPublisherRedis7Contract(t *testing.T) {
 	if err := publisher.PublishTenantControl(context.Background(), relay.TenantControlEvent{TenantID: "tenant", Kind: "tenant-control", AggregateID: "tenant", IdempotencyKey: "tenant:2", PayloadRef: "tenant://tenant/2", Version: 2}); err != nil {
 		t.Fatal(err)
 	}
-	for _, stream := range []string{publisher.ReplyStream(destination), publisher.WakeupStream(), publisher.TenantControlStream()} {
+	if err := publisher.PublishExecutionControl(context.Background(), relay.ExecutionControlEvent{TenantID: "tenant", Kind: "execution-control", AggregateID: "request", IdempotencyKey: "cancel:1", PayloadRef: "cancel-intent://tenant/request/1", Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	queue, err := NewExecutionControlQueue(client, publisher, ExecutionControlQueueConfig{Group: "runtime-node", ReadBlock: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumeCtx, cancelConsume := context.WithCancel(context.Background())
+	delivered := make(chan struct{})
+	consumeDone := make(chan error, 1)
+	go func() {
+		consumeDone <- queue.ConsumeExecutionControl(consumeCtx, relay.ExecutionControlConsumerOptions{ConsumerID: "worker-1"}, func(_ context.Context, delivery relay.ExecutionControlDelivery) error {
+			if delivery.Event.AggregateID != "request" {
+				t.Errorf("delivery=%#v", delivery)
+			}
+			close(delivered)
+			return nil
+		})
+	}()
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("execution-control event was not delivered")
+	}
+	cancelConsume()
+	select {
+	case <-consumeDone:
+	case <-time.After(time.Second):
+		t.Fatal("execution-control consumer did not stop")
+	}
+	for _, stream := range []string{publisher.ReplyStream(destination), publisher.WakeupStream(), publisher.TenantControlStream(), publisher.ExecutionControlStream()} {
 		if length, err := client.XLen(context.Background(), stream).Result(); err != nil || length < 1 {
 			t.Fatalf("stream=%s length=%d err=%v", stream, length, err)
 		}

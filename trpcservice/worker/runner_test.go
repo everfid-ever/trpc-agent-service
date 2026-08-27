@@ -2,16 +2,19 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
+	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	sessionmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -22,6 +25,72 @@ type staticModelResolver struct{ model model.Model }
 
 func (r staticModelResolver) ResolveModel(context.Context, string, profile.VersionedRef) (model.Model, error) {
 	return r.model, nil
+}
+
+type cancelledTaskStub struct{ taskStub }
+
+func (s cancelledTaskStub) GetExecution(context.Context, gateway.ExecutionKey) (gateway.ExecutionStatus, error) {
+	return gateway.ExecutionStatus{Envelope: s.envelope, Outcome: runtime.OutcomeRunning, Version: 2, CancelRequested: true, CancelVersion: 1}, nil
+}
+
+func TestRunnerExecutorRejectsWorkAndCommitsDurableCancellation(t *testing.T) {
+	envelope := runtime.ExecutionEnvelope{
+		SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1,
+		AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1,
+		RequestID: "request", SessionID: "session", UserID: "user", Channel: "fake", InputSeq: 1,
+		PayloadRef: "payload://request", CreatedAt: time.Now().UTC(),
+	}
+	sessions := sessionmemory.New()
+	executor := RunnerExecutor{Tasks: cancelledTaskStub{taskStub{envelope: envelope}}, Sessions: sessions,
+		Profiles: profilememory.NewResolver(), Bundles: profilememory.NewBundleManager(nil), Payloads: messagingmemory.New(),
+		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(context.Context, *event.Event) (string, string, error) { return "event", "event://cancel", nil }}
+	if err := executor.ExecuteWithLease(context.Background(), envelope, 7, nil); !errors.Is(err, runtime.ErrCancelRequested) {
+		t.Fatalf("execute after cancel=%v", err)
+	}
+	if err := executor.CancelWithLease(context.Background(), envelope, 7, func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := sessions.GetTerminalByInputSeq(context.Background(), sessionstore.TerminalKey{
+		SessionKey: sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}, InputSeq: 1,
+	})
+	if err != nil || terminal.Outcome != runtime.OutcomeCancelled {
+		t.Fatalf("terminal=%#v err=%v", terminal, err)
+	}
+	_, outbox, _ := sessions.SnapshotEffects(sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID})
+	if len(outbox) != 1 || outbox[0].Kind != "audit" || outbox[0].IdempotencyKey != "cancel-terminal:request" {
+		t.Fatalf("outbox=%#v", outbox)
+	}
+}
+
+func TestDrainRunnerEventsUnblocksProducer(t *testing.T) {
+	events := make(chan *event.Event)
+	produced := make(chan struct{})
+	go func() {
+		events <- &event.Event{}
+		events <- &event.Event{}
+		close(events)
+		close(produced)
+	}()
+	drainRunnerEvents(events, time.Second)
+	select {
+	case <-produced:
+	case <-time.After(time.Second):
+		t.Fatal("event producer remained blocked")
+	}
+}
+
+type blockingRunner struct{ release chan struct{} }
+
+func (r blockingRunner) Close() error { <-r.release; return nil }
+
+func TestCloseRunnerHonorsBoundedTimeout(t *testing.T) {
+	runner := blockingRunner{release: make(chan struct{})}
+	started := time.Now()
+	closeRunner(runner, nil, 10*time.Millisecond)
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("closeRunner blocked for %s", elapsed)
+	}
+	close(runner.release)
 }
 
 func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing.T) {

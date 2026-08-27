@@ -151,7 +151,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		}
 		consumer := worker.Consumer{
 			WorkerID: workerID, Shards: shards, Broker: streamBroker, Leases: leases,
-			Sessions: sessions, Parker: tasks, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
+			Sessions: sessions, Parker: tasks, Statuses: tasks, Executor: executor, LeaseTTL: 2 * time.Second, RetryWait: 5 * time.Millisecond, ReclaimInterval: 10 * time.Millisecond,
 			OnDeliveryError: func(_ context.Context, delivery broker.Delivery, err error) {
 				t.Logf("worker delivery error request=%s: %v", delivery.Envelope.RequestID, err)
 			},
@@ -417,6 +417,53 @@ park_deadline=now()+interval '1 minute',version=version+1 WHERE tenant_id=$1 AND
 	repaired, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "lost-wakeup-request"})
 	if err != nil || repaired.Outcome != runtime.OutcomeQueued || repairBroker.calls != 1 {
 		t.Fatalf("repaired=%#v publish calls=%d err=%v", repaired, repairBroker.calls, err)
+	}
+	// A cancel request persists intent without manufacturing a terminal outside
+	// CommitTurn. Non-cancelled commits are rejected atomically, then the Worker
+	// uses its valid fence to commit cancelled and advance the input gate.
+	cancelSession := "cancel-session"
+	if _, err := db.Exec(`INSERT INTO session_head(tenant_id,agent_app_id,session_id) VALUES($1,$2,$3)`, tenantA, appID, cancelSession); err != nil {
+		t.Fatal(err)
+	}
+	insertFenceExecution(t, db, tenantA, first.RequestID, cancelSession, "cancel-request", 1)
+	cancelStatus, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "cancel-request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelResult, err := tasks.RequestCancel(context.Background(), gateway.CancelRequest{TenantID: tenantA, RequestID: "cancel-request", ExpectedVersion: cancelStatus.Version,
+		ActorID: "runtime-test", ReasonCode: "requested", TraceParent: "00-00000000000000000000000000000001-0000000000000001-01"})
+	if err != nil || !cancelResult.Accepted || cancelResult.CancelVersion != 1 {
+		t.Fatalf("cancel result=%#v err=%v", cancelResult, err)
+	}
+	retryResult, retryErr := tasks.RequestCancel(context.Background(), gateway.CancelRequest{TenantID: tenantA, RequestID: "cancel-request", ExpectedVersion: cancelStatus.Version,
+		ActorID: "runtime-test", ReasonCode: "requested", TraceParent: "00-00000000000000000000000000000001-0000000000000001-01"})
+	if retryErr != nil || !retryResult.Accepted || retryResult.Version != cancelResult.Version || retryResult.CancelVersion != cancelResult.CancelVersion {
+		t.Fatalf("cancel retry=%#v err=%v", retryResult, retryErr)
+	}
+	cancelStatus, err = tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "cancel-request"})
+	if err != nil || cancelStatus.Outcome != runtime.OutcomeQueued || !cancelStatus.CancelRequested {
+		t.Fatalf("cancel intent status=%#v err=%v", cancelStatus, err)
+	}
+	cancelKey := sessionstore.SessionKey{TenantID: tenantA, AgentAppID: appID, SessionID: cancelSession}
+	cancelHead, err := sessions.OpenForRun(context.Background(), sessionstore.OpenForRunRequest{SessionKey: cancelKey, RequestID: "cancel-request", InputSeq: 1, Fence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.CommitTurn(context.Background(), sessionstore.CommitTurnRequest{SessionKey: cancelKey, RequestID: "cancel-request",
+		CommitID: "cancel-request:forged-success", Stage: "terminal", InputSeq: 1, Fence: 1,
+		ExpectedVersion: cancelHead.Version, Outcome: runtime.OutcomeSucceeded}); !errors.Is(err, runtime.ErrCancelRequested) {
+		t.Fatalf("success after cancel intent=%v", err)
+	}
+	if err := (worker.RunnerExecutor{Tasks: tasks, Sessions: sessions}).CancelWithLease(context.Background(), cancelStatus.Envelope, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	cancelStatus, err = tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "cancel-request"})
+	if err != nil || cancelStatus.Outcome != runtime.OutcomeCancelled {
+		t.Fatalf("cancel terminal status=%#v err=%v", cancelStatus, err)
+	}
+	var cancelNext uint64
+	if err := db.QueryRow(`SELECT next_input_seq FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, tenantA, appID, cancelSession).Scan(&cancelNext); err != nil || cancelNext != 2 {
+		t.Fatalf("cancel next input=%d err=%v", cancelNext, err)
 	}
 	// A parked future input must become blocked and emit an audit fact even if
 	// no predecessor ever commits and therefore no Wakeup Outbox is produced.
@@ -766,6 +813,14 @@ func (e recordingExecutor) ExecuteWithLease(ctx context.Context, envelope runtim
 		e.started <- executionStart{workerID: e.workerID, requestID: envelope.RequestID}
 	}
 	return e.inner.ExecuteWithLease(ctx, envelope, fence, beforeCommit)
+}
+
+func (e recordingExecutor) CancelWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
+	canceller, ok := e.inner.(worker.CancellationExecutor)
+	if !ok {
+		return runtime.ErrCapabilityUnsupported
+	}
+	return canceller.CancelWithLease(ctx, envelope, fence, beforeCommit)
 }
 
 type failFirstPublishedMark struct {

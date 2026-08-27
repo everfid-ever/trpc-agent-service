@@ -66,15 +66,19 @@ $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, in.Tenant.TenantID, in.Tenant.
 func (s *TaskStore) GetExecution(ctx context.Context, key gateway.ExecutionKey) (gateway.ExecutionStatus, error) {
 	var result gateway.ExecutionStatus
 	var created time.Time
-	err := s.db.QueryRowContext(ctx, `SELECT tenant_id,tenant_version,agent_app_id,agent_app_version,
-agent_app_revision,agent_content_digest,config_version,policy_version,request_id,session_id,user_id,channel,
-input_seq,payload_ref,COALESCE(traceparent,''),outcome,COALESCE(result_ref,''),created_at
-FROM execution_record WHERE tenant_id=$1 AND request_id=$2`, key.TenantID, key.RequestID).
+	err := s.db.QueryRowContext(ctx, `SELECT e.tenant_id,e.tenant_version,e.agent_app_id,e.agent_app_version,
+e.agent_app_revision,e.agent_content_digest,e.config_version,e.policy_version,e.request_id,e.session_id,e.user_id,e.channel,
+e.input_seq,e.payload_ref,COALESCE(e.traceparent,''),e.outcome,COALESCE(e.result_ref,''),e.created_at,e.version,
+(e.cancel_requested_at IS NOT NULL OR t.status='disabled'),
+CASE WHEN e.cancel_requested_at IS NOT NULL THEN e.cancel_version WHEN t.status='disabled' THEN t.version ELSE 0 END
+FROM execution_record e JOIN tenant t ON t.tenant_id=e.tenant_id
+WHERE e.tenant_id=$1 AND e.request_id=$2`, key.TenantID, key.RequestID).
 		Scan(&result.Envelope.TenantID, &result.Envelope.TenantVersion, &result.Envelope.AgentAppID,
 			&result.Envelope.AgentAppVersion, &result.Envelope.AgentAppRevision, &result.Envelope.AgentContentDigest,
 			&result.Envelope.ConfigVersion, &result.Envelope.PolicyVersion, &result.Envelope.RequestID,
 			&result.Envelope.SessionID, &result.Envelope.UserID, &result.Envelope.Channel, &result.Envelope.InputSeq,
-			&result.Envelope.PayloadRef, &result.Envelope.TraceParent, &result.Outcome, &result.ResultRef, &created)
+			&result.Envelope.PayloadRef, &result.Envelope.TraceParent, &result.Outcome, &result.ResultRef, &created,
+			&result.Version, &result.CancelRequested, &result.CancelVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return gateway.ExecutionStatus{}, runtime.ErrNotFound
 	}
@@ -87,9 +91,19 @@ FROM execution_record WHERE tenant_id=$1 AND request_id=$2`, key.TenantID, key.R
 }
 
 func (s *TaskStore) RequestCancel(ctx context.Context, in gateway.CancelRequest) (gateway.CancelResult, error) {
+	if in.TenantID == "" || in.RequestID == "" {
+		return gateway.CancelResult{}, runtime.ErrTenantScope
+	}
+	if in.ExpectedVersion < 0 {
+		return gateway.CancelResult{}, runtime.ErrVersionConflict
+	}
+	if in.ActorID == "" || in.ReasonCode == "" {
+		return gateway.CancelResult{}, runtime.ErrCommitConflict
+	}
 	var result gateway.CancelResult
-	err := s.db.QueryRowContext(ctx, `SELECT accepted,execution_version FROM request_cancel_execution($1,$2,$3,$4)`,
-		in.TenantID, in.RequestID, in.ExpectedVersion, nil).Scan(&result.Accepted, &result.Version)
+	err := s.db.QueryRowContext(ctx, `SELECT accepted,execution_version,cancel_version FROM request_cancel_execution($1,$2,$3,$4,$5,$6)`,
+		in.TenantID, in.RequestID, in.ExpectedVersion, in.ActorID, in.ReasonCode, nullable(in.TraceParent)).
+		Scan(&result.Accepted, &result.Version, &result.CancelVersion)
 	return result, translate(err)
 }
 

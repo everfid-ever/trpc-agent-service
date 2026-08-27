@@ -85,6 +85,21 @@ func (p *Publisher) PublishTenantControl(ctx context.Context, event relay.Tenant
 	})
 }
 
+func (p *Publisher) PublishExecutionControl(ctx context.Context, event relay.ExecutionControlEvent) error {
+	if event.TenantID == "" || event.AggregateID == "" || event.Kind != "execution-control" || event.Version < 1 || event.PayloadRef == "" {
+		return runtime.ErrInvariantViolation
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	return p.xadd(ctx, p.ExecutionControlStream(), map[string]any{
+		"schema_version": "1", "event": payload, "tenant_id": event.TenantID,
+		"kind": event.Kind, "version": strconv.FormatUint(event.Version, 10),
+		"idempotency_key": event.IdempotencyKey, "traceparent": event.TraceParent,
+	})
+}
+
 func (p *Publisher) ReplyStream(destination channel.ReplyDestination) string {
 	digest := sha256.Sum256([]byte(destination.TenantID + "\x00" + destination.Channel + "\x00" + destination.ChannelBindingID + "\x00" + destination.ExternalAccountID))
 	return fmt.Sprintf("trpc:{%s}:reply:%s", p.config.Environment, hex.EncodeToString(digest[:16]))
@@ -98,6 +113,10 @@ func (p *Publisher) WakeupDeadLetterStream() string { return p.WakeupStream() + 
 
 func (p *Publisher) TenantControlStream() string {
 	return fmt.Sprintf("trpc:{%s}:tenant-control", p.config.Environment)
+}
+
+func (p *Publisher) ExecutionControlStream() string {
+	return fmt.Sprintf("trpc:{%s}:execution-control", p.config.Environment)
 }
 
 func (p *Publisher) xadd(ctx context.Context, stream string, values map[string]any) error {
@@ -126,3 +145,4 @@ func validSegment(value string) bool {
 var _ channel.ReplyPublisher = (*Publisher)(nil)
 var _ relay.WakeupPublisher = (*Publisher)(nil)
 var _ relay.TenantControlPublisher = (*Publisher)(nil)
+var _ relay.ExecutionControlPublisher = (*Publisher)(nil)

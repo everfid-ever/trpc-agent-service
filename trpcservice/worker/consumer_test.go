@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,6 +39,21 @@ func (*leaseStub) EnsureFenceAtLeast(context.Context, coordination.SessionKey, u
 }
 
 type brokerStub struct{ acked bool }
+
+type executionReaderStub struct {
+	mu        sync.Mutex
+	cancelled bool
+}
+
+func (s *executionReaderStub) GetExecution(_ context.Context, key gateway.ExecutionKey) (gateway.ExecutionStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	version := int64(0)
+	if s.cancelled {
+		version = 1
+	}
+	return gateway.ExecutionStatus{Envelope: runtime.ExecutionEnvelope{TenantID: key.TenantID, RequestID: key.RequestID}, CancelRequested: s.cancelled, CancelVersion: version}, nil
+}
 
 func (*brokerStub) Publish(context.Context, broker.Shard, runtime.ExecutionEnvelope) error {
 	return nil
@@ -98,6 +114,55 @@ func (f leaseExecutorFunc) ExecuteWithLease(ctx context.Context, envelope runtim
 	return f(ctx, envelope, fence, guard)
 }
 
+func (leaseExecutorFunc) CancelWithLease(context.Context, runtime.ExecutionEnvelope, uint64, func(context.Context) error) error {
+	return runtime.ErrCapabilityUnsupported
+}
+
+type cancellationExecutorStub struct {
+	started   chan struct{}
+	mu        sync.Mutex
+	cancelled bool
+}
+
+func (s *cancellationExecutorStub) ExecuteWithLease(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, _ func(context.Context) error) error {
+	close(s.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (s *cancellationExecutorStub) CancelWithLease(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, guard func(context.Context) error) error {
+	if err := guard(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.cancelled = true
+	s.mu.Unlock()
+	return nil
+}
+
+type drainingBroker struct {
+	delivery broker.Delivery
+	acked    atomic.Bool
+}
+
+func (*drainingBroker) Publish(context.Context, broker.Shard, runtime.ExecutionEnvelope) error {
+	return nil
+}
+func (s *drainingBroker) Consume(ctx context.Context, _ broker.ConsumerOptions, handle func(context.Context, broker.Delivery) error) error {
+	if err := handle(ctx, s.delivery); err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (s *drainingBroker) Ack(context.Context, broker.Delivery) error {
+	s.acked.Store(true)
+	return nil
+}
+func (*drainingBroker) Reclaim(context.Context, broker.ReclaimOptions) ([]broker.Delivery, error) {
+	return nil, nil
+}
+
 type parkerStub struct {
 	result gateway.ParkResult
 	calls  int
@@ -112,7 +177,7 @@ func TestConsumerDurablyParksFutureInputBeforeAck(t *testing.T) {
 	leases := &leaseStub{}
 	messages := &brokerStub{}
 	parker := &parkerStub{result: gateway.ParkResult{Disposition: gateway.ParkedInput, Attempt: 1}}
-	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), Parker: parker,
+	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), Parker: parker, Statuses: &executionReaderStub{},
 		LeaseTTL: time.Second, RenewInterval: time.Hour,
 		Executor: leaseExecutorFunc(func(context.Context, runtime.ExecutionEnvelope, uint64, func(context.Context) error) error {
 			return runtime.ErrInputNotReady
@@ -129,7 +194,7 @@ func TestConsumerDurablyParksFutureInputBeforeAck(t *testing.T) {
 func TestConsumerRenewsSlowExecutionAndValidatesBeforeCommit(t *testing.T) {
 	leases := &leaseStub{}
 	messages := &brokerStub{}
-	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), LeaseTTL: 30 * time.Millisecond, RenewInterval: 5 * time.Millisecond}
+	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), Statuses: &executionReaderStub{}, LeaseTTL: 30 * time.Millisecond, RenewInterval: 5 * time.Millisecond}
 	consumer.Executor = leaseExecutorFunc(func(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, guard func(context.Context) error) error {
 		timer := time.NewTimer(35 * time.Millisecond)
 		defer timer.Stop()
@@ -152,7 +217,7 @@ func TestConsumerRenewsSlowExecutionAndValidatesBeforeCommit(t *testing.T) {
 func TestConsumerDoesNotAckAfterLeaseLoss(t *testing.T) {
 	leases := &leaseStub{failRenew: true}
 	messages := &brokerStub{}
-	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), LeaseTTL: 30 * time.Millisecond, RenewInterval: time.Millisecond}
+	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: leases, Sessions: sessionmemory.New(), Statuses: &executionReaderStub{}, LeaseTTL: 30 * time.Millisecond, RenewInterval: time.Millisecond}
 	consumer.Executor = leaseExecutorFunc(func(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, guard func(context.Context) error) error {
 		<-ctx.Done()
 		return guard(context.Background())
@@ -169,6 +234,7 @@ func TestConsumerStaysAliveAndReclaimsAfterAckFailure(t *testing.T) {
 	messages := &recoveryBroker{delivery: delivery, recovered: make(chan struct{})}
 	consumer := Consumer{
 		WorkerID: "worker", Shards: []broker.Shard{0}, Broker: messages, Leases: &leaseStub{}, Sessions: sessionmemory.New(),
+		Statuses: &executionReaderStub{},
 		LeaseTTL: time.Second, RenewInterval: time.Hour, ReclaimInterval: time.Millisecond,
 		Executor: leaseExecutorFunc(func(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, guard func(context.Context) error) error {
 			return guard(ctx)
@@ -189,5 +255,70 @@ func TestConsumerStaysAliveAndReclaimsAfterAckFailure(t *testing.T) {
 	defer messages.mu.Unlock()
 	if messages.ackCalls != 2 || !messages.reclaimed {
 		t.Fatalf("ack calls=%d reclaimed=%t", messages.ackCalls, messages.reclaimed)
+	}
+}
+
+func TestConsumerTurnsDurableCancelIntoFencedTerminal(t *testing.T) {
+	statuses := &executionReaderStub{}
+	executor := &cancellationExecutorStub{started: make(chan struct{})}
+	messages := &brokerStub{}
+	consumer := Consumer{WorkerID: "worker", Broker: messages, Leases: &leaseStub{}, Sessions: sessionmemory.New(),
+		Statuses: statuses, Executor: executor, LeaseTTL: time.Second, RenewInterval: time.Hour, CancelPollInterval: time.Millisecond}
+	delivery := broker.Delivery{ID: "message", Envelope: runtime.ExecutionEnvelope{TenantID: "tenant", AgentAppID: "app", SessionID: "session", RequestID: "request"}}
+	done := make(chan error, 1)
+	go func() { done <- consumer.handle(context.Background(), delivery) }()
+	<-executor.started
+	statuses.mu.Lock()
+	statuses.cancelled = true
+	statuses.mu.Unlock()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	cancelled := executor.cancelled
+	executor.mu.Unlock()
+	if !cancelled || !messages.acked {
+		t.Fatalf("cancelled=%t acked=%t", cancelled, messages.acked)
+	}
+}
+
+func TestConsumerDrainStopsNewConsumptionAndFinishesActiveDelivery(t *testing.T) {
+	lifecycle := NewLifecycle()
+	release := make(chan struct{})
+	started := make(chan struct{})
+	delivery := broker.Delivery{ID: "message", Envelope: runtime.ExecutionEnvelope{TenantID: "tenant", AgentAppID: "app", SessionID: "session", RequestID: "request"}}
+	messages := &drainingBroker{delivery: delivery}
+	consumer := Consumer{WorkerID: "worker", Shards: []broker.Shard{0}, Broker: messages, Leases: &leaseStub{}, Sessions: sessionmemory.New(),
+		Statuses: &executionReaderStub{}, Lifecycle: lifecycle, DrainTimeout: time.Second, LeaseTTL: time.Second, RenewInterval: time.Hour,
+		Executor: leaseExecutorFunc(func(ctx context.Context, _ runtime.ExecutionEnvelope, _ uint64, guard func(context.Context) error) error {
+			close(started)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-release:
+				return guard(ctx)
+			}
+		})}
+	done := make(chan error, 1)
+	go func() { done <- consumer.Run(context.Background()) }()
+	<-started
+	if !lifecycle.Ready() {
+		t.Fatalf("lifecycle=%s", lifecycle.State())
+	}
+	lifecycle.BeginDrain()
+	select {
+	case err := <-done:
+		t.Fatalf("drain returned before active delivery completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !messages.acked.Load() {
+		t.Fatal("active delivery was not acknowledged during graceful drain")
+	}
+	if lifecycle.State() != LifecycleStopped {
+		t.Fatalf("lifecycle=%s", lifecycle.State())
 	}
 }
