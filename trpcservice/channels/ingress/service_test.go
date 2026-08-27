@@ -21,6 +21,19 @@ func (*fakeAdapter) Run(context.Context) error { return nil }
 func (*fakeAdapter) PublicRoute(context.Context, channel.CallbackRequest) (channel.PublicRouteHint, error) {
 	return channel.PublicRouteHint{Channel: "feishu", RouteKeyDigest: "route-digest-0001", IngressAttemptID: "attempt"}, nil
 }
+func (*fakeAdapter) IsChallenge(channel.CallbackRequest) bool { return true }
+func (*fakeAdapter) PublicChallengeRoute(context.Context, channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	return channel.PublicRouteHint{Channel: "feishu", RouteKeyDigest: "route-digest-0001", IngressAttemptID: "challenge-attempt"}, nil
+}
+func (*fakeAdapter) VerifyChallenge(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.HTTPResponse, channel.VerificationReceipt, error) {
+	callback, receipt, err := handle.Verify(ctx, request, func(context.Context, channel.CallbackRequest, []byte) (channel.VerifiedProtocolPayload, error) {
+		return channel.VerifiedProtocolPayload{Body: []byte(`{"challenge":"ok"}`), Headers: map[string]string{"content-type": "application/json"}, ProtocolIdentityDigest: "challenge-identity"}, nil
+	})
+	return channel.HTTPResponse{ContentType: callback.Headers["content-type"], Body: callback.Body}, receipt, err
+}
+func (*fakeAdapter) CallbackACK() channel.HTTPResponse {
+	return channel.HTTPResponse{ContentType: "application/json", Body: []byte(`{"code":0}`)}
+}
 func (a *fakeAdapter) Verify(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
 	return handle.Verify(ctx, request, func(_ context.Context, request channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
 		mac := hmac.New(sha256.New, secret)
@@ -62,4 +75,13 @@ func TestServiceFailsClosedBeforeTenantPromotion(t *testing.T) {
 	}
 }
 
+func TestChallengeServiceVerifiesAndPromotesWithoutDecoding(t *testing.T) {
+	resolver, _ := fixture(t)
+	response, err := (ingress.ChallengeService{Adapter: &fakeAdapter{}, Bindings: resolver}).Verify(context.Background(), channel.CallbackRequest{})
+	if err != nil || response.ContentType != "application/json" || string(response.Body) != `{"challenge":"ok"}` {
+		t.Fatalf("response=%#v err=%v", response, err)
+	}
+}
+
 var _ channel.Adapter = (*fakeAdapter)(nil)
+var _ channel.HTTPAdapter = (*fakeAdapter)(nil)

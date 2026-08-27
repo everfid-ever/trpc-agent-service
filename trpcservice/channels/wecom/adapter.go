@@ -56,6 +56,39 @@ func (a *Adapter) PublicRoute(_ context.Context, request channel.CallbackRequest
 		RouteKeyDigest: protocol.RouteKeyDigest(routeKey), IngressAttemptID: hex.EncodeToString(attempt[:16])}, nil
 }
 
+func (a *Adapter) IsChallenge(request channel.CallbackRequest) bool {
+	return protocol.IsChallengeRequest(request)
+}
+
+func (a *Adapter) PublicChallengeRoute(_ context.Context, request channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	routeKey := mapValue(request.Query, routeKeyQuery)
+	timestamp := mapValue(request.Query, "timestamp")
+	nonce := mapValue(request.Query, "nonce")
+	signature := mapValue(request.Query, "msg_signature")
+	echo := mapValue(request.Query, "echostr")
+	if routeKey == "" || timestamp == "" || nonce == "" || signature == "" || echo == "" {
+		return channel.PublicRouteHint{}, runtime.ErrInvalidEnvelope
+	}
+	attempt := sha256.Sum256([]byte("wecom-challenge\x00" + timestamp + "\x00" + nonce + "\x00" + signature + "\x00" + echo))
+	return channel.PublicRouteHint{Channel: a.ID(), ExternalAccountHint: routeKey,
+		RouteKeyDigest: protocol.RouteKeyDigest(routeKey), IngressAttemptID: hex.EncodeToString(attempt[:16])}, nil
+}
+
+func (a *Adapter) VerifyChallenge(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.HTTPResponse, channel.VerificationReceipt, error) {
+	if handle == nil {
+		return channel.HTTPResponse{}, channel.VerificationReceipt{}, runtime.ErrInvariantViolation
+	}
+	callback, receipt, err := handle.Verify(ctx, request, a.Protocol.VerifyChallenge)
+	if err != nil {
+		return channel.HTTPResponse{}, channel.VerificationReceipt{}, err
+	}
+	return channel.HTTPResponse{ContentType: callback.Headers["content-type"], Body: callback.Body}, receipt, nil
+}
+
+func (a *Adapter) CallbackACK() channel.HTTPResponse {
+	return channel.HTTPResponse{ContentType: "text/plain; charset=utf-8", Body: []byte("success")}
+}
+
 func (a *Adapter) Verify(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
 	if handle == nil {
 		return channel.VerifiedCallback{}, channel.VerificationReceipt{}, runtime.ErrInvariantViolation
@@ -252,4 +285,7 @@ func mapValue(values map[string]string, name string) string {
 	return ""
 }
 
-var _ channel.Adapter = (*Adapter)(nil)
+var (
+	_ channel.Adapter     = (*Adapter)(nil)
+	_ channel.HTTPAdapter = (*Adapter)(nil)
+)

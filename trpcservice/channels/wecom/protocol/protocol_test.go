@@ -53,6 +53,52 @@ func TestVerifierChecksOfficialEncryptedXMLContract(t *testing.T) {
 	}
 }
 
+func TestVerifierChecksURLChallenge(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	material := verificationMaterial()
+	secret, _ := json.Marshal(material)
+	echo := encrypt(t, []byte("challenge-value"), material.EncodingAESKey, material.ReceiveID)
+	timestamp, nonce := fmt.Sprint(now.Unix()), "1372623149"
+	request := channel.CallbackRequest{Query: map[string]string{
+		"timestamp": timestamp, "nonce": nonce, "echostr": echo,
+		"msg_signature": protocol.Signature(material.Token, timestamp, nonce, echo),
+	}}
+	if !protocol.IsChallengeRequest(request) {
+		t.Fatal("challenge not recognized")
+	}
+	verifier := protocol.Verifier{Now: func() time.Time { return now }}
+	verified, err := verifier.VerifyChallenge(context.Background(), request, secret)
+	if err != nil || string(verified.Body) != "challenge-value" ||
+		verified.Headers["content-type"] != "text/plain; charset=utf-8" || verified.ProtocolIdentityDigest == "" {
+		t.Fatalf("verified=%#v err=%v", verified, err)
+	}
+
+	for name, mutate := range map[string]func(*channel.CallbackRequest){
+		"bad signature": func(in *channel.CallbackRequest) { in.Query["msg_signature"] = "forged" },
+		"stale": func(in *channel.CallbackRequest) {
+			in.Query["timestamp"] = fmt.Sprint(now.Add(-6 * time.Minute).Unix())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := request
+			candidate.Query = clone(request.Query)
+			mutate(&candidate)
+			if _, err := verifier.VerifyChallenge(context.Background(), candidate, secret); err == nil {
+				t.Fatal("invalid challenge accepted")
+			}
+		})
+	}
+
+	wrongReceiveID := request
+	wrongReceiveID.Query = clone(request.Query)
+	wrongEcho := encrypt(t, []byte("challenge-value"), material.EncodingAESKey, "other-corp")
+	wrongReceiveID.Query["echostr"] = wrongEcho
+	wrongReceiveID.Query["msg_signature"] = protocol.Signature(material.Token, timestamp, nonce, wrongEcho)
+	if _, err := verifier.VerifyChallenge(context.Background(), wrongReceiveID, secret); err == nil {
+		t.Fatal("wrong receive ID accepted")
+	}
+}
+
 func TestSignatureCompatibilityVector(t *testing.T) {
 	const want = "6541f079a520db7df30e2ee4685e833822957fef"
 	if got := protocol.Signature("callback-token", "1800000000", "1372623149", "ciphertext"); got != want {

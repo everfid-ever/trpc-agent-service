@@ -52,6 +52,35 @@ func (a *Adapter) PublicRoute(_ context.Context, request channel.CallbackRequest
 		RouteKeyDigest: protocol.RouteKeyDigest(routeKey), IngressAttemptID: hex.EncodeToString(attempt[:16])}, nil
 }
 
+func (a *Adapter) IsChallenge(request channel.CallbackRequest) bool {
+	return protocol.IsChallengeRequest(request)
+}
+
+func (a *Adapter) PublicChallengeRoute(_ context.Context, request channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	routeKey := request.Query[routeKeyQuery]
+	if routeKey == "" || len(request.Body) == 0 || !a.IsChallenge(request) {
+		return channel.PublicRouteHint{}, runtime.ErrInvalidEnvelope
+	}
+	attempt := sha256.Sum256(append([]byte("feishu-challenge\x00"), request.Body...))
+	return channel.PublicRouteHint{Channel: a.ID(), ExternalAccountHint: routeKey,
+		RouteKeyDigest: protocol.RouteKeyDigest(routeKey), IngressAttemptID: hex.EncodeToString(attempt[:16])}, nil
+}
+
+func (a *Adapter) VerifyChallenge(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.HTTPResponse, channel.VerificationReceipt, error) {
+	if handle == nil {
+		return channel.HTTPResponse{}, channel.VerificationReceipt{}, runtime.ErrInvariantViolation
+	}
+	callback, receipt, err := handle.Verify(ctx, request, a.Protocol.VerifyChallenge)
+	if err != nil {
+		return channel.HTTPResponse{}, channel.VerificationReceipt{}, err
+	}
+	return channel.HTTPResponse{ContentType: callback.Headers["content-type"], Body: callback.Body}, receipt, nil
+}
+
+func (a *Adapter) CallbackACK() channel.HTTPResponse {
+	return channel.HTTPResponse{ContentType: "application/json", Body: []byte(`{"code":0}`)}
+}
+
 func (a *Adapter) Verify(ctx context.Context, request channel.CallbackRequest, handle channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
 	if handle == nil {
 		return channel.VerifiedCallback{}, channel.VerificationReceipt{}, runtime.ErrInvariantViolation
@@ -223,4 +252,7 @@ func mapValue(values map[string]string, name string) string {
 	return ""
 }
 
-var _ channel.Adapter = (*Adapter)(nil)
+var (
+	_ channel.Adapter     = (*Adapter)(nil)
+	_ channel.HTTPAdapter = (*Adapter)(nil)
+)

@@ -3,6 +3,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -22,6 +23,8 @@ import (
 
 const EventTypeMessageReceive = "im.message.receive_v1"
 
+const challengeType = "url_verification"
+
 type VerificationMaterial struct {
 	EncryptKey, VerificationToken, AppID, BotOpenID string
 }
@@ -31,15 +34,69 @@ type Verifier struct {
 	MaxSkew time.Duration
 }
 
-func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
-	var material VerificationMaterial
-	decoder := json.NewDecoder(strings.NewReader(string(secret)))
+// IsChallengeRequest recognizes both plaintext challenge envelopes and the
+// encrypted challenge form used when an EncryptKey is configured. Encrypted
+// challenge requests do not carry the normal callback signature headers.
+func IsChallengeRequest(request channel.CallbackRequest) bool {
+	var fuzzy struct {
+		Type    string `json:"type"`
+		Encrypt string `json:"encrypt"`
+	}
+	if json.Unmarshal(request.Body, &fuzzy) != nil {
+		return false
+	}
+	return fuzzy.Type == challengeType || (fuzzy.Encrypt != "" && header(request.Headers, larkevent.EventSignature) == "")
+}
+
+func (v Verifier) VerifyChallenge(_ context.Context, request channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
+	material, err := parseMaterial(secret)
+	if err != nil || len(request.Body) == 0 || len(request.Body) > 1<<20 {
+		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+	}
+	plaintext := append([]byte(nil), request.Body...)
+	var wrapper larkevent.EventEncryptMsg
+	if json.Unmarshal(request.Body, &wrapper) == nil && wrapper.Encrypt != "" {
+		decrypted, decryptErr := larkevent.EventDecrypt(wrapper.Encrypt, material.EncryptKey)
+		if decryptErr != nil {
+			return channel.VerifiedProtocolPayload{}, runtime.ErrInvalidEnvelope
+		}
+		plaintext = decrypted
+	}
+	var challenge struct {
+		Schema    string                 `json:"schema"`
+		Token     string                 `json:"token"`
+		Type      string                 `json:"type"`
+		Challenge string                 `json:"challenge"`
+		Header    *larkevent.EventHeader `json:"header"`
+		Event     json.RawMessage        `json:"event"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(plaintext))
 	decoder.DisallowUnknownFields()
-	decodeErr := decoder.Decode(&material)
+	decodeErr := decoder.Decode(&challenge)
 	var trailing any
 	trailingErr := decoder.Decode(&trailing)
-	if decodeErr != nil || trailingErr != io.EOF || material.EncryptKey == "" || material.VerificationToken == "" ||
-		material.AppID == "" || material.BotOpenID == "" || len(request.Body) == 0 {
+	token, appID := challenge.Token, ""
+	if challenge.Header != nil {
+		token, appID = challenge.Header.Token, challenge.Header.AppID
+	}
+	if decodeErr != nil || trailingErr != io.EOF || challenge.Type != challengeType || challenge.Challenge == "" ||
+		len(challenge.Challenge) > 4096 || token == "" || (challenge.Header != nil && (challenge.Schema != "2.0" || appID != material.AppID)) ||
+		len(token) != len(material.VerificationToken) || subtle.ConstantTimeCompare([]byte(token), []byte(material.VerificationToken)) != 1 {
+		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+	}
+	response, err := json.Marshal(struct {
+		Challenge string `json:"challenge"`
+	}{Challenge: challenge.Challenge})
+	if err != nil {
+		return channel.VerifiedProtocolPayload{}, err
+	}
+	return channel.VerifiedProtocolPayload{Body: response, Headers: map[string]string{"content-type": "application/json"},
+		ProtocolIdentityDigest: digest(material.AppID, challengeType, challenge.Challenge)}, nil
+}
+
+func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
+	material, err := parseMaterial(secret)
+	if err != nil || len(request.Body) == 0 {
 		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
 	}
 	timestamp := header(request.Headers, larkevent.EventRequestTimestamp)
@@ -84,6 +141,20 @@ func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, sec
 	}
 	identity := digest(material.AppID, envelope.Header.TenantKey, envelope.Header.EventID)
 	return channel.VerifiedProtocolPayload{Body: plaintext, Headers: map[string]string{"x-feishu-bot-open-id": material.BotOpenID}, ProtocolIdentityDigest: identity}, nil
+}
+
+func parseMaterial(secret []byte) (VerificationMaterial, error) {
+	var material VerificationMaterial
+	decoder := json.NewDecoder(strings.NewReader(string(secret)))
+	decoder.DisallowUnknownFields()
+	decodeErr := decoder.Decode(&material)
+	var trailing any
+	trailingErr := decoder.Decode(&trailing)
+	if decodeErr != nil || trailingErr != io.EOF || material.EncryptKey == "" || material.VerificationToken == "" ||
+		material.AppID == "" || material.BotOpenID == "" {
+		return VerificationMaterial{}, runtime.ErrVersionMismatch
+	}
+	return material, nil
 }
 
 type DecodeResult struct {

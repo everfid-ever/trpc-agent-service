@@ -51,6 +51,43 @@ func TestVerifierChecksSignatureClockTokenAndAppThenDecrypts(t *testing.T) {
 	}
 }
 
+func TestVerifierChecksPlaintextAndEncryptedChallenges(t *testing.T) {
+	material := protocol.VerificationMaterial{EncryptKey: "encrypt-key", VerificationToken: "verify-token", AppID: "cli_app", BotOpenID: "ou_bot"}
+	secret, _ := json.Marshal(material)
+	plaintext := []byte(`{"type":"url_verification","token":"verify-token","challenge":"challenge-value"}`)
+	v2 := []byte(`{"schema":"2.0","header":{"event_id":"event","event_type":"contact.user.created_v3","app_id":"cli_app","tenant_key":"tenant","create_time":"1800000000000","token":"verify-token"},"event":{"object":{"open_id":"ou_user"}},"challenge":"challenge-value","type":"url_verification"}`)
+	verifier := protocol.Verifier{}
+
+	for name, body := range map[string][]byte{
+		"plaintext": plaintext,
+		"v2":        v2,
+		"encrypted": encryptedBody(t, plaintext, material.EncryptKey),
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := channel.CallbackRequest{Body: body}
+			if !protocol.IsChallengeRequest(request) {
+				t.Fatal("challenge not recognized")
+			}
+			verified, err := verifier.VerifyChallenge(context.Background(), request, secret)
+			if err != nil || string(verified.Body) != `{"challenge":"challenge-value"}` ||
+				verified.Headers["content-type"] != "application/json" || verified.ProtocolIdentityDigest == "" {
+				t.Fatalf("verified=%#v err=%v", verified, err)
+			}
+		})
+	}
+
+	for name, body := range map[string][]byte{
+		"bad token":  []byte(`{"type":"url_verification","token":"forged","challenge":"challenge-value"}`),
+		"wrong type": []byte(`{"type":"callback","token":"verify-token","challenge":"challenge-value"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := verifier.VerifyChallenge(context.Background(), channel.CallbackRequest{Body: body}, secret); err == nil {
+				t.Fatal("invalid challenge accepted")
+			}
+		})
+	}
+}
+
 func TestDecodeMessageMentionMatrix(t *testing.T) {
 	mention := func(key, openID, name string) map[string]any {
 		return map[string]any{"key": key, "id": map[string]any{"open_id": openID}, "name": name, "tenant_key": "tenant-key"}

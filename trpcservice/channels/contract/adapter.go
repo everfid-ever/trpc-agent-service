@@ -207,6 +207,25 @@ type DeliveryReconciler interface {
 	ReconcileDelivery(context.Context, ReconciliationRequest) (ReconciliationResult, error)
 }
 
+// HTTPResponse is a provider-defined successful callback response. Status is
+// intentionally fixed by the HTTP transport so adapters cannot weaken common
+// error handling.
+type HTTPResponse struct {
+	ContentType string
+	Body        []byte
+}
+
+// HTTPAdapter extends Adapter with the provider's callback challenge and ACK
+// contract. Challenge verification still uses the same single-use scoped
+// verifier and candidate promotion boundary as normal callbacks.
+type HTTPAdapter interface {
+	Adapter
+	IsChallenge(CallbackRequest) bool
+	PublicChallengeRoute(context.Context, CallbackRequest) (PublicRouteHint, error)
+	VerifyChallenge(context.Context, CallbackRequest, ScopedVerifierHandle) (HTTPResponse, VerificationReceipt, error)
+	CallbackACK() HTTPResponse
+}
+
 type Adapter interface {
 	ID() string
 	Run(context.Context) error

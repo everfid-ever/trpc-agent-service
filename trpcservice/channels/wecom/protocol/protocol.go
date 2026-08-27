@@ -43,6 +43,34 @@ type Verifier struct {
 	MaxSkew time.Duration
 }
 
+func IsChallengeRequest(request channel.CallbackRequest) bool {
+	return query(request.Query, "echostr") != ""
+}
+
+func (v Verifier) VerifyChallenge(_ context.Context, request channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
+	material, err := parseMaterial(secret)
+	if err != nil {
+		return channel.VerifiedProtocolPayload{}, err
+	}
+	timestamp := query(request.Query, "timestamp")
+	nonce := query(request.Query, "nonce")
+	signature := query(request.Query, "msg_signature")
+	echo := query(request.Query, "echostr")
+	if nonce == "" || signature == "" || echo == "" || !v.validTimestamp(timestamp) {
+		return channel.VerifiedProtocolPayload{}, runtime.ErrInvalidEnvelope
+	}
+	expected := Signature(material.Token, timestamp, nonce, echo)
+	if len(signature) != len(expected) || subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
+		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+	}
+	plaintext, receiveID, err := decrypt(echo, material.EncodingAESKey)
+	if err != nil || receiveID != material.ReceiveID || len(plaintext) == 0 || len(plaintext) > 4096 || !utf8.Valid(plaintext) {
+		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+	}
+	return channel.VerifiedProtocolPayload{Body: plaintext, Headers: map[string]string{"content-type": "text/plain; charset=utf-8"},
+		ProtocolIdentityDigest: digest(material.ReceiveID, "url_verification", string(plaintext))}, nil
+}
+
 type encryptedEnvelope struct {
 	XMLName    xml.Name `xml:"xml"`
 	ToUserName string   `xml:"ToUserName"`
@@ -76,16 +104,7 @@ func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, sec
 	if err != nil || nonce == "" || signature == "" {
 		return channel.VerifiedProtocolPayload{}, runtime.ErrInvalidEnvelope
 	}
-	now := time.Now().UTC()
-	if v.Now != nil {
-		now = v.Now().UTC()
-	}
-	maxSkew := v.MaxSkew
-	if maxSkew <= 0 {
-		maxSkew = 5 * time.Minute
-	}
-	requestTime := time.Unix(seconds, 0).UTC()
-	if requestTime.Before(now.Add(-maxSkew)) || requestTime.After(now.Add(maxSkew)) {
+	if !v.timestampWithinWindow(seconds) {
 		return channel.VerifiedProtocolPayload{}, runtime.ErrInvalidEnvelope
 	}
 
@@ -111,6 +130,24 @@ func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, sec
 		"x-wecom-receive-id": material.ReceiveID,
 		"x-wecom-agent-id":   strconv.FormatInt(material.AgentID, 10),
 	}, ProtocolIdentityDigest: identity}, nil
+}
+
+func (v Verifier) validTimestamp(value string) bool {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && v.timestampWithinWindow(seconds)
+}
+
+func (v Verifier) timestampWithinWindow(seconds int64) bool {
+	now := time.Now().UTC()
+	if v.Now != nil {
+		now = v.Now().UTC()
+	}
+	maxSkew := v.MaxSkew
+	if maxSkew <= 0 {
+		maxSkew = 5 * time.Minute
+	}
+	requestTime := time.Unix(seconds, 0).UTC()
+	return !requestTime.Before(now.Add(-maxSkew)) && !requestTime.After(now.Add(maxSkew))
 }
 
 func DecodeMessage(payload channel.VerifiedCallback) (channel.ProviderEvent, error) {
