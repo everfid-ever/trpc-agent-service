@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 9 {
+	if len(all) != 10 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -25,6 +25,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 }
 
+func TestInputParkRecoveryHardeningMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[9]
+	if migration.Version != "000010" || migration.Name != "input_park_recovery_hardening" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"p_max_attempts > 64", "LEAST(v_deadline", "ON CONFLICT ON CONSTRAINT outbox_tenant_id_kind_idempotency_key_key"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
 func TestInputParkWakeupMigrationContract(t *testing.T) {
 	all, err := All()
 	if err != nil {
@@ -34,7 +50,7 @@ func TestInputParkWakeupMigrationContract(t *testing.T) {
 	if migration.Version != "000009" || migration.Name != "input_park_wakeup" {
 		t.Fatalf("migration=%#v", migration)
 	}
-	for _, clause := range []string{"park_deadline timestamptz", "'blocked'", "CREATE FUNCTION public.park_execution(", "enqueue_next_parked_wakeup", "session_head_wakeup_next_parked", "inspect_execution_wakeup"} {
+	for _, clause := range []string{"park_deadline timestamptz", "'blocked'", "execution_record_park_state_check", "p_max_attempts integer", "CREATE FUNCTION public.park_execution(", "enqueue_next_parked_wakeup", "session_head_wakeup_next_parked", "inspect_execution_wakeup"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("missing %q", clause)
 		}

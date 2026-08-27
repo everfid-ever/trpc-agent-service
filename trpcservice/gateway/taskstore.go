@@ -71,7 +71,7 @@ func DefaultParkPolicy() ParkPolicy {
 }
 
 func (p ParkPolicy) Validate() error {
-	if p.BaseDelay < time.Second || p.MaxDelay < p.BaseDelay || p.Deadline < p.MaxDelay || p.MaxAttempts < 1 {
+	if p.BaseDelay < time.Second || p.MaxDelay < p.BaseDelay || p.Deadline < p.MaxDelay || p.MaxAttempts < 1 || p.MaxAttempts > 64 {
 		return runtime.ErrInvariantViolation
 	}
 	return nil
@@ -91,6 +91,10 @@ type InputParker interface {
 type WakeupStore interface {
 	InspectWakeup(context.Context, ExecutionKey) (WakeupCandidate, error)
 	MarkWoken(context.Context, ExecutionKey, int64) error
+}
+
+type ParkedInputStore interface {
+	WakeupStore
 	ListActionableParkedInputs(context.Context, time.Time, int) ([]ExecutionKey, error)
 }
 

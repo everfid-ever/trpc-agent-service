@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -56,6 +57,37 @@ func TestRedisLeaseFenceContract(t *testing.T) {
 	}
 	if err := manager.Release(context.Background(), second); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFenceCalibrationIsExactAboveLuaIntegerPrecision(t *testing.T) {
+	client := redisTestClient(t)
+	manager, err := New(client, fmt.Sprintf("lease_precision_%d", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := coordination.SessionKey{TenantID: "tenant-a", AgentAppID: "app", SessionID: "large-fence"}
+	leaseKey, fenceKey := manager.keys(key)
+	t.Cleanup(func() { _ = client.Del(context.Background(), leaseKey, fenceKey).Err() })
+	const durableFence = uint64(9007199254740993)
+	if err := manager.EnsureFenceAtLeast(context.Background(), key, durableFence); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := manager.Acquire(context.Background(), key, "worker", time.Second)
+	if err != nil || lease.Fence != durableFence+1 {
+		t.Fatalf("lease=%#v err=%v", lease, err)
+	}
+}
+
+func TestFenceCalibrationReservesIncrementCapacity(t *testing.T) {
+	client := redisTestClient(t)
+	manager, err := New(client, fmt.Sprintf("lease_limit_%d", time.Now().UnixNano()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := coordination.SessionKey{TenantID: "tenant-a", AgentAppID: "app", SessionID: "fence-limit"}
+	if err := manager.EnsureFenceAtLeast(context.Background(), key, uint64(math.MaxInt64)); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("max fence calibration err=%v", err)
 	}
 }
 

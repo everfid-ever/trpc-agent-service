@@ -24,6 +24,18 @@ type WakeupQueue struct {
 	config    WakeupQueueConfig
 }
 
+var deadLetterWakeupScript = redisclient.NewScript(`
+local maxlen = tonumber(ARGV[5])
+if maxlen and maxlen > 0 then
+  redis.call('XADD', KEYS[2], 'MAXLEN', '~', maxlen, '*',
+    'source_id', ARGV[1], 'error_class', ARGV[2], 'event', ARGV[3], 'failed_at', ARGV[4])
+else
+  redis.call('XADD', KEYS[2], '*',
+    'source_id', ARGV[1], 'error_class', ARGV[2], 'event', ARGV[3], 'failed_at', ARGV[4])
+end
+return redis.call('XACK', KEYS[1], ARGV[6], ARGV[1])
+`)
+
 func NewWakeupQueue(client redisclient.UniversalClient, publisher *Publisher, config WakeupQueueConfig) (*WakeupQueue, error) {
 	if client == nil || publisher == nil || !validSegment(config.Group) {
 		return nil, runtime.ErrInvalidEnvelope
@@ -112,17 +124,9 @@ func (q *WakeupQueue) ReclaimWakeups(ctx context.Context, opts relay.WakeupRecla
 
 func (q *WakeupQueue) deadLetter(ctx context.Context, message redisclient.XMessage, cause error) error {
 	raw, _ := wakeupValueString(message.Values["event"])
-	args := &redisclient.XAddArgs{Stream: q.publisher.WakeupDeadLetterStream(), Values: map[string]any{
-		"source_id": message.ID, "error_class": cause.Error(), "event": raw,
-		"failed_at": time.Now().UTC().Format(time.RFC3339Nano),
-	}}
-	if q.publisher.config.MaxLen > 0 {
-		args.MaxLen, args.Approx = q.publisher.config.MaxLen, true
-	}
-	if err := q.client.XAdd(ctx, args).Err(); err != nil {
-		return err
-	}
-	return q.client.XAck(ctx, q.publisher.WakeupStream(), q.config.Group, message.ID).Err()
+	return deadLetterWakeupScript.Run(ctx, q.client,
+		[]string{q.publisher.WakeupStream(), q.publisher.WakeupDeadLetterStream()},
+		message.ID, cause.Error(), raw, time.Now().UTC().Format(time.RFC3339Nano), q.publisher.config.MaxLen, q.config.Group).Err()
 }
 
 func (q *WakeupQueue) ensureGroup(ctx context.Context) error {

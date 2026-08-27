@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +21,11 @@ var acquireScript = redisclient.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then
   return {0, '0'}
 end
-local fence = redis.call('INCR', KEYS[2])
+redis.call('INCR', KEYS[2])
+local fence = redis.call('GET', KEYS[2])
 local value = ARGV[1] .. '|' .. ARGV[2] .. '|' .. fence
 redis.call('PSETEX', KEYS[1], ARGV[3], value)
-return {1, tostring(fence)}
+return {1, fence}
 `)
 
 var renewScript = redisclient.NewScript(`
@@ -42,9 +44,22 @@ return redis.call('DEL', KEYS[1])
 `)
 
 var ensureFenceScript = redisclient.NewScript(`
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-local minimum = tonumber(ARGV[1])
-if current < minimum then
+local function normalize(value)
+  local normalized = string.gsub(value, '^0+', '')
+  if normalized == '' then return '0' end
+  return normalized
+end
+local function decimal_less(left, right)
+  left = normalize(left)
+  right = normalize(right)
+  if string.len(left) ~= string.len(right) then
+    return string.len(left) < string.len(right)
+  end
+  return left < right
+end
+local current = redis.call('GET', KEYS[1]) or '0'
+local minimum = ARGV[1]
+if decimal_less(current, minimum) then
   redis.call('SET', KEYS[1], minimum)
 end
 return 1
@@ -122,6 +137,11 @@ func (m *Manager) Release(ctx context.Context, lease coordination.Lease) error {
 func (m *Manager) EnsureFenceAtLeast(ctx context.Context, key coordination.SessionKey, minimum uint64) error {
 	if err := validateKey(key); err != nil {
 		return err
+	}
+	// Redis INCR is signed 64-bit, so keep one value available for the next
+	// successful acquisition after calibration.
+	if minimum >= math.MaxInt64 {
+		return runtime.ErrInvariantViolation
 	}
 	_, fenceKey := m.keys(key)
 	return ensureFenceScript.Run(ctx, m.client, []string{fenceKey}, minimum).Err()

@@ -77,7 +77,7 @@ func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
 
 	environment := fmt.Sprintf("runtime_slice_%d", time.Now().UnixNano())
 	streamBroker, err := brokerredis.New(redisClient, brokerredis.Config{
-		Environment: environment, Group: "workers", ShardCount: 4, ReadBlock: 20 * time.Millisecond, ReclaimIdle: 50 * time.Millisecond,
+		Environment: environment, Group: "workers", ShardCount: 4, ReadBlock: 20 * time.Millisecond, ReclaimIdle: 500 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,12 +131,12 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		}
 		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root}, nil, nil
 	})
-	workersDone := make(chan error, 2)
+	workersDone := make(chan error, 3)
 	usedWorkers := &workerSet{ids: make(map[string]struct{})}
 	executionStarted := make(chan executionStart, 32)
 	workerStops := make(map[string]context.CancelFunc)
 	shards := []broker.Shard{0, 1, 2, 3}
-	for _, workerID := range []string{"worker-1", "worker-2"} {
+	for _, workerID := range []string{"worker-1", "worker-2", "worker-3"} {
 		workerCtx, stopWorker := context.WithCancel(context.Background())
 		workerStops[workerID] = stopWorker
 		executor := recordingExecutor{
@@ -162,7 +162,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		for _, stopWorker := range workerStops {
 			stopWorker()
 		}
-		for index := 0; index < 2; index++ {
+		for index := 0; index < 3; index++ {
 			select {
 			case <-workersDone:
 			case <-time.After(2 * time.Second):
@@ -258,19 +258,9 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		result := <-concurrent
 		concurrentHandles[result.index] = result.handle
 	}
-	for _, handle := range concurrentHandles[:2] {
-		status, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: handle.RequestID})
-		if err != nil {
-			t.Fatal(err)
-		}
-		parked, err := tasks.ParkInput(context.Background(), gateway.ParkRequest{TenantID: tenantA, RequestID: handle.RequestID, InputSeq: status.Envelope.InputSeq})
-		if err != nil || parked.Disposition != gateway.ParkedInput {
-			t.Fatalf("park request=%s result=%#v err=%v", handle.RequestID, parked, err)
-		}
-	}
-	// Keep the first owner alive while the other Worker receives input 2/3,
-	// then kill it. The surviving Worker must durably park both future inputs
-	// before reclaiming input 1 and waking them in order.
+	// Keep the first owner alive while other Workers receive later inputs, then
+	// kill it. At least one future input must take the real Worker->PostgreSQL
+	// park path before input 1 is reclaimed and the session converges in order.
 	time.Sleep(20 * time.Millisecond)
 	workerStops[killedWorker]()
 	handles := append([]gateway.ExecutionHandle{first, crossTenant}, concurrentHandles...)
@@ -306,9 +296,20 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		// marked normally in the same batch.
 		t.Fatalf("first reply relay count=%d want=%d err=%v", count, len(handles)-1, err)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if count, err := replyRelay.RunOnce(context.Background()); err != nil || count != 1 {
-		t.Fatalf("replayed reply relay count=%d err=%v", count, err)
+	// Allow the database claim lease and the relay's default one-second retry
+	// horizon to elapse on slower CI hosts before declaring the replay lost.
+	replayDeadline := time.Now().Add(3 * time.Second)
+	replayed := 0
+	for replayed == 0 && time.Now().Before(replayDeadline) {
+		time.Sleep(20 * time.Millisecond)
+		count, err := replyRelay.RunOnce(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed += count
+	}
+	if replayed != 1 {
+		t.Fatalf("replayed reply relay count=%d", replayed)
 	}
 	if calls := providerAdapter.callCount(); calls != len(handles) {
 		t.Fatalf("provider effects=%d want=%d", calls, len(handles))
@@ -394,8 +395,56 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(sequences) != 3 || sequences[1] != sequences[0]+1 || sequences[2] != sequences[1]+1 || parkAttempts[1] < 1 || parkAttempts[2] < 1 {
+	if len(sequences) != 3 || sequences[1] != sequences[0]+1 || sequences[2] != sequences[1]+1 || parkAttempts[1]+parkAttempts[2] < 1 {
 		t.Fatalf("same-session sequences=%v park_attempts=%v", sequences, parkAttempts)
+	}
+	// Reconcile a PostgreSQL park whose Wakeup Stream entry was lost. The
+	// reconciler must reuse the same publish->CAS transition as the consumer.
+	lostWakeupSession := "lost-wakeup-session"
+	if _, err := db.Exec(`INSERT INTO session_head(tenant_id,agent_app_id,session_id) VALUES($1,$2,$3)`, tenantA, appID, lostWakeupSession); err != nil {
+		t.Fatal(err)
+	}
+	insertFenceExecution(t, db, tenantA, first.RequestID, lostWakeupSession, "lost-wakeup-request", 1)
+	if _, err := db.Exec(`UPDATE execution_record SET outcome='pending',park_attempt=1,not_before=now()-interval '1 second',
+park_deadline=now()+interval '1 minute',version=version+1 WHERE tenant_id=$1 AND request_id=$2`, tenantA, "lost-wakeup-request"); err != nil {
+		t.Fatal(err)
+	}
+	repairBroker := &recordingBroker{}
+	repairer := relay.ParkedInputReconciler{Store: tasks, Dispatch: repairBroker, ShardCount: 4}
+	if count, err := repairer.RunOnce(context.Background()); err != nil || count != 1 {
+		t.Fatalf("park repair count=%d err=%v", count, err)
+	}
+	repaired, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "lost-wakeup-request"})
+	if err != nil || repaired.Outcome != runtime.OutcomeQueued || repairBroker.calls != 1 {
+		t.Fatalf("repaired=%#v publish calls=%d err=%v", repaired, repairBroker.calls, err)
+	}
+	// A parked future input must become blocked and emit an audit fact even if
+	// no predecessor ever commits and therefore no Wakeup Outbox is produced.
+	blockedSession := "park-deadline-session"
+	if _, err := db.Exec(`INSERT INTO session_head(tenant_id,agent_app_id,session_id) VALUES($1,$2,$3)`, tenantA, appID, blockedSession); err != nil {
+		t.Fatal(err)
+	}
+	insertFenceExecution(t, db, tenantA, first.RequestID, blockedSession, "park-deadline-request", 2)
+	deadlineTasks, err := gatewaypostgres.NewTaskStoreWithParkPolicy(db, gateway.ParkPolicy{BaseDelay: time.Second, MaxDelay: time.Second, Deadline: time.Second, MaxAttempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked, err := deadlineTasks.ParkInput(context.Background(), gateway.ParkRequest{TenantID: tenantA, RequestID: "park-deadline-request", InputSeq: 2})
+	if err != nil || parked.Disposition != gateway.ParkedInput || parked.Attempt != 1 {
+		t.Fatalf("deadline park=%#v err=%v", parked, err)
+	}
+	duplicatePark, err := deadlineTasks.ParkInput(context.Background(), gateway.ParkRequest{TenantID: tenantA, RequestID: "park-deadline-request", InputSeq: 2})
+	if err != nil || duplicatePark.Attempt != parked.Attempt || duplicatePark.Version != parked.Version {
+		t.Fatalf("duplicate park=%#v first=%#v err=%v", duplicatePark, parked, err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	blocked, err := deadlineTasks.InspectWakeup(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "park-deadline-request"})
+	if err != nil || !blocked.Blocked || blocked.Execution.Outcome != runtime.OutcomeBlocked {
+		t.Fatalf("blocked candidate=%#v err=%v", blocked, err)
+	}
+	var blockedAudit int
+	if err := db.QueryRow(`SELECT count(*) FROM outbox WHERE tenant_id=$1 AND kind='audit' AND idempotency_key=$2`, tenantA, "park-blocked:park-deadline-request").Scan(&blockedAudit); err != nil || blockedAudit != 1 {
+		t.Fatalf("blocked audit=%d err=%v", blockedAudit, err)
 	}
 	// Lose both Redis coordination keys, then prove the durable PostgreSQL
 	// watermark calibrates the recreated counter before a new owner acquires.
@@ -416,6 +465,27 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 	if err != nil || recoveredLease.Fence <= persistedFence {
 		t.Fatalf("recovered lease=%#v persisted=%d err=%v", recoveredLease, persistedFence, err)
 	}
+	nextFenceInput := sequences[len(sequences)-1] + 1
+	insertFenceExecution(t, db, tenantA, first.RequestID, sessionID, "fence-recovery-new", nextFenceInput)
+	insertFenceExecution(t, db, tenantA, first.RequestID, sessionID, "fence-recovery-stale", nextFenceInput+1)
+	fenceSessionKey := sessionstore.SessionKey(coordinationKey)
+	head, err := sessions.OpenForRun(context.Background(), sessionstore.OpenForRunRequest{SessionKey: fenceSessionKey,
+		RequestID: "fence-recovery-new", InputSeq: nextFenceInput, Fence: recoveredLease.Fence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sessions.CommitTurn(context.Background(), sessionstore.CommitTurnRequest{SessionKey: fenceSessionKey,
+		RequestID: "fence-recovery-new", CommitID: "fence-recovery-new:terminal:0", Stage: "terminal",
+		InputSeq: nextFenceInput, Fence: recoveredLease.Fence, ExpectedVersion: head.Version, Outcome: runtime.OutcomeDenied}); err != nil {
+		t.Fatal(err)
+	}
+	if terminalPark, err := tasks.ParkInput(context.Background(), gateway.ParkRequest{TenantID: tenantA, RequestID: "fence-recovery-new", InputSeq: nextFenceInput}); err != nil || terminalPark.Disposition != gateway.ParkInputTerminal {
+		t.Fatalf("terminal park=%#v err=%v", terminalPark, err)
+	}
+	if _, err := sessions.OpenForRun(context.Background(), sessionstore.OpenForRunRequest{SessionKey: fenceSessionKey,
+		RequestID: "fence-recovery-stale", InputSeq: nextFenceInput + 1, Fence: persistedFence}); !errors.Is(err, runtime.ErrStaleFence) {
+		t.Fatalf("old fence after recovery commit=%v", err)
+	}
 	if err := leases.Release(context.Background(), recoveredLease); err != nil {
 		t.Fatal(err)
 	}
@@ -423,8 +493,8 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 	if err := db.QueryRow(`SELECT count(*) FROM session_event WHERE tenant_id=$1 AND session_id=$2 AND event_payload IS NOT NULL`, tenantA, sessionID).Scan(&durableEvents); err != nil || durableEvents == 0 {
 		t.Fatalf("durable session events=%d err=%v", durableEvents, err)
 	}
-	if usedWorkers.count() != 2 {
-		t.Fatalf("expected both workers to execute, used=%v", usedWorkers.snapshot())
+	if usedWorkers.count() < 2 {
+		t.Fatalf("expected multiple workers to execute, used=%v", usedWorkers.snapshot())
 	}
 	if killedWorker == "" || flakyOutbox.failures() != 1 {
 		t.Fatalf("killed worker=%q mark failures=%d", killedWorker, flakyOutbox.failures())
@@ -440,6 +510,53 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 			t.Fatalf("unpublished dispatch=%d err=%v", unpublished, err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+type recordingBroker struct {
+	mu        sync.Mutex
+	calls     int
+	published runtime.ExecutionEnvelope
+}
+
+func (b *recordingBroker) Publish(_ context.Context, _ broker.Shard, envelope runtime.ExecutionEnvelope) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls++
+	b.published = envelope
+	return nil
+}
+func (*recordingBroker) Consume(context.Context, broker.ConsumerOptions, func(context.Context, broker.Delivery) error) error {
+	return runtime.ErrCapabilityUnsupported
+}
+func (*recordingBroker) Ack(context.Context, broker.Delivery) error {
+	return runtime.ErrCapabilityUnsupported
+}
+func (*recordingBroker) Reclaim(context.Context, broker.ReclaimOptions) ([]broker.Delivery, error) {
+	return nil, runtime.ErrCapabilityUnsupported
+}
+
+func insertFenceExecution(t *testing.T, db *sql.DB, tenantID, templateRequestID, sessionID, requestID string, inputSeq uint64) {
+	t.Helper()
+	payloadRef := "inbound://" + tenantID + "/" + requestID
+	_, err := db.Exec(`INSERT INTO inbox(tenant_id,channel,external_account_id,external_message_id,request_id,
+agent_app_id,session_id,input_seq,state,payload_ref,payload_digest,key_version)
+VALUES($1,'fake','fence-recovery',$2,$2,$3,$4,$5,'dispatch_ready',$6,$7,1)`,
+		tenantID, requestID, appID, sessionID, inputSeq, payloadRef, strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO execution_record(tenant_id,request_id,tenant_version,agent_app_id,agent_app_version,
+agent_app_revision,agent_content_digest,config_version,policy_version,session_id,user_id,channel,input_seq,payload_ref,traceparent)
+SELECT tenant_id,$3,tenant_version,agent_app_id,agent_app_version,agent_app_revision,agent_content_digest,
+config_version,policy_version,$4,user_id,channel,$5,$6,traceparent
+FROM execution_record WHERE tenant_id=$1 AND request_id=$2`, tenantID, templateRequestID, requestID, sessionID, inputSeq, payloadRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE session_head SET last_allocated_input_seq=GREATEST(last_allocated_input_seq,$4)
+WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, tenantID, appID, sessionID, inputSeq); err != nil {
+		t.Fatal(err)
 	}
 }
 

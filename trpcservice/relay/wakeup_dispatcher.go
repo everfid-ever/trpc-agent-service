@@ -50,7 +50,7 @@ func (a WakeupActivator) Activate(ctx context.Context, key gateway.ExecutionKey)
 	}
 	candidate, err := a.Store.InspectWakeup(ctx, key)
 	if errors.Is(err, runtime.ErrNotFound) {
-		return WakeupObsolete, nil
+		return "", runtime.ErrInvariantViolation
 	}
 	if err != nil {
 		return "", err
@@ -77,7 +77,10 @@ func (a WakeupActivator) Activate(ctx context.Context, key gateway.ExecutionKey)
 			return "", err
 		}
 		current, readErr := a.Store.InspectWakeup(ctx, key)
-		if readErr != nil || current.Execution.Outcome != runtime.OutcomeQueued {
+		if readErr != nil {
+			return "", err
+		}
+		if current.Execution.Outcome == runtime.OutcomePending {
 			return "", err
 		}
 	}
@@ -95,6 +98,7 @@ type WakeupDispatcher struct {
 	ReclaimInterval time.Duration
 	ReclaimLimit    int
 	OnError         func(context.Context, WakeupDelivery, error)
+	OnBlocked       func(context.Context, gateway.ExecutionKey)
 }
 
 func (d WakeupDispatcher) Run(ctx context.Context) error {
@@ -149,13 +153,16 @@ func (d WakeupDispatcher) handle(ctx context.Context, delivery WakeupDelivery) e
 	if delivery.ID == "" || event.TenantID == "" || event.AggregateID == "" {
 		return runtime.ErrInvalidEnvelope
 	}
-	disposition, err := (WakeupActivator{Store: d.Store, Dispatch: d.Dispatch, ShardCount: d.ShardCount}).Activate(ctx,
-		gateway.ExecutionKey{TenantID: event.TenantID, RequestID: event.AggregateID})
+	key := gateway.ExecutionKey{TenantID: event.TenantID, RequestID: event.AggregateID}
+	disposition, err := (WakeupActivator{Store: d.Store, Dispatch: d.Dispatch, ShardCount: d.ShardCount}).Activate(ctx, key)
 	if err != nil {
 		return err
 	}
 	if disposition == WakeupNotReady {
 		return runtime.ErrInputNotReady
+	}
+	if disposition == WakeupBlocked && d.OnBlocked != nil {
+		d.OnBlocked(ctx, key)
 	}
 	return d.Wakeups.AckWakeup(ctx, delivery)
 }
