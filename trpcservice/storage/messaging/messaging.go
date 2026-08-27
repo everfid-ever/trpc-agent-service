@@ -28,10 +28,11 @@ const (
 
 type ClaimInboxRequest struct {
 	InboxKey
-	AgentAppID, SessionID string
-	PayloadDigest         string
-	KeyVersion            int64
-	InitialState          InboxState
+	AgentAppID, SessionID          string
+	ExternalChatID, ExternalUserID string
+	PayloadDigest                  string
+	KeyVersion                     int64
+	InitialState                   InboxState
 }
 
 // StableInboxIdentity is the single service-owned identity derivation used by
@@ -51,6 +52,7 @@ func StableInboxIdentity(key InboxKey) (requestID, payloadRef string) {
 type InboxRecord struct {
 	InboxKey
 	RequestID, AgentAppID, SessionID string
+	ExternalChatID, ExternalUserID   string
 	InputSeq                         uint64
 	State                            InboxState
 	PayloadRef, PayloadDigest        string
@@ -119,6 +121,7 @@ func StableReplyID(in ReplyCoordinate) (string, error) {
 type ReplyRoute struct {
 	TenantID, RequestID, Channel, ChannelBindingID string
 	ExternalAccountID, ExternalMessageID           string
+	ExternalChatID, ExternalUserID                 string
 	ConfigVersion                                  int64
 }
 

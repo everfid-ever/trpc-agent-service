@@ -61,6 +61,8 @@ func (r ReplyRelay) publish(ctx context.Context, record messaging.OutboxRecord) 
 	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: record.TenantID, RequestID: record.AggregateID,
 		ChannelBindingID: route.ChannelBindingID, DeliveryKey: record.IdempotencyKey,
 		EventSeq: record.EventSeq, Kind: "message.completed", ContentRef: result.ResultRef,
+		Target: channel.DeliveryTarget{Channel: route.Channel, ExternalAccountID: route.ExternalAccountID,
+			ExternalMessageID: route.ExternalMessageID, ExternalChatID: route.ExternalChatID, ExternalUserID: route.ExternalUserID},
 		Final: true, TraceParent: record.TraceParent}
 	return r.Replies.PublishReply(ctx, destination, event)
 }

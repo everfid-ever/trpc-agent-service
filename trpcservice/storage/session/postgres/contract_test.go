@@ -11,9 +11,14 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
+	ingresspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	secretmemory "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
@@ -70,7 +75,9 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 	}
 	inboxes := messagingpostgres.New(db)
 	inboxKey := messaging.InboxKey{TenantID: key.TenantID, Channel: "fake", ExternalAccountID: "contract-account", ExternalMessageID: "prepare-message"}
-	claim := messaging.ClaimInboxRequest{InboxKey: inboxKey, AgentAppID: key.AgentAppID, SessionID: key.SessionID, PayloadDigest: strings.Repeat("d", 64), KeyVersion: 1, InitialState: messaging.InboxDispatchPending}
+	claim := messaging.ClaimInboxRequest{InboxKey: inboxKey, AgentAppID: key.AgentAppID, SessionID: key.SessionID,
+		ExternalChatID: "contract-chat", ExternalUserID: "contract-user", PayloadDigest: strings.Repeat("d", 64),
+		KeyVersion: 1, InitialState: messaging.InboxDispatchPending}
 	first, err := inboxes.ClaimInbox(ctx, claim)
 	if err != nil {
 		t.Fatal(err)
@@ -94,8 +101,70 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 		t.Fatalf("prepare=%#v err=%v", prepared, err)
 	}
 	route, err := inboxes.ResolveReplyRoute(ctx, key.TenantID, first.RequestID)
-	if err != nil || route.ChannelBindingID != "contract-binding" || route.ExternalAccountID != "contract-account" || route.ConfigVersion != 1 {
+	if err != nil || route.ChannelBindingID != "contract-binding" || route.ExternalAccountID != "contract-account" ||
+		route.ExternalChatID != "contract-chat" || route.ExternalUserID != "contract-user" || route.ConfigVersion != 1 {
 		t.Fatalf("reply route=%#v err=%v", route, err)
+	}
+	ingressStore := ingresspostgres.New(db)
+	bindingRoute := ingress.BindingRoute{OpaqueBindingID: "opaque-contract-binding", Channel: "fake", RouteKeyDigest: "route-digest-contract",
+		TenantID: key.TenantID, AgentAppID: key.AgentAppID, ChannelBindingID: "contract-binding", TenantVersion: tenantVersion,
+		BindingVersion: 1, SecretRef: secrets.SecretRef{Ref: "secret://contract", Version: 1}, Enabled: true}
+	if err := ingressStore.PutBindingRoute(ctx, bindingRoute); err != nil {
+		t.Fatal(err)
+	}
+	secretProvider := secretmemory.New()
+	secretProvider.Put(secrets.Scope{TenantID: key.TenantID, Subject: "contract-binding", Purpose: secrets.PurposeChannelVerify,
+		ResourceID: "contract-binding", ResourceVersion: 1}, bindingRoute.SecretRef, []byte("contract-secret"))
+	ingressResolver := ingress.Resolver{Store: ingressStore, Secrets: secretProvider, TTL: time.Minute}
+	candidate, err := ingressResolver.ResolveCandidate(ctx, channel.PublicRouteHint{Channel: "fake", RouteKeyDigest: bindingRoute.RouteKeyDigest, IngressAttemptID: "attempt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := ingressResolver.AcquireVerifier(ctx, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, receipt, err := verifier.Verify(ctx, channel.CallbackRequest{Body: []byte("ciphertext")}, func(_ context.Context, _ channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
+		if string(secret) != "contract-secret" {
+			return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+		}
+		return channel.VerifiedProtocolPayload{Body: []byte("plaintext"), ProtocolIdentityDigest: "identity-digest"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifiedBinding, err := ingressResolver.PromoteVerified(ctx, candidate, receipt)
+	if err != nil || verifiedBinding.TenantID != key.TenantID || verifiedBinding.ChannelBindingID != "contract-binding" {
+		t.Fatalf("verified binding=%#v err=%v", verifiedBinding, err)
+	}
+	// A process may crash after verification but before promotion. The expiry
+	// reconciler must burn that verified candidate instead of retaining it.
+	expiryClock := time.Now().UTC().Truncate(time.Microsecond)
+	expiryResolver := ingress.Resolver{Store: ingressStore, Secrets: secretProvider, TTL: time.Minute, Now: func() time.Time { return expiryClock }}
+	expiringCandidate, err := expiryResolver.ResolveCandidate(ctx, channel.PublicRouteHint{Channel: "fake", RouteKeyDigest: bindingRoute.RouteKeyDigest, IngressAttemptID: "expiry-attempt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiringVerifier, err := expiryResolver.AcquireVerifier(ctx, expiringCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, expiringReceipt, err := expiringVerifier.Verify(ctx, channel.CallbackRequest{}, func(_ context.Context, _ channel.CallbackRequest, secret []byte) (channel.VerifiedProtocolPayload, error) {
+		if string(secret) != "contract-secret" {
+			return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
+		}
+		return channel.VerifiedProtocolPayload{ProtocolIdentityDigest: "expiry-identity"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiryClock = expiryClock.Add(2 * time.Minute)
+	sweeper := ingress.CandidateExpiryReconciler{Store: ingressStore, Now: func() time.Time { return expiryClock }, BatchSize: 10}
+	if count, err := sweeper.RunOnce(ctx); err != nil || count != 1 {
+		t.Fatalf("candidate expiry sweep count=%d err=%v", count, err)
+	}
+	if _, err := expiryResolver.PromoteVerified(ctx, expiringCandidate, expiringReceipt); !errors.Is(err, runtime.ErrVersionConflict) {
+		t.Fatalf("expired verified candidate promoted: %v", err)
 	}
 	repeated, err := tasks.PrepareDispatch(ctx, request)
 	if err != nil || repeated.Envelope != prepared.Envelope {

@@ -12,7 +12,7 @@ import (
 
 func TestDecodeReplyBindsEveryRoutingField(t *testing.T) {
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "reply", ContentRef: "result://request", Final: true}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "reply", ContentRef: "result://request", Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		t.Fatal(err)

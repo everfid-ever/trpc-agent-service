@@ -11,10 +11,15 @@ import (
 
 type registryAdapter struct{ id string }
 
-func (a *registryAdapter) ID() string                                          { return a.id }
-func (*registryAdapter) Run(context.Context) error                             { return nil }
-func (*registryAdapter) Verify(context.Context, channel.CallbackRequest) error { return nil }
-func (*registryAdapter) Decode(context.Context, channel.CallbackRequest) ([]channel.ProviderEvent, error) {
+func (a *registryAdapter) ID() string              { return a.id }
+func (*registryAdapter) Run(context.Context) error { return nil }
+func (*registryAdapter) PublicRoute(context.Context, channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	return channel.PublicRouteHint{}, nil
+}
+func (*registryAdapter) Verify(context.Context, channel.CallbackRequest, channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
+	return channel.VerifiedCallback{}, channel.VerificationReceipt{}, nil
+}
+func (*registryAdapter) Decode(context.Context, channel.VerifiedCallback) ([]channel.ProviderEvent, error) {
 	return nil, nil
 }
 func (*registryAdapter) Deliver(context.Context, channel.DeliveryRequest) (channel.DeliveryResult, error) {

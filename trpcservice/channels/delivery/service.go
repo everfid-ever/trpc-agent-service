@@ -59,7 +59,8 @@ type Service struct {
 
 func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	if s.Results == nil || s.Ledger == nil || s.Adapters == nil || event.SchemaVersion != 1 ||
-		s.Owner == "" || event.TenantID == "" || event.RequestID == "" || event.ChannelBindingID == "" || event.DeliveryKey == "" || event.ContentRef == "" {
+		s.Owner == "" || event.TenantID == "" || event.RequestID == "" || event.ChannelBindingID == "" || event.DeliveryKey == "" || event.ContentRef == "" ||
+		event.Target.Channel == "" || event.Target.ExternalAccountID == "" {
 		return runtime.ErrInvariantViolation
 	}
 	result, err := s.Results.GetResult(ctx, event.TenantID, event.RequestID)
@@ -103,7 +104,13 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	if err != nil {
 		return s.finishRetry(ctx, record, err, 0)
 	}
-	record, resultDelivery, deliverErr := s.deliverWithClaimRenewal(ctx, adapter, channel.DeliveryRequest{Event: event, ClientRequestID: record.ClientRequestID}, record, claimTTL)
+	if adapter == nil || adapter.ID() != event.Target.Channel {
+		return s.finishFailed(ctx, record, runtime.ErrTenantScope, "delivery_route_mismatch", false)
+	}
+	record, resultDelivery, deliverErr := s.deliverWithClaimRenewal(ctx, adapter, channel.DeliveryRequest{
+		Event: event, ClientRequestID: record.ClientRequestID, Target: event.Target,
+		Content: append([]byte(nil), result.Content...), ContentDigest: result.ContentDigest,
+	}, record, claimTTL)
 	if deliverErr != nil {
 		var ambiguous AmbiguousError
 		if errors.As(deliverErr, &ambiguous) {

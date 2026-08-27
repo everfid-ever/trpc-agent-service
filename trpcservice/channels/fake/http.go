@@ -94,6 +94,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ExternalAccountID: externalAccountID, ExternalMessageID: in.ExternalMessageID,
 		},
 		AgentAppID: binding.Tenant.AgentAppID, SessionID: sessionID,
+		ExternalChatID: in.ExternalChatID, ExternalUserID: in.ExternalUserID,
 		PayloadDigest: hex.EncodeToString(digest[:]), KeyVersion: 1,
 		InitialState: messaging.InboxDispatchPending,
 	})

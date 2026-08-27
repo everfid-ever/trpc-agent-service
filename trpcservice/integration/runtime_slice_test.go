@@ -880,10 +880,15 @@ type deliveryAdapterStub struct {
 	calls int
 }
 
-func (*deliveryAdapterStub) ID() string                                            { return "fake-delivery" }
-func (*deliveryAdapterStub) Run(context.Context) error                             { return nil }
-func (*deliveryAdapterStub) Verify(context.Context, channel.CallbackRequest) error { return nil }
-func (*deliveryAdapterStub) Decode(context.Context, channel.CallbackRequest) ([]channel.ProviderEvent, error) {
+func (*deliveryAdapterStub) ID() string                { return "fake" }
+func (*deliveryAdapterStub) Run(context.Context) error { return nil }
+func (*deliveryAdapterStub) PublicRoute(context.Context, channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	return channel.PublicRouteHint{}, nil
+}
+func (*deliveryAdapterStub) Verify(context.Context, channel.CallbackRequest, channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
+	return channel.VerifiedCallback{}, channel.VerificationReceipt{}, nil
+}
+func (*deliveryAdapterStub) Decode(context.Context, channel.VerifiedCallback) ([]channel.ProviderEvent, error) {
 	return nil, nil
 }
 func (a *deliveryAdapterStub) Deliver(_ context.Context, request channel.DeliveryRequest) (channel.DeliveryResult, error) {

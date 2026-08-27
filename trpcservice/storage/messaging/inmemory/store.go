@@ -143,13 +143,16 @@ func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.inbox[in.InboxKey]; ok {
-		if old.PayloadDigest != in.PayloadDigest || old.PayloadRef != payloadRef || old.AgentAppID != in.AgentAppID || old.SessionID != in.SessionID {
+		if old.PayloadDigest != in.PayloadDigest || old.PayloadRef != payloadRef || old.AgentAppID != in.AgentAppID || old.SessionID != in.SessionID ||
+			old.ExternalChatID != in.ExternalChatID || old.ExternalUserID != in.ExternalUserID {
 			return messaging.InboxRecord{}, runtime.ErrIdempotencyCollision
 		}
 		return old, nil
 	}
 	now := time.Now().UTC()
-	record := messaging.InboxRecord{InboxKey: in.InboxKey, RequestID: requestID, AgentAppID: in.AgentAppID, SessionID: in.SessionID, State: in.InitialState, PayloadRef: payloadRef, PayloadDigest: in.PayloadDigest, KeyVersion: in.KeyVersion, CreatedAt: now, UpdatedAt: now}
+	record := messaging.InboxRecord{InboxKey: in.InboxKey, RequestID: requestID, AgentAppID: in.AgentAppID, SessionID: in.SessionID,
+		ExternalChatID: in.ExternalChatID, ExternalUserID: in.ExternalUserID, State: in.InitialState, PayloadRef: payloadRef,
+		PayloadDigest: in.PayloadDigest, KeyVersion: in.KeyVersion, CreatedAt: now, UpdatedAt: now}
 	s.inbox[in.InboxKey] = record
 	return record, nil
 }

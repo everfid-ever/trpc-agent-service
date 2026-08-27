@@ -16,18 +16,25 @@ type adapterStub struct {
 	calls            int
 	err              error
 	clientRequestIDs []string
+	requests         []channel.DeliveryRequest
 	delay            time.Duration
 }
 
-func (*adapterStub) ID() string                                            { return "fake" }
-func (*adapterStub) Run(context.Context) error                             { return nil }
-func (*adapterStub) Verify(context.Context, channel.CallbackRequest) error { return nil }
-func (*adapterStub) Decode(context.Context, channel.CallbackRequest) ([]channel.ProviderEvent, error) {
+func (*adapterStub) ID() string                { return "fake" }
+func (*adapterStub) Run(context.Context) error { return nil }
+func (*adapterStub) PublicRoute(context.Context, channel.CallbackRequest) (channel.PublicRouteHint, error) {
+	return channel.PublicRouteHint{}, nil
+}
+func (*adapterStub) Verify(context.Context, channel.CallbackRequest, channel.ScopedVerifierHandle) (channel.VerifiedCallback, channel.VerificationReceipt, error) {
+	return channel.VerifiedCallback{}, channel.VerificationReceipt{}, nil
+}
+func (*adapterStub) Decode(context.Context, channel.VerifiedCallback) ([]channel.ProviderEvent, error) {
 	return nil, nil
 }
 func (s *adapterStub) Deliver(_ context.Context, request channel.DeliveryRequest) (channel.DeliveryResult, error) {
 	s.calls++
 	s.clientRequestIDs = append(s.clientRequestIDs, request.ClientRequestID)
+	s.requests = append(s.requests, request)
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}
@@ -58,6 +65,11 @@ func (s resolverStub) ResolveAdapter(context.Context, string, string) (channel.A
 	return s.adapter, nil
 }
 
+func testReplyEvent(contentRef string) channel.ReplyEvent {
+	return channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply",
+		ContentRef: contentRef, Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
+}
+
 func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	store := memory.New()
 	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
@@ -66,7 +78,7 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	}
 	adapter := &adapterStub{}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
@@ -78,6 +90,9 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	}
 	if len(adapter.clientRequestIDs) != 1 || adapter.clientRequestIDs[0] == "" {
 		t.Fatalf("client request IDs=%#v", adapter.clientRequestIDs)
+	}
+	if len(adapter.requests) != 1 || string(adapter.requests[0].Content) != "done" || adapter.requests[0].ContentDigest != "digest" || adapter.requests[0].Target != testReplyEvent(result.ResultRef).Target {
+		t.Fatalf("delivery request=%#v", adapter.requests)
 	}
 }
 
@@ -93,7 +108,7 @@ func TestExpiredOwnerReconcilesDeliveredWithoutResend(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationDelivered, ProviderMessageID: "provider-existing"}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +131,7 @@ func TestExpiredOwnerReconcilesNotDeliveredThenRetriesSameRequestID(t *testing.T
 	time.Sleep(time.Millisecond)
 	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationNotDelivered}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	var deferred DeferredError
 	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
 		t.Fatalf("reconcile err=%v", err)
@@ -139,7 +154,7 @@ func TestUnknownReconciliationStopsAtMaxAttempts(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationUnknown}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner", MaxReconcileAttempts: 2, DefaultRetryDelay: time.Nanosecond}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	var deferred DeferredError
 	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
 		t.Fatalf("first reconcile err=%v", err)
@@ -166,7 +181,7 @@ func TestNonReconcilableAmbiguousDeliveryReachesFailedTerminal(t *testing.T) {
 	// adapterStub does not implement DeliveryReconciler.
 	adapter := &adapterStub{}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner", MaxReconcileAttempts: 2, DefaultRetryDelay: time.Nanosecond}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	var deferred DeferredError
 	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
 		t.Fatalf("first reconcile err=%v", err)
@@ -188,7 +203,7 @@ func TestAmbiguousDeliveryIsNotBlindlyRetried(t *testing.T) {
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{err: AmbiguousError{Err: errors.New("response lost")}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err == nil {
 		t.Fatal("expected ambiguous delivery error")
 	}
@@ -206,7 +221,7 @@ func TestRetryWaitIsDeferredInsteadOfReportedAsDelivered(t *testing.T) {
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{err: RetryAfterError{Err: errors.New("rate limited")}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", DefaultRetryDelay: time.Hour}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err == nil {
 		t.Fatal("expected first provider error")
 	}
@@ -225,7 +240,7 @@ func TestPermanentFailureReachesFailedTerminal(t *testing.T) {
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{err: PermanentError{Err: errors.New("recipient blocked"), Class: "recipient_blocked"}}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	var terminal TerminalError
 	if err := service.Deliver(context.Background(), event); !errors.As(err, &terminal) {
 		t.Fatalf("expected terminal error, got %v", err)
@@ -245,7 +260,7 @@ func TestRetryableFailureStopsAtMaxAttempts(t *testing.T) {
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{err: errors.New("temporary")}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", MaxAttempts: 2, DefaultRetryDelay: time.Nanosecond}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err == nil {
 		t.Fatal("expected first retryable error")
 	}
@@ -266,7 +281,7 @@ func TestLongProviderCallRenewsSendingClaim(t *testing.T) {
 	_ = store.PutResult(context.Background(), result)
 	adapter := &adapterStub{delay: 60 * time.Millisecond}
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", ClaimTTL: 20 * time.Millisecond, ClaimRenewInterval: 5 * time.Millisecond}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	event := testReplyEvent(result.ResultRef)
 	if err := service.Deliver(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +295,7 @@ func TestResultReferenceMismatchUsesVersionError(t *testing.T) {
 	store := memory.New()
 	_ = store.PutResult(context.Background(), messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://right", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1})
 	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: &adapterStub{}}, Owner: "adapter-1"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: "result://stale", Final: true}
+	event := testReplyEvent("result://stale")
 	if err := service.Deliver(context.Background(), event); !errors.Is(err, runtime.ErrVersionMismatch) {
 		t.Fatalf("err=%v", err)
 	}

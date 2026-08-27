@@ -156,6 +156,8 @@ func decodeReply(destination channel.ReplyDestination, message redisclient.XMess
 	if !schemaOK || !tenantOK || !channelOK || !bindingOK || !accountOK || !deliveryOK || schemaVersion != "1" ||
 		tenantID != destination.TenantID || tenantID != event.TenantID || bindingID != destination.ChannelBindingID ||
 		bindingID != event.ChannelBindingID || channelID != destination.Channel || accountID != destination.ExternalAccountID ||
+		event.Target.Channel != channelID || event.Target.ExternalAccountID != accountID ||
+		(event.Target.ExternalMessageID == "" && event.Target.ExternalChatID == "" && event.Target.ExternalUserID == "") ||
 		deliveryKey != event.DeliveryKey || event.SchemaVersion != 1 ||
 		event.RequestID == "" || event.DeliveryKey == "" || event.ContentRef == "" {
 		return channel.ReplyDelivery{}, runtime.ErrVersionMismatch

@@ -39,7 +39,9 @@ func NewPublisher(client redisclient.UniversalClient, config Config) (*Publisher
 
 func (p *Publisher) PublishReply(ctx context.Context, destination channel.ReplyDestination, event channel.ReplyEvent) error {
 	if destination.TenantID == "" || destination.Channel == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" ||
-		event.SchemaVersion != 1 || event.TenantID != destination.TenantID || event.ChannelBindingID != destination.ChannelBindingID || event.DeliveryKey == "" {
+		event.SchemaVersion != 1 || event.TenantID != destination.TenantID || event.ChannelBindingID != destination.ChannelBindingID || event.DeliveryKey == "" ||
+		event.Target.Channel != destination.Channel || event.Target.ExternalAccountID != destination.ExternalAccountID ||
+		(event.Target.ExternalMessageID == "" && event.Target.ExternalChatID == "" && event.Target.ExternalUserID == "") {
 		return runtime.ErrInvariantViolation
 	}
 	payload, err := json.Marshal(event)

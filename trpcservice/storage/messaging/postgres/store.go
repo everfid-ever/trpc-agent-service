@@ -146,14 +146,15 @@ func (s *Store) ResolveReplyRoute(ctx context.Context, tenantID, requestID strin
 	}
 	var route messaging.ReplyRoute
 	route.TenantID, route.RequestID = tenantID, requestID
-	err := s.db.QueryRowContext(ctx, `SELECT e.channel,e.config_version,cb.binding_id,i.external_account_id,i.external_message_id
+	err := s.db.QueryRowContext(ctx, `SELECT e.channel,e.config_version,cb.binding_id,i.external_account_id,i.external_message_id,i.external_chat_id,i.external_user_id
 FROM execution_record e
 JOIN inbox i ON i.tenant_id=e.tenant_id AND i.request_id=e.request_id
 JOIN channel_binding cb ON cb.tenant_id=e.tenant_id AND cb.config_version=e.config_version
   AND cb.channel=i.channel AND cb.external_account_id=i.external_account_id
   AND cb.agent_app_id=e.agent_app_id
 WHERE e.tenant_id=$1 AND e.request_id=$2`, tenantID, requestID).
-		Scan(&route.Channel, &route.ConfigVersion, &route.ChannelBindingID, &route.ExternalAccountID, &route.ExternalMessageID)
+		Scan(&route.Channel, &route.ConfigVersion, &route.ChannelBindingID, &route.ExternalAccountID, &route.ExternalMessageID,
+			&route.ExternalChatID, &route.ExternalUserID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return messaging.ReplyRoute{}, runtime.ErrNotFound
 	}
@@ -209,18 +210,18 @@ func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) 
 	}
 	requestID, payloadRef := messaging.StableInboxIdentity(in.InboxKey)
 	row := s.db.QueryRowContext(ctx, `SELECT tenant_id,channel,external_account_id,external_message_id,
-request_id,agent_app_id,COALESCE(session_id,''),COALESCE(input_seq,0),state,payload_ref,payload_digest,
+request_id,agent_app_id,COALESCE(session_id,''),external_chat_id,external_user_id,COALESCE(input_seq,0),state,payload_ref,payload_digest,
 key_version,version,COALESCE(terminal_reason,''),COALESCE(result_ref,''),created_at,updated_at
-FROM claim_inbox($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+FROM claim_channel_inbox($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		in.TenantID, in.Channel, in.ExternalAccountID, in.ExternalMessageID, requestID,
-		in.AgentAppID, nullable(in.SessionID), payloadRef, in.PayloadDigest, in.KeyVersion, string(in.InitialState))
+		in.AgentAppID, nullable(in.SessionID), in.ExternalChatID, in.ExternalUserID, payloadRef, in.PayloadDigest, in.KeyVersion, string(in.InitialState))
 	record, err := scanInbox(row)
 	return record, translate(err)
 }
 
 func (s *Store) GetInbox(ctx context.Context, key messaging.InboxKey) (messaging.InboxRecord, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT tenant_id,channel,external_account_id,external_message_id,
-request_id,agent_app_id,COALESCE(session_id,''),COALESCE(input_seq,0),state,payload_ref,payload_digest,
+request_id,agent_app_id,COALESCE(session_id,''),external_chat_id,external_user_id,COALESCE(input_seq,0),state,payload_ref,payload_digest,
 key_version,version,COALESCE(terminal_reason,''),COALESCE(result_ref,''),created_at,updated_at
 FROM inbox WHERE tenant_id=$1 AND channel=$2 AND external_account_id=$3 AND external_message_id=$4`,
 		key.TenantID, key.Channel, key.ExternalAccountID, key.ExternalMessageID)
@@ -232,7 +233,7 @@ type rowScanner interface{ Scan(...any) error }
 func scanInbox(row rowScanner) (messaging.InboxRecord, error) {
 	var record messaging.InboxRecord
 	err := row.Scan(&record.TenantID, &record.Channel, &record.ExternalAccountID, &record.ExternalMessageID,
-		&record.RequestID, &record.AgentAppID, &record.SessionID, &record.InputSeq, &record.State,
+		&record.RequestID, &record.AgentAppID, &record.SessionID, &record.ExternalChatID, &record.ExternalUserID, &record.InputSeq, &record.State,
 		&record.PayloadRef, &record.PayloadDigest, &record.KeyVersion, &record.Version,
 		&record.TerminalReason, &record.ResultRef, &record.CreatedAt, &record.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {

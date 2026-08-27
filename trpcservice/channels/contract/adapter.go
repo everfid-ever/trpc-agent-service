@@ -53,8 +53,61 @@ type MediaRef struct {
 }
 type CallbackRequest struct {
 	Headers    map[string]string
+	Query      map[string]string
 	Body       []byte
 	ReceivedAt time.Time
+}
+
+// PublicRouteHint contains provider-public routing material only. It never
+// carries tenant, application, SecretRef, or credential values.
+type PublicRouteHint struct {
+	Channel, ExternalAccountHint, RouteKeyDigest string
+	IngressAttemptID, TraceParent                string
+}
+
+type CandidateBindingContext struct {
+	Channel, RouteKeyDigest, CandidateToken string
+	BindingVersion                          int64
+	Purpose                                 string
+	IssuedAt, ExpiresAt                     time.Time
+}
+
+type VerifiedProtocolPayload struct {
+	Body                   []byte
+	Headers                map[string]string
+	ProtocolIdentityDigest string
+}
+
+type VerifiedCallback struct {
+	Body                   []byte
+	Headers                map[string]string
+	ReceivedAt             time.Time
+	ProtocolIdentityDigest string
+}
+
+// ProtocolVerifier is invoked while the single-use handle owns the scoped
+// verification secret. Implementations must not retain secret after return.
+type ProtocolVerifier func(context.Context, CallbackRequest, []byte) (VerifiedProtocolPayload, error)
+
+type VerificationReceipt struct {
+	CandidateToken, ReceiptToken, Purpose, ProtocolIdentityDigest string
+	VerifiedAt                                                    time.Time
+}
+
+type ScopedVerifierHandle interface {
+	Verify(context.Context, CallbackRequest, ProtocolVerifier) (VerifiedCallback, VerificationReceipt, error)
+	Close() error
+}
+
+type VerifiedBinding struct {
+	TenantID, AgentAppID, ChannelBindingID string
+	TenantVersion, BindingVersion          int64
+}
+
+type IngressBindingResolver interface {
+	ResolveCandidate(context.Context, PublicRouteHint) (CandidateBindingContext, error)
+	AcquireVerifier(context.Context, CandidateBindingContext) (ScopedVerifierHandle, error)
+	PromoteVerified(context.Context, CandidateBindingContext, VerificationReceipt) (VerifiedBinding, error)
 }
 type Capabilities struct{ Text, StreamEdit, Markdown, Card, Image, File, Recall bool }
 type ProviderEvent struct {
@@ -80,6 +133,7 @@ type ReplyEvent struct {
 	TenantID, RequestID, ChannelBindingID, DeliveryKey string
 	EventSeq                                           uint64
 	Kind, ContentRef                                   string
+	Target                                             DeliveryTarget
 	Final                                              bool
 	TraceParent                                        string
 }
@@ -112,6 +166,14 @@ type ReplyQueue interface {
 type DeliveryRequest struct {
 	Event           ReplyEvent
 	ClientRequestID string
+	Target          DeliveryTarget
+	Content         []byte
+	ContentDigest   string
+}
+
+type DeliveryTarget struct {
+	Channel, ExternalAccountID, ExternalMessageID string
+	ExternalChatID, ExternalUserID                string
 }
 type DeliveryResult struct {
 	ProviderMessageID string
@@ -145,8 +207,9 @@ type DeliveryReconciler interface {
 type Adapter interface {
 	ID() string
 	Run(context.Context) error
-	Verify(context.Context, CallbackRequest) error
-	Decode(context.Context, CallbackRequest) ([]ProviderEvent, error)
+	PublicRoute(context.Context, CallbackRequest) (PublicRouteHint, error)
+	Verify(context.Context, CallbackRequest, ScopedVerifierHandle) (VerifiedCallback, VerificationReceipt, error)
+	Decode(context.Context, VerifiedCallback) ([]ProviderEvent, error)
 	Deliver(context.Context, DeliveryRequest) (DeliveryResult, error)
 	Capabilities() Capabilities
 }
