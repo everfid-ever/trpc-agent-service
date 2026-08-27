@@ -162,6 +162,10 @@ func TestDeliveryLedgerPostgreSQL16(t *testing.T) {
 	if duplicate, acquired, err := store.ClaimDelivery(ctx, key, plan, claim); err != nil || acquired || duplicate.Version != claimed.Version {
 		t.Fatalf("duplicate=%#v acquired=%t err=%v", duplicate, acquired, err)
 	}
+	claimed, err = store.RenewDeliveryClaim(ctx, claimed, time.Minute)
+	if err != nil || claimed.ClaimUntil.Before(time.Now()) {
+		t.Fatalf("renewed=%#v err=%v", claimed, err)
+	}
 	claimed.State = messaging.DeliveryAmbiguous
 	claimed.LastErrorClass = "response_lost"
 	ambiguous, err := store.FinishDelivery(ctx, claimed, claimed.Version)
@@ -170,6 +174,11 @@ func TestDeliveryLedgerPostgreSQL16(t *testing.T) {
 	}
 	if replay, acquired, err := store.ClaimDelivery(ctx, key, plan, claim); err != nil || acquired || replay.State != messaging.DeliveryAmbiguous {
 		t.Fatalf("replay=%#v acquired=%t err=%v", replay, acquired, err)
+	}
+	ambiguous.ReconcileAttempt, ambiguous.NotBefore, ambiguous.LastErrorClass = 1, time.Now().Add(time.Second), "reconcile_retryable"
+	ambiguous, err = store.DeferDeliveryReconciliation(ctx, ambiguous, ambiguous.Version)
+	if err != nil || ambiguous.ReconcileAttempt != 1 {
+		t.Fatalf("deferred=%#v err=%v", ambiguous, err)
 	}
 	ambiguous.State, ambiguous.ProviderMessageID = messaging.DeliverySent, "provider-reconciled"
 	reconciled, err := store.ReconcileDelivery(ctx, ambiguous, ambiguous.Version)

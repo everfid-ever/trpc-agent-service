@@ -162,6 +162,7 @@ const (
 	IssueParkedInput        ReconciliationIssueKind = "parked_input"
 	IssueMissingReplyOutbox ReconciliationIssueKind = "missing_reply_outbox"
 	IssueStuckDelivery      ReconciliationIssueKind = "stuck_delivery"
+	IssueAmbiguousDelivery  ReconciliationIssueKind = "ambiguous_delivery"
 )
 
 type ReconciliationIssue struct {
@@ -200,7 +201,7 @@ type DeliveryRecord struct {
 	ProviderMessageID, LastErrorClass, ClientRequestID, ClaimOwner string
 	State                                                          DeliveryState
 	Plan                                                           DeliveryPlan
-	Attempt                                                        int
+	Attempt, ReconcileAttempt                                      int
 	Version                                                        int64
 	NotBefore, ClaimUntil, UpdatedAt                               time.Time
 }
@@ -213,7 +214,9 @@ type DeliveryClaim struct {
 type DeliveryLedger interface {
 	GetDelivery(context.Context, DeliveryKey) (DeliveryRecord, error)
 	ClaimDelivery(context.Context, DeliveryKey, DeliveryPlan, DeliveryClaim) (DeliveryRecord, bool, error)
+	RenewDeliveryClaim(context.Context, DeliveryRecord, time.Duration) (DeliveryRecord, error)
 	FinishDelivery(context.Context, DeliveryRecord, int64) (DeliveryRecord, error)
+	DeferDeliveryReconciliation(context.Context, DeliveryRecord, int64) (DeliveryRecord, error)
 	ReconcileDelivery(context.Context, DeliveryRecord, int64) (DeliveryRecord, error)
 }
 

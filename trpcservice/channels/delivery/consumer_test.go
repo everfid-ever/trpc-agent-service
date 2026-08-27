@@ -61,6 +61,18 @@ func TestConsumerLeavesRetryableDeliveryPending(t *testing.T) {
 	}
 }
 
+func TestConsumerACKsDurablyRecordedTerminalFailure(t *testing.T) {
+	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
+	delivery := channel.ReplyDelivery{ID: "1-0", Destination: destination}
+	queue := &replyQueueStub{reclaimed: []channel.ReplyDelivery{delivery}}
+	deliverer := &eventDelivererStub{err: TerminalError{Err: errors.New("recipient blocked")}}
+	consumer := Consumer{Queue: queue, Deliverer: deliverer, Destination: destination, ConsumerID: "adapter-1"}
+	count, err := consumer.ReclaimOnce(context.Background())
+	if err != nil || count != 1 || len(queue.acked) != 1 {
+		t.Fatalf("count=%d acked=%d err=%v", count, len(queue.acked), err)
+	}
+}
+
 func TestConsumerRejectsCrossBindingDelivery(t *testing.T) {
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
 	wrong := destination

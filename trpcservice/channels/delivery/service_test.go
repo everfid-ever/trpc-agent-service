@@ -7,6 +7,7 @@ import (
 	"time"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	memory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 )
@@ -15,6 +16,7 @@ type adapterStub struct {
 	calls            int
 	err              error
 	clientRequestIDs []string
+	delay            time.Duration
 }
 
 func (*adapterStub) ID() string                                            { return "fake" }
@@ -26,6 +28,9 @@ func (*adapterStub) Decode(context.Context, channel.CallbackRequest) ([]channel.
 func (s *adapterStub) Deliver(_ context.Context, request channel.DeliveryRequest) (channel.DeliveryResult, error) {
 	s.calls++
 	s.clientRequestIDs = append(s.clientRequestIDs, request.ClientRequestID)
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
 	if s.err != nil {
 		return channel.DeliveryResult{}, s.err
 	}
@@ -124,6 +129,59 @@ func TestExpiredOwnerReconcilesNotDeliveredThenRetriesSameRequestID(t *testing.T
 	}
 }
 
+func TestUnknownReconciliationStopsAtMaxAttempts(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "terminal-text-v1", FormatVersion: "text-v1", ContentDigest: result.ContentDigest, SegmentCount: 1}
+	_, _, _ = store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	adapter := &reconcilingAdapter{result: channel.ReconciliationResult{Status: channel.ReconciliationUnknown}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner", MaxReconcileAttempts: 2, DefaultRetryDelay: time.Nanosecond}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	var deferred DeferredError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
+		t.Fatalf("first reconcile err=%v", err)
+	}
+	time.Sleep(time.Millisecond)
+	var terminal TerminalError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &terminal) {
+		t.Fatalf("second reconcile err=%v", err)
+	}
+	record, _ := store.GetDelivery(context.Background(), key)
+	if record.State != messaging.DeliveryFailed || record.LastErrorClass != "reconcile_exhausted" || adapter.reconcileCalls != 2 {
+		t.Fatalf("record=%#v reconcile calls=%d", record, adapter.reconcileCalls)
+	}
+}
+
+func TestNonReconcilableAmbiguousDeliveryReachesFailedTerminal(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	key := messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0}
+	plan := messaging.DeliveryPlan{RendererVersion: "terminal-text-v1", FormatVersion: "text-v1", ContentDigest: result.ContentDigest, SegmentCount: 1}
+	_, _, _ = store.ClaimDelivery(context.Background(), key, plan, messaging.DeliveryClaim{Owner: "dead-owner", TTL: time.Nanosecond})
+	time.Sleep(time.Millisecond)
+	// adapterStub does not implement DeliveryReconciler.
+	adapter := &adapterStub{}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "new-owner", MaxReconcileAttempts: 2, DefaultRetryDelay: time.Nanosecond}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	var deferred DeferredError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &deferred) {
+		t.Fatalf("first reconcile err=%v", err)
+	}
+	time.Sleep(time.Millisecond)
+	var terminal TerminalError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &terminal) {
+		t.Fatalf("expected exhausted terminal error, got %v", err)
+	}
+	record, _ := store.GetDelivery(context.Background(), key)
+	if record.State != messaging.DeliveryFailed || record.LastErrorClass != "reconcile_exhausted" || adapter.calls != 0 {
+		t.Fatalf("record=%#v provider calls=%d", record, adapter.calls)
+	}
+}
+
 func TestAmbiguousDeliveryIsNotBlindlyRetried(t *testing.T) {
 	store := memory.New()
 	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
@@ -158,5 +216,72 @@ func TestRetryWaitIsDeferredInsteadOfReportedAsDelivered(t *testing.T) {
 	}
 	if adapter.calls != 1 {
 		t.Fatalf("provider calls=%d", adapter.calls)
+	}
+}
+
+func TestPermanentFailureReachesFailedTerminal(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	adapter := &adapterStub{err: PermanentError{Err: errors.New("recipient blocked"), Class: "recipient_blocked"}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	var terminal TerminalError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &terminal) {
+		t.Fatalf("expected terminal error, got %v", err)
+	}
+	record, err := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0})
+	if err != nil || record.State != messaging.DeliveryFailed || record.LastErrorClass != "recipient_blocked" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	if err := service.Deliver(context.Background(), event); err != nil || adapter.calls != 1 {
+		t.Fatalf("terminal replay calls=%d err=%v", adapter.calls, err)
+	}
+}
+
+func TestRetryableFailureStopsAtMaxAttempts(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	adapter := &adapterStub{err: errors.New("temporary")}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", MaxAttempts: 2, DefaultRetryDelay: time.Nanosecond}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	if err := service.Deliver(context.Background(), event); err == nil {
+		t.Fatal("expected first retryable error")
+	}
+	time.Sleep(time.Millisecond)
+	var terminal TerminalError
+	if err := service.Deliver(context.Background(), event); !errors.As(err, &terminal) {
+		t.Fatalf("expected exhausted terminal error, got %v", err)
+	}
+	record, _ := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0})
+	if record.State != messaging.DeliveryFailed || record.LastErrorClass != "retry_exhausted" || adapter.calls != 2 {
+		t.Fatalf("record=%#v calls=%d", record, adapter.calls)
+	}
+}
+
+func TestLongProviderCallRenewsSendingClaim(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	_ = store.PutResult(context.Background(), result)
+	adapter := &adapterStub{delay: 60 * time.Millisecond}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", ClaimTTL: 20 * time.Millisecond, ClaimRenewInterval: 5 * time.Millisecond}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: result.ResultRef, Final: true}
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0})
+	if record.State != messaging.DeliverySent || record.Version < 4 {
+		t.Fatalf("record=%#v", record)
+	}
+}
+
+func TestResultReferenceMismatchUsesVersionError(t *testing.T) {
+	store := memory.New()
+	_ = store.PutResult(context.Background(), messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://right", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1})
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: &adapterStub{}}, Owner: "adapter-1"}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: "result://stale", Final: true}
+	if err := service.Deliver(context.Background(), event); !errors.Is(err, runtime.ErrVersionMismatch) {
+		t.Fatalf("err=%v", err)
 	}
 }

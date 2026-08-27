@@ -245,6 +245,45 @@ func (s *Store) FinishDelivery(ctx context.Context, in messaging.DeliveryRecord,
 	return in, nil
 }
 
+func (s *Store) RenewDeliveryClaim(ctx context.Context, in messaging.DeliveryRecord, ttl time.Duration) (messaging.DeliveryRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.DeliveryRecord{}, err
+	}
+	if ttl <= 0 || in.ClaimOwner == "" || in.ClientRequestID == "" {
+		return messaging.DeliveryRecord{}, runtime.ErrCommitConflict
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	old, exists := s.deliveries[in.DeliveryKey]
+	if !exists || old.Version != in.Version || old.State != messaging.DeliverySending || old.ClaimOwner != in.ClaimOwner ||
+		old.ClientRequestID != in.ClientRequestID || !old.ClaimUntil.After(now) {
+		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
+	}
+	old.ClaimUntil, old.Version, old.UpdatedAt = now.Add(ttl), old.Version+1, now
+	s.deliveries[in.DeliveryKey] = old
+	return old, nil
+}
+
+func (s *Store) DeferDeliveryReconciliation(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.DeliveryRecord{}, err
+	}
+	if in.State != messaging.DeliveryAmbiguous || in.ReconcileAttempt < 1 || in.NotBefore.IsZero() {
+		return messaging.DeliveryRecord{}, runtime.ErrCommitConflict
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, exists := s.deliveries[in.DeliveryKey]
+	if !exists || old.Version != expectedVersion || old.State != messaging.DeliveryAmbiguous || old.Plan != in.Plan ||
+		old.ClientRequestID != in.ClientRequestID || in.ReconcileAttempt != old.ReconcileAttempt+1 {
+		return messaging.DeliveryRecord{}, runtime.ErrVersionConflict
+	}
+	in.Version, in.Attempt, in.UpdatedAt = expectedVersion+1, old.Attempt, time.Now().UTC()
+	s.deliveries[in.DeliveryKey] = in
+	return in, nil
+}
+
 func (s *Store) ReconcileDelivery(ctx context.Context, in messaging.DeliveryRecord, expectedVersion int64) (messaging.DeliveryRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return messaging.DeliveryRecord{}, err

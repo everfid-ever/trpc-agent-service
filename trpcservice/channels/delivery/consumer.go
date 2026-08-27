@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -100,8 +101,12 @@ func (c Consumer) process(ctx context.Context, delivery channel.ReplyDelivery) e
 		if c.OnDeliveryError != nil {
 			c.OnDeliveryError(delivery, err)
 		}
-		// Delivery failures are durable state, not queue failures. Leave the
-		// entry pending and continue consuming unrelated account replies.
+		var terminal TerminalError
+		if errors.As(err, &terminal) {
+			return c.Queue.AckReply(ctx, c.Destination, delivery)
+		}
+		// Retryable/ambiguous failures are durable state. Leave the entry
+		// pending and continue consuming unrelated account replies.
 		return nil
 	}
 	return c.Queue.AckReply(ctx, c.Destination, delivery)

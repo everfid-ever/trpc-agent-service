@@ -6,6 +6,47 @@ import (
 	"time"
 )
 
+// AmbiguousDeliveryError means the provider might have accepted a delivery,
+// so callers must reconcile it instead of blindly sending it again.
+type AmbiguousDeliveryError struct{ Err error }
+
+func (e AmbiguousDeliveryError) Error() string {
+	if e.Err == nil {
+		return "reply delivery outcome is ambiguous"
+	}
+	return e.Err.Error()
+}
+func (e AmbiguousDeliveryError) Unwrap() error { return e.Err }
+
+// RetryableDeliveryError optionally carries a provider-requested retry delay.
+type RetryableDeliveryError struct {
+	Err        error
+	RetryAfter time.Duration
+}
+
+func (e RetryableDeliveryError) Error() string {
+	if e.Err == nil {
+		return "reply delivery should be retried"
+	}
+	return e.Err.Error()
+}
+func (e RetryableDeliveryError) Unwrap() error { return e.Err }
+
+// PermanentDeliveryError classifies a provider rejection that cannot succeed
+// unchanged, such as an invalid recipient or an oversized payload.
+type PermanentDeliveryError struct {
+	Err   error
+	Class string
+}
+
+func (e PermanentDeliveryError) Error() string {
+	if e.Err == nil {
+		return "permanent reply delivery failure"
+	}
+	return e.Err.Error()
+}
+func (e PermanentDeliveryError) Unwrap() error { return e.Err }
+
 type MediaRef struct {
 	ID, Kind, ContentType string
 	Size                  int64
