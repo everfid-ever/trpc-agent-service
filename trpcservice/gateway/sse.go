@@ -62,10 +62,7 @@ func (h *SSEHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request
 		writeControlError(writer, err)
 		return
 	}
-	limit := h.ReplayLimit
-	if limit <= 0 || limit > 256 {
-		limit = 64
-	}
+	limit := normalizeReplayLimit(h.ReplayLimit)
 	page, err := h.Events.Replay(request.Context(), key, after, limit)
 	if err != nil {
 		writeControlError(writer, err)

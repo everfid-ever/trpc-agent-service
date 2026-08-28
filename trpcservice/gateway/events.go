@@ -29,6 +29,21 @@ type SharedEventStore interface {
 	Replay(context.Context, ExecutionKey, uint64, int) (EventPage, error)
 }
 
+const (
+	defaultReplayLimit = 64
+	maximumReplayLimit = 256
+)
+
+func normalizeReplayLimit(limit int) int {
+	if limit <= 0 {
+		return defaultReplayLimit
+	}
+	if limit > maximumReplayLimit {
+		return maximumReplayLimit
+	}
+	return limit
+}
+
 // TerminalEventStore derives replayable terminal SSE events from the shared
 // TaskStore and immutable ResultStore. Both PostgreSQL implementations satisfy
 // these ports, so Gateway restart does not lose terminal replay state.

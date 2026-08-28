@@ -74,6 +74,7 @@ func TestGatewayRunnerBridgeRequiresTrustedContextAndReplaysTerminalEvents(t *te
 	store := &terminalBridgeStore{}
 	bridge := gateway.NewGatewayRunnerBridge(fixture.submitter, store)
 	bridge.PollInterval = time.Millisecond
+	bridge.ReplayLimit = 1_000
 	if _, err := bridge.Run(context.Background(), "principal-user", "canonical-session", model.NewUserMessage("hello")); err == nil {
 		t.Fatal("bridge accepted missing trusted context")
 	}
@@ -102,6 +103,9 @@ func TestGatewayRunnerBridgeRequiresTrustedContextAndReplaysTerminalEvents(t *te
 	}
 	if values != 2 {
 		t.Fatalf("events=%d", values)
+	}
+	if store.limit != 256 {
+		t.Fatalf("replay limit=%d want=256", store.limit)
 	}
 	if err := bridge.Close(); err != nil {
 		t.Fatal(err)
@@ -203,9 +207,10 @@ func createRun(t *testing.T, handler http.Handler, key, body string) *httptest.R
 	return response
 }
 
-type terminalBridgeStore struct{}
+type terminalBridgeStore struct{ limit int }
 
-func (*terminalBridgeStore) Replay(_ context.Context, key gateway.ExecutionKey, after uint64, _ int) (gateway.EventPage, error) {
+func (s *terminalBridgeStore) Replay(_ context.Context, key gateway.ExecutionKey, after uint64, limit int) (gateway.EventPage, error) {
+	s.limit = limit
 	now := time.Unix(1_800_000_000, 0).UTC()
 	events := []gateway.SharedEvent{{TenantID: key.TenantID, RequestID: key.RequestID, Sequence: 1,
 		Type: "message.completed", Data: json.RawMessage(`{"content":"done"}`), CreatedAt: now},

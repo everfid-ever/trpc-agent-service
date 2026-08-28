@@ -81,6 +81,30 @@ func TestSSEHandlerAuthenticatesAndReplaysFromSignedCursor(t *testing.T) {
 	}
 }
 
+func TestSSEHandlerDefaultsAndClampsReplayLimit(t *testing.T) {
+	codec, _ := gateway.NewCursorCodec(cursorKey)
+	for _, test := range []struct {
+		name, configured string
+		limit, want      int
+	}{
+		{name: "default", configured: "zero", limit: 0, want: 64},
+		{name: "configured", configured: "within-bound", limit: 128, want: 128},
+		{name: "clamped", configured: "above-bound", limit: 1_000, want: 256},
+	} {
+		t.Run(test.name+"/"+test.configured, func(t *testing.T) {
+			store := &eventStoreStub{terminal: true}
+			handler := &gateway.SSEHandler{Events: store, ReplayLimit: test.limit,
+				Principals: controlPrincipalResolver{principal: gateway.Principal{Authenticated: true,
+					TenantID: "tenant-a", SubjectID: "user", CanRead: true}}, Cursors: codec}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/agent-runs/request-1/events", nil))
+			if response.Code != http.StatusOK || store.observedLimit() != test.want {
+				t.Fatalf("code=%d limit=%d want=%d", response.Code, store.observedLimit(), test.want)
+			}
+		})
+	}
+}
+
 func TestSSEHandlerFailsClosedBeforeStreamingAndDisconnectOnlyStopsSubscription(t *testing.T) {
 	codec, _ := gateway.NewCursorCodec(cursorKey)
 	unauthenticated := &gateway.SSEHandler{Events: &eventStoreStub{}, Principals: controlPrincipalResolver{}, Cursors: codec}
@@ -146,17 +170,26 @@ type eventStoreStub struct {
 	calls       int
 	cancelCalls int
 	futureAt    uint64
+	limit       int
+	terminal    bool
 }
 
-func (s *eventStoreStub) Replay(ctx context.Context, key gateway.ExecutionKey, after uint64, _ int) (gateway.EventPage, error) {
+func (s *eventStoreStub) Replay(ctx context.Context, key gateway.ExecutionKey, after uint64, limit int) (gateway.EventPage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	s.limit = limit
 	if s.futureAt > 0 && after > s.futureAt {
 		return gateway.EventPage{}, runtime.ErrVersionConflict
 	}
 	if err := ctx.Err(); err != nil {
 		return gateway.EventPage{}, err
 	}
-	return gateway.EventPage{}, nil
+	return gateway.EventPage{Terminal: s.terminal}, nil
+}
+
+func (s *eventStoreStub) observedLimit() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.limit
 }

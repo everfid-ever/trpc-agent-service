@@ -104,10 +104,7 @@ func (b *GatewayRunnerBridge) replay(ctx context.Context, tenantID, requestID st
 	if interval <= 0 {
 		interval = time.Second
 	}
-	limit := b.ReplayLimit
-	if limit <= 0 || limit > 256 {
-		limit = 64
-	}
+	limit := normalizeReplayLimit(b.ReplayLimit)
 	key := ExecutionKey{TenantID: tenantID, RequestID: requestID}
 	var after uint64
 	for {
