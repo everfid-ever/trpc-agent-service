@@ -43,6 +43,9 @@ func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispa
 	ek := executionKey{in.Tenant.TenantID, in.RequestID}
 	if existing, ok := s.executions[ek]; ok {
 		candidate := envelope(in, existing.Envelope.InputSeq, existing.Envelope.CreatedAt)
+		// Trace correlation is observability metadata, not part of stable run
+		// identity. Preserve the first accepted value across protocol retries.
+		candidate.TraceParent = existing.Envelope.TraceParent
 		if !reflect.DeepEqual(existing.Envelope, candidate) {
 			return gateway.PreparedDispatch{}, runtime.ErrCommitConflict
 		}

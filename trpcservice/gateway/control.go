@@ -24,6 +24,7 @@ type Principal struct {
 	SubjectID     string
 	CanRead       bool
 	CanCancel     bool
+	CanRun        bool
 	TraceParent   string
 }
 
