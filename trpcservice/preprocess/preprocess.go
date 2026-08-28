@@ -30,15 +30,15 @@ type ClaimRequest struct {
 }
 
 type Job struct {
-	TenantID, RequestID, JobID, PayloadRef, AgentAppID string
-	SessionID, UserID, Channel, TraceParent            string
-	TenantVersion                                      int64
-	State                                              State
-	Attempt                                            int
-	Version                                            int64
-	LeaseOwner, RejectReason                           string
-	LeaseUntil, NotBefore, CreatedAt, UpdatedAt        time.Time
-	DispatchedAt                                       time.Time
+	TenantID, RequestID, JobID, PayloadRef, PreparedPayloadRef, AgentAppID string
+	SessionID, UserID, Channel, TraceParent                                string
+	TenantVersion                                                          int64
+	State                                                                  State
+	Attempt                                                                int
+	Version                                                                int64
+	LeaseOwner, RejectReason                                               string
+	LeaseUntil, NotBefore, CreatedAt, UpdatedAt                            time.Time
+	DispatchedAt                                                           time.Time
 }
 
 type ClaimOptions struct {

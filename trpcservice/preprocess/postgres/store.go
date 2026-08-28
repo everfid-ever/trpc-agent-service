@@ -42,7 +42,7 @@ FROM claim_channel_inbox($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 tenant_id,request_id,job_id,tenant_version,agent_app_id,session_id,user_id,channel,payload_ref,traceparent)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
-RETURNING tenant_id,request_id,job_id,payload_ref,agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
+RETURNING tenant_id,request_id,job_id,payload_ref,COALESCE(prepared_payload_ref,''),agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
 state,attempt,version,COALESCE(lease_owner,''),reject_reason,COALESCE(lease_until,'epoch'),not_before,created_at,updated_at,COALESCE(dispatched_at,'epoch')`,
 		in.Inbox.TenantID, requestID, jobID, in.TenantVersion, in.Inbox.AgentAppID, in.Inbox.SessionID, in.UserID,
 		in.Inbox.Channel, payloadRef, in.TraceParent))
@@ -72,7 +72,7 @@ ORDER BY not_before,created_at FOR UPDATE SKIP LOCKED LIMIT $2
 UPDATE preprocess_job j SET state='running',attempt=j.attempt+1,lease_owner=$3,
 lease_until=$1+($4 * interval '1 microsecond'),version=j.version+1,updated_at=$1
 FROM candidates c WHERE j.tenant_id=c.tenant_id AND j.job_id=c.job_id
-RETURNING j.tenant_id,j.request_id,j.job_id,j.payload_ref,j.agent_app_id,j.session_id,j.user_id,j.channel,j.traceparent,j.tenant_version,
+RETURNING j.tenant_id,j.request_id,j.job_id,j.payload_ref,COALESCE(j.prepared_payload_ref,''),j.agent_app_id,j.session_id,j.user_id,j.channel,j.traceparent,j.tenant_version,
 j.state,j.attempt,j.version,COALESCE(j.lease_owner,''),j.reject_reason,COALESCE(j.lease_until,'epoch'),j.not_before,j.created_at,j.updated_at,COALESCE(j.dispatched_at,'epoch')`,
 		options.Now, options.Limit, options.Owner, options.TTL.Microseconds())
 	if err != nil {
@@ -109,17 +109,21 @@ func (s *Store) FinishRejected(ctx context.Context, job preprocess.Job, reason s
 }
 
 func (s *Store) finish(ctx context.Context, job preprocess.Job, state preprocess.State, notBefore time.Time, reason string) (preprocess.Job, error) {
+	if state != preprocess.Ready && job.PreparedPayloadRef != "" {
+		return preprocess.Job{}, runtime.ErrInvariantViolation
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return preprocess.Job{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	updated, err := scanJob(tx.QueryRowContext(ctx, `UPDATE preprocess_job SET state=$4,not_before=CASE WHEN $4='retry_wait' THEN $5 ELSE not_before END,
+prepared_payload_ref=CASE WHEN $8 <> '' THEN $8 ELSE prepared_payload_ref END,
 reject_reason=$6,lease_owner=NULL,lease_until=NULL,version=version+1,updated_at=now()
 WHERE tenant_id=$1 AND job_id=$2 AND version=$3 AND state='running' AND lease_owner=$7
-RETURNING tenant_id,request_id,job_id,payload_ref,agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
+RETURNING tenant_id,request_id,job_id,payload_ref,COALESCE(prepared_payload_ref,''),agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
 state,attempt,version,COALESCE(lease_owner,''),reject_reason,COALESCE(lease_until,'epoch'),not_before,created_at,updated_at,COALESCE(dispatched_at,'epoch')`,
-		job.TenantID, job.JobID, job.Version, string(state), nullableTime(notBefore), reason, job.LeaseOwner))
+		job.TenantID, job.JobID, job.Version, string(state), nullableTime(notBefore), reason, job.LeaseOwner, job.PreparedPayloadRef))
 	if errors.Is(err, runtime.ErrNotFound) {
 		return preprocess.Job{}, runtime.ErrVersionConflict
 	}
@@ -151,7 +155,7 @@ func (s *Store) ListReadyForDispatch(ctx context.Context, limit int) ([]preproce
 	if s == nil || s.db == nil || limit < 1 {
 		return nil, runtime.ErrInvariantViolation
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT tenant_id,request_id,job_id,payload_ref,agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
+	rows, err := s.db.QueryContext(ctx, `SELECT tenant_id,request_id,job_id,payload_ref,COALESCE(prepared_payload_ref,''),agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
 state,attempt,version,COALESCE(lease_owner,''),reject_reason,COALESCE(lease_until,'epoch'),not_before,created_at,updated_at,COALESCE(dispatched_at,'epoch')
 FROM preprocess_job WHERE state='ready' AND dispatched_at IS NULL ORDER BY created_at,job_id LIMIT $1`, limit)
 	if err != nil {
@@ -180,7 +184,7 @@ ORDER BY created_at,job_id FOR UPDATE SKIP LOCKED LIMIT $2
 )
 UPDATE preprocess_job j SET lease_owner=$3,lease_until=$1+($4 * interval '1 microsecond'),version=j.version+1,updated_at=$1
 FROM candidates c WHERE j.tenant_id=c.tenant_id AND j.job_id=c.job_id
-RETURNING j.tenant_id,j.request_id,j.job_id,j.payload_ref,j.agent_app_id,j.session_id,j.user_id,j.channel,j.traceparent,j.tenant_version,
+RETURNING j.tenant_id,j.request_id,j.job_id,j.payload_ref,COALESCE(j.prepared_payload_ref,''),j.agent_app_id,j.session_id,j.user_id,j.channel,j.traceparent,j.tenant_version,
 j.state,j.attempt,j.version,COALESCE(j.lease_owner,''),j.reject_reason,COALESCE(j.lease_until,'epoch'),j.not_before,j.created_at,j.updated_at,COALESCE(j.dispatched_at,'epoch')`,
 		options.Now, options.Limit, options.Owner, options.TTL.Microseconds())
 	if err != nil {
@@ -204,7 +208,7 @@ func (s *Store) MarkDispatched(ctx context.Context, job preprocess.Job, at time.
 	}
 	updated, err := scanJob(s.db.QueryRowContext(ctx, `UPDATE preprocess_job SET dispatched_at=$4,lease_owner=NULL,lease_until=NULL,version=version+1,updated_at=$4
 WHERE tenant_id=$1 AND job_id=$2 AND version=$3 AND state='ready' AND dispatched_at IS NULL AND lease_owner=$5
-RETURNING tenant_id,request_id,job_id,payload_ref,agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
+RETURNING tenant_id,request_id,job_id,payload_ref,COALESCE(prepared_payload_ref,''),agent_app_id,session_id,user_id,channel,traceparent,tenant_version,
 state,attempt,version,COALESCE(lease_owner,''),reject_reason,COALESCE(lease_until,'epoch'),not_before,created_at,updated_at,COALESCE(dispatched_at,'epoch')`,
 		job.TenantID, job.JobID, job.Version, at, job.LeaseOwner))
 	if errors.Is(err, runtime.ErrNotFound) {
@@ -217,7 +221,7 @@ type scanner interface{ Scan(...any) error }
 
 func scanJob(row scanner) (preprocess.Job, error) {
 	var job preprocess.Job
-	if err := row.Scan(&job.TenantID, &job.RequestID, &job.JobID, &job.PayloadRef, &job.AgentAppID, &job.SessionID,
+	if err := row.Scan(&job.TenantID, &job.RequestID, &job.JobID, &job.PayloadRef, &job.PreparedPayloadRef, &job.AgentAppID, &job.SessionID,
 		&job.UserID, &job.Channel, &job.TraceParent, &job.TenantVersion, &job.State, &job.Attempt, &job.Version,
 		&job.LeaseOwner, &job.RejectReason, &job.LeaseUntil, &job.NotBefore, &job.CreatedAt, &job.UpdatedAt, &job.DispatchedAt); err != nil {
 		return preprocess.Job{}, classify(err)

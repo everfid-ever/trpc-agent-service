@@ -1,7 +1,11 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -9,9 +13,12 @@ import (
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
+	artifactmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
@@ -146,5 +153,35 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	}
 	if calls := mock.Calls(envelope.TenantID, envelope.RequestID); calls != 1 {
 		t.Fatalf("model calls=%d", calls)
+	}
+}
+
+func TestJSONTextInputDecoderHydratesOnlyTenantScopedArtifactRefs(t *testing.T) {
+	content := []byte("\x89PNG\r\n\x1a\n")
+	contentSum := sha256.Sum256(content)
+	sourceSum := sha256.Sum256([]byte("source"))
+	id, ref, err := artifact.StableIdentity("tenant-a", "request", 0, hex.EncodeToString(sourceSum[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := artifactmemory.New()
+	if _, err := artifacts.PutArtifact(context.Background(), artifact.Record{TenantID: "tenant-a", RequestID: "request", ArtifactID: id, ArtifactRef: ref,
+		Ordinal: 0, SourceDigest: hex.EncodeToString(sourceSum[:]), ContentDigest: hex.EncodeToString(contentSum[:]), MediaType: "image/png", Kind: "image",
+		Content: content, MalwareScanVersion: "av-1", DLPVersion: "dlp-1"}); err != nil {
+		t.Fatal(err)
+	}
+	prepared, _ := json.Marshal(preprocess.PreparedInput{ExternalMessageID: "message", ExternalUserID: "user", MessageType: "image",
+		Media: []preprocess.PreparedMedia{{ArtifactID: id, ArtifactRef: ref, Kind: "image", MediaType: "image/png", ContentDigest: hex.EncodeToString(contentSum[:]), Size: int64(len(content))}}})
+	envelope := runtime.ExecutionEnvelope{TenantID: "tenant-a", RequestID: "request"}
+	message, err := (JSONTextInputDecoder{}).DecodeInput(context.Background(), envelope, prepared)
+	if err != nil || len(message.ContentParts) != 1 || message.ContentParts[0].Image == nil || len(message.ContentParts[0].Image.Data) != 0 {
+		t.Fatalf("message=%#v err=%v", message, err)
+	}
+	executor := RunnerExecutor{Artifacts: artifacts}
+	if err := executor.hydrateArtifacts(context.Background(), envelope, &message); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(message.ContentParts[0].Image.Data, content) || message.ContentParts[0].Image.URL != "" {
+		t.Fatalf("hydrated message=%#v", message)
 	}
 }

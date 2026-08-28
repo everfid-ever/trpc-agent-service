@@ -32,6 +32,24 @@ type NormalizedInput struct {
 // text-only fixtures while sharing the version-one normalized input schema.
 type NormalizedText = NormalizedInput
 
+type PreparedMedia struct {
+	ArtifactID    string `json:"artifact_id"`
+	ArtifactRef   string `json:"artifact_ref"`
+	Kind          string `json:"kind"`
+	MediaType     string `json:"media_type"`
+	ContentDigest string `json:"content_digest"`
+	Size          int64  `json:"size"`
+}
+
+type PreparedInput struct {
+	ExternalMessageID string          `json:"external_message_id"`
+	ExternalUserID    string          `json:"external_user_id"`
+	ExternalChatID    string          `json:"external_chat_id"`
+	MessageType       string          `json:"message_type,omitempty"`
+	Text              string          `json:"text,omitempty"`
+	Media             []PreparedMedia `json:"media,omitempty"`
+}
+
 type Worker struct {
 	Store       Store
 	Payloads    messaging.PayloadStore
@@ -41,6 +59,7 @@ type Worker struct {
 	RetryDelay  time.Duration
 	MaxAttempts int
 	Now         func() time.Time
+	Media       *MediaStager
 }
 
 func (w Worker) RunOnce(ctx context.Context, limit int) (int, error) {
@@ -95,14 +114,83 @@ func (w Worker) preprocess(ctx context.Context, job Job) error {
 		_, finishErr := w.Store.FinishRejected(ctx, job, "invalid_text_payload")
 		return finishErr
 	}
-	// A provider media identifier is an opaque credential-scoped reference, not
-	// executable input. Keep the job recoverable until the staged ArtifactRef is
-	// persisted as the prepared payload consumed by dispatch.
 	if len(normalized.MediaRefs) > 0 {
-		return w.retry(ctx, job, "media_prepared_payload_unavailable")
+		return w.prepareMedia(ctx, job, payload.PayloadRef, normalized)
 	}
 	_, err = w.Store.FinishReady(ctx, job)
 	return err
+}
+
+func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef string, normalized NormalizedInput) error {
+	preparedStore, ok := w.Payloads.(messaging.PreparedPayloadStore)
+	if !ok || w.Media == nil {
+		return w.retry(ctx, job, "media_prepared_payload_unavailable")
+	}
+	staged := make([]StagedMedia, 0, len(normalized.MediaRefs))
+	for ordinal, media := range normalized.MediaRefs {
+		value, err := w.Media.Stage(ctx, MediaStageRequest{TenantID: job.TenantID, RequestID: job.RequestID, Channel: job.Channel,
+			ChannelBindingID: normalized.ChannelBindingID, ExternalAccountID: normalized.ExternalAccountID, Ordinal: ordinal, Media: media})
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrMediaRejected), errors.Is(err, runtime.ErrInvalidEnvelope), errors.Is(err, runtime.ErrCapabilityUnsupported):
+				_, finishErr := w.Store.FinishRejected(ctx, job, "media_rejected")
+				return finishErr
+			case errors.Is(err, ErrMediaScanUnavailable), errors.Is(err, runtime.ErrBackendUnavailable):
+				return w.retry(ctx, job, "media_stage_unavailable")
+			default:
+				return w.retry(ctx, job, "media_stage_unavailable")
+			}
+		}
+		staged = append(staged, value)
+	}
+	preparedRef, err := StablePreparedPayloadRef(job.TenantID, job.RequestID, sourcePayloadRef, staged)
+	if err != nil {
+		_, finishErr := w.Store.FinishRejected(ctx, job, "prepared_payload_invalid")
+		return finishErr
+	}
+	prepared := PreparedInput{ExternalMessageID: normalized.ExternalMessageID, ExternalUserID: normalized.ExternalUserID,
+		ExternalChatID: normalized.ExternalChatID, MessageType: normalized.MessageType, Text: normalized.Text,
+		Media: make([]PreparedMedia, 0, len(staged))}
+	for _, value := range staged {
+		prepared.Media = append(prepared.Media, PreparedMedia{ArtifactID: value.ArtifactID, ArtifactRef: value.ArtifactRef,
+			Kind: value.Kind, MediaType: value.MediaType, ContentDigest: value.ContentDigest, Size: value.Size})
+	}
+	content, err := json.Marshal(prepared)
+	if err != nil {
+		return w.retry(ctx, job, "prepared_payload_unavailable")
+	}
+	digest := sha256.Sum256(content)
+	if err := preparedStore.PutPreparedPayload(ctx, messaging.PreparedPayloadRecord{TenantID: job.TenantID, RequestID: job.RequestID,
+		PayloadRef: preparedRef, SourcePayloadRef: sourcePayloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: content, KeyVersion: 1}); err != nil {
+		if errors.Is(err, runtime.ErrIdempotencyCollision) {
+			_, finishErr := w.Store.FinishRejected(ctx, job, "prepared_payload_collision")
+			return finishErr
+		}
+		return w.retry(ctx, job, "prepared_payload_unavailable")
+	}
+	job.PreparedPayloadRef = preparedRef
+	_, err = w.Store.FinishReady(ctx, job)
+	return err
+}
+
+func StablePreparedPayloadRef(tenantID, requestID, sourcePayloadRef string, staged []StagedMedia) (string, error) {
+	if tenantID == "" || requestID == "" || sourcePayloadRef == "" || len(staged) == 0 {
+		return "", runtime.ErrInvalidEnvelope
+	}
+	for _, value := range staged {
+		if value.ArtifactID == "" || value.ArtifactRef == "" || value.MediaType == "" || value.ContentDigest == "" || value.Kind == "" || value.Size <= 0 {
+			return "", runtime.ErrInvalidEnvelope
+		}
+	}
+	value, err := json.Marshal(struct {
+		TenantID, RequestID, SourcePayloadRef string
+		Media                                 []StagedMedia
+	}{tenantID, requestID, sourcePayloadRef, staged})
+	if err != nil {
+		return "", runtime.ErrInvariantViolation
+	}
+	sum := sha256.Sum256(value)
+	return "prepared://" + tenantID + "/" + requestID + "/" + hex.EncodeToString(sum[:16]), nil
 }
 
 func validNormalizedInput(value NormalizedInput) bool {
@@ -143,10 +231,14 @@ func (w Worker) retry(ctx context.Context, job Job, reason string) error {
 }
 
 func (w Worker) dispatch(ctx context.Context, job Job) error {
+	payloadRef := job.PayloadRef
+	if job.PreparedPayloadRef != "" {
+		payloadRef = job.PreparedPayloadRef
+	}
 	_, err := w.Dispatcher.Dispatch(ctx, gateway.DispatchRequest{
 		Tenant: tenant.Context{TenantID: job.TenantID, TenantVersion: job.TenantVersion, AgentAppID: job.AgentAppID,
 			SubjectID: job.UserID, Channel: job.Channel, TrustedSource: "verified-channel-ingress"},
-		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: job.PayloadRef, TraceParent: job.TraceParent,
+		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: payloadRef, TraceParent: job.TraceParent,
 	})
 	if err != nil {
 		return err

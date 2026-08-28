@@ -3,6 +3,7 @@ package inmemory
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,12 +16,13 @@ type Store struct {
 	inbox      map[messaging.InboxKey]messaging.InboxRecord
 	deliveries map[messaging.DeliveryKey]messaging.DeliveryRecord
 	payloads   map[string]messaging.PayloadRecord
+	prepared   map[string]messaging.PreparedPayloadRecord
 	results    map[string]messaging.ResultRecord
 	routes     map[string]messaging.ReplyRoute
 }
 
 func New() *Store {
-	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord), results: make(map[string]messaging.ResultRecord), routes: make(map[string]messaging.ReplyRoute)}
+	return &Store{inbox: make(map[messaging.InboxKey]messaging.InboxRecord), deliveries: make(map[messaging.DeliveryKey]messaging.DeliveryRecord), payloads: make(map[string]messaging.PayloadRecord), prepared: make(map[string]messaging.PreparedPayloadRecord), results: make(map[string]messaging.ResultRecord), routes: make(map[string]messaging.ReplyRoute)}
 }
 
 func (s *Store) PutReplyRoute(route messaging.ReplyRoute) error {
@@ -126,6 +128,45 @@ func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (mes
 	}
 	record.Content = append([]byte(nil), record.Content...)
 	return record, nil
+}
+
+func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPayloadRecord) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 || in.KeyVersion < 1 {
+		return runtime.ErrCommitConflict
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := in.TenantID + "\x00" + in.RequestID + "\x00" + in.PayloadRef
+	if old, ok := s.prepared[key]; ok {
+		if old.SourcePayloadRef != in.SourcePayloadRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
+			return runtime.ErrIdempotencyCollision
+		}
+		return nil
+	}
+	in.Content = append([]byte(nil), in.Content...)
+	in.CreatedAt = time.Now().UTC()
+	s.prepared[key] = in
+	return nil
+}
+
+func (s *Store) GetPreparedPayload(ctx context.Context, tenantID, requestID, payloadRef string) (messaging.PayloadRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return messaging.PayloadRecord{}, err
+	}
+	if tenantID == "" || requestID == "" || !strings.HasPrefix(payloadRef, "prepared://") {
+		return messaging.PayloadRecord{}, runtime.ErrTenantScope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.prepared[tenantID+"\x00"+requestID+"\x00"+payloadRef]
+	if !ok {
+		return messaging.PayloadRecord{}, runtime.ErrNotFound
+	}
+	return messaging.PayloadRecord{TenantID: record.TenantID, RequestID: record.RequestID, PayloadRef: record.PayloadRef,
+		ContentDigest: record.ContentDigest, Content: append([]byte(nil), record.Content...), KeyVersion: record.KeyVersion, CreatedAt: record.CreatedAt}, nil
 }
 
 func (s *Store) ClaimInbox(ctx context.Context, in messaging.ClaimInboxRequest) (messaging.InboxRecord, error) {
@@ -318,6 +359,7 @@ func validateDeliveryPlan(key messaging.DeliveryKey, plan messaging.DeliveryPlan
 
 var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
+var _ messaging.PreparedPayloadStore = (*Store)(nil)
 var _ messaging.ResultStore = (*Store)(nil)
 var _ messaging.ReplyRouteStore = (*Store)(nil)
 var _ messaging.DeliveryLedger = (*Store)(nil)

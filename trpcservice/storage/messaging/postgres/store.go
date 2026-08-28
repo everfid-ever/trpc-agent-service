@@ -8,6 +8,7 @@ import (
 	cryptorand "crypto/rand"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -71,6 +72,70 @@ func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (mes
 	err := s.db.QueryRowContext(ctx, `SELECT payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version,created_at FROM inbound_payload
 WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
 		Scan(&record.PayloadRef, &record.ContentDigest, &ciphertext, &nonce, &record.KeyVersion, &record.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return messaging.PayloadRecord{}, runtime.ErrNotFound
+	}
+	if err != nil {
+		return messaging.PayloadRecord{}, err
+	}
+	if record.KeyVersion != s.payloadKeyVersion {
+		return messaging.PayloadRecord{}, runtime.ErrVersionMismatch
+	}
+	record.Content, err = decryptPayload(s.payloadKey, payloadAAD(record), ciphertext, nonce)
+	return record, err
+}
+
+func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPayloadRecord) error {
+	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 {
+		return runtime.ErrCommitConflict
+	}
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
+		return runtime.ErrVersionMismatch
+	}
+	payload := messaging.PayloadRecord{TenantID: in.TenantID, RequestID: in.RequestID, PayloadRef: in.PayloadRef,
+		ContentDigest: in.ContentDigest, Content: in.Content, KeyVersion: s.payloadKeyVersion}
+	ciphertext, nonce, err := encryptPayload(s.payloadKey, payloadAAD(payload), in.Content)
+	if err != nil {
+		return err
+	}
+	var storedSource, storedRef, storedDigest string
+	var storedCiphertext, storedNonce []byte
+	var storedKeyVersion int64
+	err = s.db.QueryRowContext(ctx, `INSERT INTO prepared_payload(
+tenant_id,request_id,payload_ref,source_payload_ref,payload_ciphertext,payload_nonce,content_digest,key_version)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
+RETURNING source_payload_ref,payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version`, in.TenantID, in.RequestID,
+		in.PayloadRef, in.SourcePayloadRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
+		Scan(&storedSource, &storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion)
+	if err != nil {
+		return translate(err)
+	}
+	if storedSource != in.SourcePayloadRef || storedRef != in.PayloadRef || storedDigest != in.ContentDigest || storedKeyVersion != s.payloadKeyVersion {
+		return runtime.ErrIdempotencyCollision
+	}
+	storedContent, err := decryptPayload(s.payloadKey, payloadAAD(payload), storedCiphertext, storedNonce)
+	if err != nil || string(storedContent) != string(in.Content) {
+		return runtime.ErrIdempotencyCollision
+	}
+	return nil
+}
+
+func (s *Store) GetPreparedPayload(ctx context.Context, tenantID, requestID, payloadRef string) (messaging.PayloadRecord, error) {
+	if tenantID == "" || requestID == "" || !strings.HasPrefix(payloadRef, "prepared://") {
+		return messaging.PayloadRecord{}, runtime.ErrTenantScope
+	}
+	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
+		return messaging.PayloadRecord{}, runtime.ErrCapabilityUnsupported
+	}
+	record := messaging.PayloadRecord{TenantID: tenantID, RequestID: requestID, PayloadRef: payloadRef}
+	var ciphertext, nonce []byte
+	err := s.db.QueryRowContext(ctx, `SELECT content_digest,payload_ciphertext,payload_nonce,key_version,created_at
+FROM prepared_payload WHERE tenant_id=$1 AND request_id=$2 AND payload_ref=$3`, tenantID, requestID, payloadRef).
+		Scan(&record.ContentDigest, &ciphertext, &nonce, &record.KeyVersion, &record.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return messaging.PayloadRecord{}, runtime.ErrNotFound
 	}
@@ -535,6 +600,7 @@ func translate(err error) error {
 
 var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
+var _ messaging.PreparedPayloadStore = (*Store)(nil)
 var _ messaging.ResultStore = (*Store)(nil)
 var _ messaging.ReplyRouteStore = (*Store)(nil)
 var _ messaging.OutboxStore = (*Store)(nil)

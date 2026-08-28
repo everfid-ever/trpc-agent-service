@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 15 {
+	if len(all) != 17 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,38 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestPreparedPayloadMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[15]
+	if migration.Version != "000016" || migration.Name != "prepared_payload" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"prepared_payload_ref", "CREATE TABLE public.prepared_payload", "source_payload_ref", "preprocess_job_prepared_ref_complete"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestMediaArtifactMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[16]
+	if migration.Version != "000017" || migration.Name != "media_artifact" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.media_artifact", "source_digest", "malware_scan_version", "media_artifact_request_idx"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

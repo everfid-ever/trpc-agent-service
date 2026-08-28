@@ -155,7 +155,13 @@ func (s *Store) finish(ctx context.Context, claimed preprocess.Job, state prepro
 	if current.State != preprocess.Running || current.Version != claimed.Version || current.LeaseOwner == "" || current.LeaseOwner != claimed.LeaseOwner {
 		return preprocess.Job{}, runtime.ErrVersionConflict
 	}
+	if state != preprocess.Ready && claimed.PreparedPayloadRef != "" {
+		return preprocess.Job{}, runtime.ErrInvariantViolation
+	}
 	current.State, current.NotBefore, current.RejectReason = state, notBefore, reason
+	if state == preprocess.Ready && claimed.PreparedPayloadRef != "" {
+		current.PreparedPayloadRef = claimed.PreparedPayloadRef
+	}
 	current.LeaseOwner, current.LeaseUntil = "", time.Time{}
 	current.Version++
 	current.UpdatedAt = s.now()

@@ -1,11 +1,14 @@
 package preprocess_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocessmemory "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	artifactmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 )
@@ -46,6 +50,38 @@ func TestWorkerDoesNotDispatchOpaqueProviderMediaReference(t *testing.T) {
 	jobs, err := store.ClaimJobs(context.Background(), preprocess.ClaimOptions{Owner: "inspect", Now: clock.Add(2 * time.Second), TTL: time.Second, Limit: 1})
 	if err != nil || len(jobs) != 1 || jobs[0].RejectReason != "media_prepared_payload_unavailable" {
 		t.Fatalf("recoverable media job=%#v err=%v", jobs, err)
+	}
+}
+
+func TestWorkerStagesMediaAndDispatchesPreparedPayload(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Microsecond)
+	store := preprocessmemory.New()
+	payloads := messagingmemory.New()
+	inbox, _, err := store.ClaimInboxAndSchedule(context.Background(), claim("media-ready"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentBytes := []byte("\x89PNG\r\n\x1a\n")
+	content, _ := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: "media-ready", ExternalUserID: "external-user",
+		ChannelBindingID: "binding", ExternalAccountID: "account", MessageType: "image",
+		MediaRefs: []channel.MediaRef{{ID: "provider-image-key", MessageID: "provider-message", Kind: "image", ContentType: "image/png", Size: int64(len(contentBytes))}}})
+	sum := sha256.Sum256(content)
+	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: inbox.TenantID, RequestID: inbox.RequestID,
+		PayloadRef: inbox.PayloadRef, ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &recordingDispatcher{}
+	worker := preprocess.Worker{Store: store, Payloads: payloads, Dispatcher: dispatcher, Owner: "worker", Now: func() time.Time { return clock },
+		Media: &preprocess.MediaStager{Fetcher: mediaBytesFetcher{content: contentBytes}, Malware: scanner{}, DLP: scanner{}, Artifacts: artifactmemory.New()}}
+	if processed, err := worker.RunOnce(context.Background(), 10); err != nil || processed != 1 || len(dispatcher.requests) != 1 {
+		t.Fatalf("processed=%d requests=%d err=%v", processed, len(dispatcher.requests), err)
+	}
+	if !strings.HasPrefix(dispatcher.requests[0].PayloadRef, "prepared://") || dispatcher.requests[0].PayloadRef == inbox.PayloadRef {
+		t.Fatalf("dispatch payload ref=%q raw=%q", dispatcher.requests[0].PayloadRef, inbox.PayloadRef)
+	}
+	prepared, err := payloads.GetPreparedPayload(context.Background(), inbox.TenantID, inbox.RequestID, dispatcher.requests[0].PayloadRef)
+	if err != nil || bytes.Contains(prepared.Content, []byte("provider-image-key")) || !bytes.Contains(prepared.Content, []byte("artifact://")) {
+		t.Fatalf("prepared=%#v err=%v", prepared, err)
 	}
 }
 
@@ -128,6 +164,22 @@ func claim(messageID string) preprocess.ClaimRequest {
 type recordingDispatcher struct {
 	fail     bool
 	requests []gateway.DispatchRequest
+}
+
+type mediaBytesFetcher struct{ content []byte }
+
+func (f mediaBytesFetcher) Fetch(context.Context, preprocess.MediaFetchRequest) (preprocess.MediaDownload, error) {
+	return preprocess.MediaDownload{Body: io.NopCloser(bytes.NewReader(f.content)), ContentType: "image/png", DeclaredSize: int64(len(f.content))}, nil
+}
+
+type scanner struct{}
+
+func (scanner) ScanMedia(context.Context, []byte, string) (preprocess.ScanResult, error) {
+	return preprocess.ScanResult{Verdict: preprocess.ScanClean, Version: "scan-1"}, nil
+}
+
+func (scanner) ScanMediaInput(context.Context, string, []byte, string) (preprocess.ScanResult, error) {
+	return preprocess.ScanResult{Verdict: preprocess.ScanClean, Version: "scan-1"}, nil
 }
 
 func (d *recordingDispatcher) Dispatch(_ context.Context, request gateway.DispatchRequest) (gateway.ExecutionHandle, error) {

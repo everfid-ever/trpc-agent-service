@@ -80,6 +80,22 @@ type PayloadStore interface {
 	GetPayload(context.Context, string, string) (PayloadRecord, error)
 }
 
+// PreparedPayloadRecord is the immutable, post-Preprocess input consumed by
+// execution. SourcePayloadRef ties it back to the durable ingress payload;
+// PayloadRef is a separate stable reference so the raw provider media ID can
+// never be mistaken for executable content.
+type PreparedPayloadRecord struct {
+	TenantID, RequestID, PayloadRef, SourcePayloadRef, ContentDigest string
+	Content                                                          []byte
+	KeyVersion                                                       int64
+	CreatedAt                                                        time.Time
+}
+
+type PreparedPayloadStore interface {
+	PutPreparedPayload(context.Context, PreparedPayloadRecord) error
+	GetPreparedPayload(context.Context, string, string, string) (PayloadRecord, error)
+}
+
 type ResultRecord struct {
 	TenantID, RequestID, ResultRef, ContentDigest string
 	Content                                       []byte

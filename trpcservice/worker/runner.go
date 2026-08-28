@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
@@ -38,6 +41,7 @@ type RunnerExecutor struct {
 	Bundles           profile.RuntimeBundleManager
 	Sessions          sessionstore.AtomicSessionStore
 	Payloads          messaging.PayloadStore
+	Artifacts         artifact.Store
 	Inputs            InputDecoder
 	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
@@ -110,7 +114,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 	}()
 
-	payload, err := w.Payloads.GetPayload(ctx, envelope.TenantID, envelope.RequestID)
+	payload, err := w.executionPayload(ctx, envelope)
 	if err != nil {
 		return err
 	}
@@ -121,8 +125,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if err != nil {
 		return err
 	}
-	if message.Role != model.RoleUser || strings.TrimSpace(message.Content) == "" {
+	if message.Role != model.RoleUser || (strings.TrimSpace(message.Content) == "" && len(message.ContentParts) == 0) || !validPreparedMessage(message) {
 		return runtime.ErrInvalidEnvelope
+	}
+	if err := w.hydrateArtifacts(ctx, envelope, &message); err != nil {
+		return err
 	}
 
 	lease, err := w.Bundles.Acquire(ctx, key)
@@ -364,6 +371,66 @@ func drainRunnerEvents(events <-chan *event.Event, timeout time.Duration) {
 	}
 }
 
+func (w RunnerExecutor) executionPayload(ctx context.Context, envelope runtime.ExecutionEnvelope) (messaging.PayloadRecord, error) {
+	if strings.HasPrefix(envelope.PayloadRef, "prepared://") {
+		prepared, ok := w.Payloads.(messaging.PreparedPayloadStore)
+		if !ok {
+			return messaging.PayloadRecord{}, runtime.ErrCapabilityUnsupported
+		}
+		return prepared.GetPreparedPayload(ctx, envelope.TenantID, envelope.RequestID, envelope.PayloadRef)
+	}
+	return w.Payloads.GetPayload(ctx, envelope.TenantID, envelope.RequestID)
+}
+
+func validPreparedMessage(message model.Message) bool {
+	for _, part := range message.ContentParts {
+		if part.ContentRef == nil || part.ContentRef.ArtifactRef == "" || part.ContentRef.ArtifactName == "" || part.ContentRef.ArtifactVersion < 1 {
+			return false
+		}
+		switch part.Type {
+		case model.ContentTypeImage:
+			if part.Image == nil || len(part.Image.Data) != 0 || part.Image.URL != "" || part.File != nil {
+				return false
+			}
+		case model.ContentTypeFile:
+			if part.File == nil || len(part.File.Data) != 0 || part.File.URL != "" || part.File.FileID != "" || part.Image != nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (w RunnerExecutor) hydrateArtifacts(ctx context.Context, envelope runtime.ExecutionEnvelope, message *model.Message) error {
+	if len(message.ContentParts) == 0 {
+		return nil
+	}
+	if w.Artifacts == nil {
+		return runtime.ErrCapabilityUnsupported
+	}
+	for index := range message.ContentParts {
+		part := &message.ContentParts[index]
+		record, err := w.Artifacts.GetArtifact(ctx, envelope.TenantID, part.ContentRef.ArtifactName)
+		if err != nil {
+			return err
+		}
+		if record.RequestID != envelope.RequestID || record.ArtifactRef != part.ContentRef.ArtifactRef || record.ContentDigest != part.ContentRef.SHA256 || record.MediaType != part.ContentRef.MimeType || int64(len(record.Content)) != part.ContentRef.SizeBytes {
+			return runtime.ErrVersionMismatch
+		}
+		switch part.Type {
+		case model.ContentTypeImage:
+			part.Image.Data = append([]byte(nil), record.Content...)
+			part.Image.Format = strings.TrimPrefix(record.MediaType, "image/")
+		case model.ContentTypeFile:
+			part.File.Data = append([]byte(nil), record.Content...)
+			part.File.MimeType = record.MediaType
+		}
+	}
+	return nil
+}
+
 func encodeResultRef(ctx context.Context, encoder ResultRefEncoder, envelope runtime.ExecutionEnvelope, content string) (string, error) {
 	if encoder != nil {
 		return encoder(ctx, envelope, content)
@@ -384,17 +451,46 @@ func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.Execution
 		return model.Message{}, err
 	}
 	var value struct {
-		ExternalMessageID string `json:"external_message_id,omitempty"`
-		ExternalUserID    string `json:"external_user_id,omitempty"`
-		ExternalChatID    string `json:"external_chat_id,omitempty"`
-		Text              string `json:"text"`
+		ExternalMessageID string                     `json:"external_message_id,omitempty"`
+		ExternalUserID    string                     `json:"external_user_id,omitempty"`
+		ExternalChatID    string                     `json:"external_chat_id,omitempty"`
+		MessageType       string                     `json:"message_type,omitempty"`
+		Text              string                     `json:"text,omitempty"`
+		Media             []preprocess.PreparedMedia `json:"media,omitempty"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&value); err != nil || strings.TrimSpace(value.Text) == "" {
+	if err := decoder.Decode(&value); err != nil {
 		return model.Message{}, runtime.ErrInvalidEnvelope
 	}
-	return model.NewUserMessage(value.Text), nil
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return model.Message{}, runtime.ErrInvalidEnvelope
+	}
+	message := model.NewUserMessage(strings.TrimSpace(value.Text))
+	if len(value.Media) > 1 || (len(value.Media) > 0 && value.MessageType != "image" && value.MessageType != "file") {
+		return model.Message{}, runtime.ErrInvalidEnvelope
+	}
+	for _, media := range value.Media {
+		if media.ArtifactID == "" || media.ArtifactRef == "" || media.MediaType == "" || media.ContentDigest == "" || media.Size <= 0 ||
+			(media.Kind != "image" && media.Kind != "file") {
+			return model.Message{}, runtime.ErrInvalidEnvelope
+		}
+		if value.MessageType != media.Kind {
+			return model.Message{}, runtime.ErrInvalidEnvelope
+		}
+		ref := &model.ContentRef{ArtifactRef: media.ArtifactRef, ArtifactName: media.ArtifactID, ArtifactVersion: 1,
+			MimeType: media.MediaType, SizeBytes: media.Size, SHA256: media.ContentDigest}
+		if media.Kind == "image" {
+			message.ContentParts = append(message.ContentParts, model.ContentPart{Type: model.ContentTypeImage, Image: &model.Image{}, ContentRef: ref})
+		} else {
+			message.ContentParts = append(message.ContentParts, model.ContentPart{Type: model.ContentTypeFile, File: &model.File{}, ContentRef: ref})
+		}
+	}
+	if strings.TrimSpace(message.Content) == "" && len(message.ContentParts) == 0 {
+		return model.Message{}, runtime.ErrInvalidEnvelope
+	}
+	return message, nil
 }
 
 var _ LeaseExecutor = RunnerExecutor{}
