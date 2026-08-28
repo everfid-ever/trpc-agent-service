@@ -72,7 +72,8 @@ func TestWorkerStagesMediaAndDispatchesPreparedPayload(t *testing.T) {
 	}
 	dispatcher := &recordingDispatcher{}
 	worker := preprocess.Worker{Store: store, Payloads: payloads, Dispatcher: dispatcher, Owner: "worker", Now: func() time.Time { return clock },
-		Media: &preprocess.MediaStager{Fetcher: mediaBytesFetcher{content: contentBytes}, Malware: scanner{}, DLP: scanner{}, Artifacts: artifactmemory.New()}}
+		Media:             &preprocess.MediaStager{Fetcher: mediaBytesFetcher{content: contentBytes}, Malware: scanner{}, DLP: scanner{}, Artifacts: artifactmemory.New()},
+		ArtifactRetention: 30 * 24 * time.Hour}
 	if processed, err := worker.RunOnce(context.Background(), 10); err != nil || processed != 1 || len(dispatcher.requests) != 1 {
 		t.Fatalf("processed=%d requests=%d err=%v", processed, len(dispatcher.requests), err)
 	}

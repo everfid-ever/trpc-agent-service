@@ -10,6 +10,10 @@ required_feishu_module="github.com/larksuite/oapi-sdk-go/v3"
 required_feishu_version="v3.10.0"
 required_aws_module="github.com/aws/aws-sdk-go-v2"
 required_aws_version="v1.32.5"
+required_aws_config_module="github.com/aws/aws-sdk-go-v2/config"
+required_aws_config_version="v1.28.5"
+required_aws_credentials_module="github.com/aws/aws-sdk-go-v2/credentials"
+required_aws_credentials_version="v1.17.46"
 required_s3_module="github.com/aws/aws-sdk-go-v2/service/s3"
 required_s3_version="v1.67.1"
 required_smithy_module="github.com/aws/smithy-go"
@@ -29,6 +33,8 @@ fi
 
 for baseline in \
   "$required_aws_module $required_aws_version" \
+  "$required_aws_config_module $required_aws_config_version" \
+  "$required_aws_credentials_module $required_aws_credentials_version" \
   "$required_s3_module $required_s3_version" \
   "$required_smithy_module $required_smithy_version"; do
   read -r module version <<<"$baseline"

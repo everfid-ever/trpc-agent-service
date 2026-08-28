@@ -88,7 +88,16 @@ type PreparedPayloadRecord struct {
 	TenantID, RequestID, PayloadRef, SourcePayloadRef, ContentDigest string
 	Content                                                          []byte
 	KeyVersion                                                       int64
+	ArtifactRetention                                                time.Duration
+	ArtifactReferences                                               []PreparedArtifactReference
 	CreatedAt                                                        time.Time
+}
+
+// PreparedArtifactReference makes Artifact reachability queryable without
+// decrypting PreparedPayload content. ArtifactRetention is measured from the
+// durable PreparedPayload creation time, so retries preserve one deadline.
+type PreparedArtifactReference struct {
+	ArtifactID string
 }
 
 type PreparedPayloadStore interface {

@@ -1,7 +1,12 @@
 // Package secrets defines least-privilege secret resolution.
 package secrets
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+)
 
 type SecretRef struct {
 	Ref     string `json:"ref"`
@@ -36,3 +41,25 @@ type Provider interface {
 	Resolve(context.Context, Scope, SecretRef) (SecretValue, error)
 }
 type SecretProvider = Provider
+
+func ValidateRequest(scope Scope, ref SecretRef) error {
+	if !validText(scope.TenantID) || !validText(scope.Subject) || !validText(scope.ResourceID) ||
+		scope.ResourceVersion < 1 || !validText(ref.Ref) || ref.Version < 1 || !validPurpose(scope.Purpose) {
+		return runtime.ErrTenantScope
+	}
+	return nil
+}
+
+func validPurpose(value Purpose) bool {
+	switch value {
+	case PurposeChannelVerify, PurposeChannelSend, PurposeTenantIdentity, PurposeTenantSession,
+		PurposeModelCall, PurposeToolCall, PurposeBackendConnect:
+		return true
+	default:
+		return false
+	}
+}
+
+func validText(value string) bool {
+	return strings.TrimSpace(value) == value && value != "" && !strings.ContainsRune(value, 0)
+}

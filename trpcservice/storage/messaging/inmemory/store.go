@@ -134,22 +134,59 @@ func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPay
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 || in.KeyVersion < 1 {
+	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 || in.KeyVersion < 1 ||
+		in.ArtifactRetention < time.Second || in.ArtifactRetention%time.Second != 0 || !validPreparedArtifactReferences(in.ArtifactReferences) {
 		return runtime.ErrCommitConflict
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := in.TenantID + "\x00" + in.RequestID + "\x00" + in.PayloadRef
 	if old, ok := s.prepared[key]; ok {
-		if old.SourcePayloadRef != in.SourcePayloadRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
+		if old.SourcePayloadRef != in.SourcePayloadRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion ||
+			old.ArtifactRetention != in.ArtifactRetention || !samePreparedArtifactReferences(old.ArtifactReferences, in.ArtifactReferences) ||
+			string(old.Content) != string(in.Content) {
 			return runtime.ErrIdempotencyCollision
 		}
 		return nil
 	}
 	in.Content = append([]byte(nil), in.Content...)
+	in.ArtifactReferences = append([]messaging.PreparedArtifactReference(nil), in.ArtifactReferences...)
 	in.CreatedAt = time.Now().UTC()
 	s.prepared[key] = in
 	return nil
+}
+
+func validPreparedArtifactReferences(values []messaging.PreparedArtifactReference) bool {
+	if len(values) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value.ArtifactID == "" {
+			return false
+		}
+		if _, exists := seen[value.ArtifactID]; exists {
+			return false
+		}
+		seen[value.ArtifactID] = struct{}{}
+	}
+	return true
+}
+
+func samePreparedArtifactReferences(left, right []messaging.PreparedArtifactReference) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]struct{}, len(left))
+	for _, value := range left {
+		seen[value.ArtifactID] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := seen[value.ArtifactID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) GetPreparedPayload(ctx context.Context, tenantID, requestID, payloadRef string) (messaging.PayloadRecord, error) {

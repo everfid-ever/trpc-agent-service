@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -15,6 +16,8 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore"
 	objectmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/inmemory"
 )
@@ -30,6 +33,7 @@ func TestObjectBackedArtifactStorePostgreSQL16(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM artifact_object_upload WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM media_artifact WHERE tenant_id=$1`, tenantID)
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM prepared_payload WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM inbox WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM agent_app WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM tenant WHERE tenant_id=$1`, tenantID)
@@ -180,6 +184,48 @@ FROM artifact_object_upload WHERE tenant_id=$1 AND object_key=$2`, tenantID, fir
 	}
 	if _, err := objects.GetObject(ctx, tenantID, firstKey); err != nil {
 		t.Fatalf("quarantined object removed: %v", err)
+	}
+
+	retainedInput := contractArtifact(t, tenantID, requestID, 3, []byte("referenced retention content"))
+	retained, err := store.PutArtifact(ctx, retainedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedContent := []byte(`{"media":"retained"}`)
+	preparedDigest := sha256.Sum256(preparedContent)
+	payloadStore := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x42}, 32), 1)
+	prepared := messaging.PreparedPayloadRecord{TenantID: tenantID, RequestID: requestID,
+		PayloadRef: "prepared://" + tenantID + "/retention-contract", SourcePayloadRef: "inbound://" + tenantID + "/" + requestID,
+		ContentDigest: hex.EncodeToString(preparedDigest[:]), Content: preparedContent, KeyVersion: 1,
+		ArtifactRetention: time.Hour, ArtifactReferences: []messaging.PreparedArtifactReference{{ArtifactID: retained.ArtifactID}}}
+	if err := payloadStore.PutPreparedPayload(ctx, prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := payloadStore.PutPreparedPayload(ctx, prepared); err != nil {
+		t.Fatalf("prepared payload retry: %v", err)
+	}
+	var preparedCreatedAt, retainUntil time.Time
+	var retentionSeconds int64
+	if err := db.QueryRowContext(ctx, `SELECT p.created_at,p.artifact_retention_seconds,r.retain_until
+FROM prepared_payload p JOIN artifact_reference r ON r.tenant_id=p.tenant_id AND r.reference_id=p.payload_ref
+WHERE p.tenant_id=$1 AND p.request_id=$2 AND r.artifact_id=$3`, tenantID, requestID, retained.ArtifactID).
+		Scan(&preparedCreatedAt, &retentionSeconds, &retainUntil); err != nil {
+		t.Fatal(err)
+	}
+	if retentionSeconds != 3600 || !retainUntil.Equal(preparedCreatedAt.Add(time.Hour)) {
+		t.Fatalf("created=%v seconds=%d retain_until=%v", preparedCreatedAt, retentionSeconds, retainUntil)
+	}
+	retentionReconciler := artifact.RetentionReconciler{Store: store, Objects: objects, Owner: "retention-contract-cleaner",
+		OrphanGrace: 365 * 24 * time.Hour, Now: func() time.Time { return retainUntil.Add(-time.Second) }}
+	if handled, err := retentionReconciler.RunOnce(ctx); err != nil || handled != 0 {
+		t.Fatalf("live reference handled=%d err=%v", handled, err)
+	}
+	retentionReconciler.Now = func() time.Time { return retainUntil }
+	if handled, err := retentionReconciler.RunOnce(ctx); err != nil || handled != 1 {
+		t.Fatalf("expired reference handled=%d err=%v", handled, err)
+	}
+	if _, err := store.GetArtifact(ctx, tenantID, retained.ArtifactID); !errors.Is(err, runtime.ErrNotFound) {
+		t.Fatalf("expired artifact metadata err=%v", err)
 	}
 }
 

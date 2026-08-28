@@ -167,8 +167,8 @@ func insertMetadata(ctx context.Context, query queryRower, in artifact.Record, s
 		nullableObjectKey = objectKey
 	}
 	stored, err := scanMetadata(query.QueryRowContext(ctx, `INSERT INTO media_artifact(
-tenant_id,request_id,artifact_id,artifact_ref,ordinal,source_digest,content_digest,media_type,kind,content,malware_scan_version,dlp_version,storage_kind,object_key,content_size)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+tenant_id,request_id,artifact_id,artifact_ref,ordinal,source_digest,content_digest,media_type,kind,content,malware_scan_version,dlp_version,storage_kind,object_key,content_size,retention_managed)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,true)
 ON CONFLICT (tenant_id,artifact_id) DO UPDATE SET artifact_id=EXCLUDED.artifact_id
 RETURNING tenant_id,request_id,artifact_id,artifact_ref,ordinal,source_digest,content_digest,media_type,kind,
 content,malware_scan_version,dlp_version,created_at,storage_kind,object_key,content_size`,

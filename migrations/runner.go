@@ -13,6 +13,29 @@ type Runner struct{ db *sql.DB }
 
 func NewRunner(db *sql.DB) *Runner { return &Runner{db: db} }
 
+// Ready verifies that every embedded migration is applied with the exact
+// immutable checksum. It is read-only and is safe for production readiness;
+// schema changes remain an explicit deployment step through Up.
+func (r *Runner) Ready(ctx context.Context) error {
+	if r == nil || r.db == nil {
+		return fmt.Errorf("migration runner is not configured")
+	}
+	all, err := All()
+	if err != nil {
+		return err
+	}
+	for _, migration := range all {
+		var applied string
+		if err := r.db.QueryRowContext(ctx, `SELECT checksum FROM public.schema_migrations WHERE version=$1`, migration.Version).Scan(&applied); err != nil {
+			return fmt.Errorf("migration %s is not ready", migration.Version)
+		}
+		if applied != migrationChecksum(migration.Up) {
+			return fmt.Errorf("migration %s checksum mismatch", migration.Version)
+		}
+	}
+	return nil
+}
+
 func (r *Runner) Up(ctx context.Context) error {
 	return r.UpTo(ctx, "")
 }

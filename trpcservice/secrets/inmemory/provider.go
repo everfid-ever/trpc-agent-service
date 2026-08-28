@@ -30,9 +30,8 @@ func (p *Provider) Resolve(ctx context.Context, scope secrets.Scope, ref secrets
 	if err := ctx.Err(); err != nil {
 		return secrets.SecretValue{}, err
 	}
-	if scope.TenantID == "" || scope.Subject == "" || scope.Purpose == "" || scope.ResourceID == "" ||
-		scope.ResourceVersion < 1 || ref.Ref == "" || ref.Version < 1 {
-		return secrets.SecretValue{}, runtime.ErrTenantScope
+	if err := secrets.ValidateRequest(scope, ref); err != nil {
+		return secrets.SecretValue{}, err
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()

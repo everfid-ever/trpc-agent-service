@@ -60,6 +60,9 @@ type Worker struct {
 	MaxAttempts int
 	Now         func() time.Time
 	Media       *MediaStager
+	// ArtifactRetention is independent from audit/log retention. Media
+	// preprocessing fails closed unless this policy is explicitly configured.
+	ArtifactRetention time.Duration
 }
 
 func (w Worker) RunOnce(ctx context.Context, limit int) (int, error) {
@@ -123,7 +126,7 @@ func (w Worker) preprocess(ctx context.Context, job Job) error {
 
 func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef string, normalized NormalizedInput) error {
 	preparedStore, ok := w.Payloads.(messaging.PreparedPayloadStore)
-	if !ok || w.Media == nil {
+	if !ok || w.Media == nil || w.ArtifactRetention < time.Second || w.ArtifactRetention%time.Second != 0 {
 		return w.retry(ctx, job, "media_prepared_payload_unavailable")
 	}
 	staged := make([]StagedMedia, 0, len(normalized.MediaRefs))
@@ -151,9 +154,11 @@ func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef stri
 	prepared := PreparedInput{ExternalMessageID: normalized.ExternalMessageID, ExternalUserID: normalized.ExternalUserID,
 		ExternalChatID: normalized.ExternalChatID, MessageType: normalized.MessageType, Text: normalized.Text,
 		Media: make([]PreparedMedia, 0, len(staged))}
+	artifactReferences := make([]messaging.PreparedArtifactReference, 0, len(staged))
 	for _, value := range staged {
 		prepared.Media = append(prepared.Media, PreparedMedia{ArtifactID: value.ArtifactID, ArtifactRef: value.ArtifactRef,
 			Kind: value.Kind, MediaType: value.MediaType, ContentDigest: value.ContentDigest, Size: value.Size})
+		artifactReferences = append(artifactReferences, messaging.PreparedArtifactReference{ArtifactID: value.ArtifactID})
 	}
 	content, err := json.Marshal(prepared)
 	if err != nil {
@@ -161,7 +166,8 @@ func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef stri
 	}
 	digest := sha256.Sum256(content)
 	if err := preparedStore.PutPreparedPayload(ctx, messaging.PreparedPayloadRecord{TenantID: job.TenantID, RequestID: job.RequestID,
-		PayloadRef: preparedRef, SourcePayloadRef: sourcePayloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: content, KeyVersion: 1}); err != nil {
+		PayloadRef: preparedRef, SourcePayloadRef: sourcePayloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: content,
+		KeyVersion: 1, ArtifactRetention: w.ArtifactRetention, ArtifactReferences: artifactReferences}); err != nil {
 		if errors.Is(err, runtime.ErrIdempotencyCollision) {
 			_, finishErr := w.Store.FinishRejected(ctx, job, "prepared_payload_collision")
 			return finishErr

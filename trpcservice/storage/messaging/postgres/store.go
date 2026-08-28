@@ -86,7 +86,8 @@ WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
 }
 
 func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPayloadRecord) error {
-	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 {
+	if in.TenantID == "" || in.RequestID == "" || !strings.HasPrefix(in.PayloadRef, "prepared://") || !strings.HasPrefix(in.SourcePayloadRef, "inbound://") || in.ContentDigest == "" || len(in.Content) == 0 ||
+		in.ArtifactRetention < time.Second || in.ArtifactRetention%time.Second != 0 || !validPreparedArtifactReferences(in.ArtifactReferences) {
 		return runtime.ErrCommitConflict
 	}
 	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
@@ -101,27 +102,96 @@ func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPay
 	if err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var storedSource, storedRef, storedDigest string
 	var storedCiphertext, storedNonce []byte
-	var storedKeyVersion int64
-	err = s.db.QueryRowContext(ctx, `INSERT INTO prepared_payload(
-tenant_id,request_id,payload_ref,source_payload_ref,payload_ciphertext,payload_nonce,content_digest,key_version)
-VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+	var storedKeyVersion, storedRetentionSeconds int64
+	var storedCreatedAt time.Time
+	retentionSeconds := int64(in.ArtifactRetention / time.Second)
+	err = tx.QueryRowContext(ctx, `INSERT INTO prepared_payload(
+tenant_id,request_id,payload_ref,source_payload_ref,payload_ciphertext,payload_nonce,content_digest,key_version,artifact_retention_seconds)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
-RETURNING source_payload_ref,payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version`, in.TenantID, in.RequestID,
-		in.PayloadRef, in.SourcePayloadRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
-		Scan(&storedSource, &storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion)
+RETURNING source_payload_ref,payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version,
+artifact_retention_seconds,created_at`, in.TenantID, in.RequestID, in.PayloadRef, in.SourcePayloadRef, ciphertext, nonce,
+		in.ContentDigest, s.payloadKeyVersion, retentionSeconds).
+		Scan(&storedSource, &storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion,
+			&storedRetentionSeconds, &storedCreatedAt)
 	if err != nil {
 		return translate(err)
 	}
-	if storedSource != in.SourcePayloadRef || storedRef != in.PayloadRef || storedDigest != in.ContentDigest || storedKeyVersion != s.payloadKeyVersion {
+	if storedSource != in.SourcePayloadRef || storedRef != in.PayloadRef || storedDigest != in.ContentDigest ||
+		storedKeyVersion != s.payloadKeyVersion || storedRetentionSeconds != retentionSeconds {
 		return runtime.ErrIdempotencyCollision
 	}
 	storedContent, err := decryptPayload(s.payloadKey, payloadAAD(payload), storedCiphertext, storedNonce)
 	if err != nil || string(storedContent) != string(in.Content) {
 		return runtime.ErrIdempotencyCollision
 	}
+	retainUntil := storedCreatedAt.Add(in.ArtifactRetention)
+	for _, reference := range in.ArtifactReferences {
+		var storedArtifactID string
+		var storedRetainUntil time.Time
+		err := tx.QueryRowContext(ctx, `INSERT INTO artifact_reference(
+tenant_id,artifact_id,reference_kind,reference_id,retain_until)
+SELECT $1,a.artifact_id,'prepared_payload',$4,$5
+FROM media_artifact a WHERE a.tenant_id=$1 AND a.request_id=$2 AND a.artifact_id=$3
+ON CONFLICT (tenant_id,artifact_id,reference_kind,reference_id)
+DO UPDATE SET artifact_id=EXCLUDED.artifact_id
+RETURNING artifact_id,retain_until`, in.TenantID, in.RequestID, reference.ArtifactID, in.PayloadRef, retainUntil).
+			Scan(&storedArtifactID, &storedRetainUntil)
+		if errors.Is(err, sql.ErrNoRows) {
+			return runtime.ErrCommitConflict
+		}
+		if err != nil {
+			return translate(err)
+		}
+		if storedArtifactID != reference.ArtifactID || !storedRetainUntil.Equal(retainUntil) {
+			return runtime.ErrIdempotencyCollision
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE media_artifact SET retention_managed=true
+WHERE tenant_id=$1 AND request_id=$2 AND artifact_id=$3`, in.TenantID, in.RequestID, reference.ArtifactID)
+		if err != nil {
+			return translate(err)
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return runtime.ErrCommitConflict
+		}
+	}
+	var storedReferenceCount int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM artifact_reference
+WHERE tenant_id=$1 AND reference_kind='prepared_payload' AND reference_id=$2`, in.TenantID, in.PayloadRef).
+		Scan(&storedReferenceCount); err != nil {
+		return translate(err)
+	}
+	if storedReferenceCount != len(in.ArtifactReferences) {
+		return runtime.ErrIdempotencyCollision
+	}
+	if err := tx.Commit(); err != nil {
+		return translate(err)
+	}
 	return nil
+}
+
+func validPreparedArtifactReferences(values []messaging.PreparedArtifactReference) bool {
+	if len(values) == 0 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value.ArtifactID == "" {
+			return false
+		}
+		if _, exists := seen[value.ArtifactID]; exists {
+			return false
+		}
+		seen[value.ArtifactID] = struct{}{}
+	}
+	return true
 }
 
 func (s *Store) GetPreparedPayload(ctx context.Context, tenantID, requestID, payloadRef string) (messaging.PayloadRecord, error) {

@@ -125,6 +125,9 @@ func verifyLegacyBackendUpgrade(ctx context.Context, runner *migrations.Runner, 
 	if err := runner.UpTo(ctx, "000006"); err != nil {
 		return err
 	}
+	if err := runner.Ready(ctx); err == nil {
+		return fmt.Errorf("partial migration set reported ready")
+	}
 	var status, provider, backendRef string
 	var version int64
 	err := db.QueryRowContext(ctx, `SELECT p.status,v.provider,v.configuration->>'backend_ref',b.backend_version FROM backend_binding b JOIN backend_profile p USING(tenant_id,backend_profile_id) JOIN backend_profile_revision v USING(tenant_id,backend_profile_id) WHERE b.tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAZ' AND b.config_version=1 AND b.domain='session'`).Scan(&status, &provider, &backendRef, &version)
@@ -143,6 +146,9 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	}
 	if err := runner.Up(ctx); err != nil {
 		return fmt.Errorf("repeated up: %w", err)
+	}
+	if err := runner.Ready(ctx); err != nil {
+		return fmt.Errorf("migration readiness: %w", err)
 	}
 	if _, err := db.ExecContext(ctx, probes); err != nil {
 		return fmt.Errorf("contract probes: %w", err)

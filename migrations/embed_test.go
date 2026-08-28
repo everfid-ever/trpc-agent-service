@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 19 {
+	if len(all) != 20 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestArtifactRetentionMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[19]
+	if migration.Version != "000020" || migration.Name != "artifact_retention" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"artifact_retention_seconds", "retention_managed boolean NOT NULL DEFAULT false", "CREATE TABLE public.artifact_reference", "retain_until", "delete_claimed", "quarantined", "media_artifact_lifecycle_shape_check", "media_artifact_retention_claim_idx"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 
