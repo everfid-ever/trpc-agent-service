@@ -143,6 +143,22 @@ func TestDecodeMessageMapsAgentTextToProviderEvent(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageMapsAgentMediaToOpaqueProviderRef(t *testing.T) {
+	material := verificationMaterial()
+	for _, kind := range []string{"image", "file"} {
+		t.Run(kind, func(t *testing.T) {
+			body := mediaPayload(material, "message-1", kind, "media-id", 123)
+			event, err := protocol.DecodeMessage(channel.VerifiedCallback{Body: body, Headers: map[string]string{
+				"x-wecom-receive-id": material.ReceiveID, "x-wecom-agent-id": "218",
+			}})
+			if err != nil || event.MessageType != kind || event.Text != "" || len(event.MediaRefs) != 1 ||
+				event.MediaRefs[0].ID != "media-id" || event.MediaRefs[0].MessageID != "message-1" || event.MediaRefs[0].Kind != kind || event.MediaRefs[0].Size != 123 {
+				t.Fatalf("event=%#v err=%v", event, err)
+			}
+		})
+	}
+}
+
 func verificationMaterial() protocol.VerificationMaterial {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	return protocol.VerificationMaterial{Token: "callback-token", EncodingAESKey: base64.RawStdEncoding.EncodeToString(key), ReceiveID: "ww_corp", AgentID: 218}
@@ -174,6 +190,25 @@ func textPayload(material protocol.VerificationMaterial, messageID, content stri
 		AgentID      int64    `xml:"AgentID"`
 	}{ToUserName: cdata{material.ReceiveID}, FromUserName: cdata{"zhangsan"}, CreateTime: 1_800_000_000,
 		MsgType: cdata{"text"}, Content: cdata{content}, MsgID: messageID, AgentID: material.AgentID}
+	encoded, _ := xml.Marshal(payload)
+	return encoded
+}
+
+func mediaPayload(material protocol.VerificationMaterial, messageID, kind, mediaID string, size int64) []byte {
+	type cdata struct {
+		Value string `xml:",cdata"`
+	}
+	payload := struct {
+		XMLName                  xml.Name `xml:"xml"`
+		ToUserName, FromUserName cdata
+		CreateTime               int64  `xml:"CreateTime"`
+		MsgType                  cdata  `xml:"MsgType"`
+		MediaID                  cdata  `xml:"MediaId"`
+		FileSize                 int64  `xml:"FileSize"`
+		MsgID                    string `xml:"MsgId"`
+		AgentID                  int64  `xml:"AgentID"`
+	}{ToUserName: cdata{material.ReceiveID}, FromUserName: cdata{"zhangsan"}, CreateTime: 1_800_000_000,
+		MsgType: cdata{kind}, MediaID: cdata{mediaID}, FileSize: size, MsgID: messageID, AgentID: material.AgentID}
 	encoded, _ := xml.Marshal(payload)
 	return encoded
 }

@@ -124,12 +124,36 @@ func TestDecodeMessageMentionMatrix(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageMapsP2PMediaAndRejectsGroupMedia(t *testing.T) {
+	for _, test := range []struct{ kind, content, id string }{
+		{kind: "image", content: `{"image_key":"img_key"}`, id: "img_key"},
+		{kind: "file", content: `{"file_key":"file_key"}`, id: "file_key"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			result, err := protocol.DecodeMessage(channel.VerifiedCallback{Body: providerMessagePayload("p2p", test.kind, test.content, nil),
+				Headers: map[string]string{"x-feishu-bot-open-id": "ou_bot"}})
+			if err != nil || result.Ignored || result.Event.MessageType != test.kind || result.Event.Text != "" ||
+				len(result.Event.MediaRefs) != 1 || result.Event.MediaRefs[0].ID != test.id || result.Event.MediaRefs[0].MessageID != "om_message" || result.Event.MediaRefs[0].Kind != test.kind {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+			if _, err := protocol.DecodeMessage(channel.VerifiedCallback{Body: providerMessagePayload("group", test.kind, test.content, nil),
+				Headers: map[string]string{"x-feishu-bot-open-id": "ou_bot"}}); !errors.Is(err, runtime.ErrInvalidEnvelope) {
+				t.Fatalf("group media err=%v", err)
+			}
+		})
+	}
+}
+
 func messagePayload(chatType, content string, mentions []map[string]any) []byte {
+	return providerMessagePayload(chatType, "text", content, mentions)
+}
+
+func providerMessagePayload(chatType, messageType, content string, mentions []map[string]any) []byte {
 	payload := map[string]any{
 		"schema": "2.0", "header": map[string]any{"event_id": "evt_1", "event_type": protocol.EventTypeMessageReceive, "app_id": "cli_app", "tenant_key": "tenant-key", "token": "verify-token", "create_time": "1800000000000"},
 		"event": map[string]any{
 			"sender":  map[string]any{"sender_id": map[string]any{"open_id": "ou_user"}, "sender_type": "user", "tenant_key": "tenant-key"},
-			"message": map[string]any{"message_id": "om_message", "chat_id": "oc_chat", "chat_type": chatType, "message_type": "text", "content": content, "mentions": mentions, "create_time": "1800000000000"},
+			"message": map[string]any{"message_id": "om_message", "chat_id": "oc_chat", "chat_type": chatType, "message_type": messageType, "content": content, "mentions": mentions, "create_time": "1800000000000"},
 		},
 	}
 	encoded, _ := json.Marshal(payload)

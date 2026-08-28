@@ -78,13 +78,16 @@ type encryptedEnvelope struct {
 	AgentID    int64    `xml:"AgentID"`
 }
 
-type textMessage struct {
+type callbackMessage struct {
 	XMLName      xml.Name `xml:"xml"`
 	ToUserName   string   `xml:"ToUserName"`
 	FromUserName string   `xml:"FromUserName"`
 	CreateTime   int64    `xml:"CreateTime"`
 	MsgType      string   `xml:"MsgType"`
 	Content      string   `xml:"Content"`
+	MediaID      string   `xml:"MediaId"`
+	FileName     string   `xml:"FileName"`
+	FileSize     int64    `xml:"FileSize"`
 	MsgID        string   `xml:"MsgId"`
 	AgentID      int64    `xml:"AgentID"`
 }
@@ -121,7 +124,7 @@ func (v Verifier) Verify(_ context.Context, request channel.CallbackRequest, sec
 	if err != nil || receiveID != material.ReceiveID {
 		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
 	}
-	message, err := parseTextMessage(plaintext)
+	message, err := parseMessage(plaintext)
 	if err != nil || message.ToUserName != material.ReceiveID || message.AgentID != material.AgentID {
 		return channel.VerifiedProtocolPayload{}, runtime.ErrVersionMismatch
 	}
@@ -151,7 +154,7 @@ func (v Verifier) timestampWithinWindow(seconds int64) bool {
 }
 
 func DecodeMessage(payload channel.VerifiedCallback) (channel.ProviderEvent, error) {
-	message, err := parseTextMessage(payload.Body)
+	message, err := parseMessage(payload.Body)
 	if err != nil {
 		return channel.ProviderEvent{}, err
 	}
@@ -160,12 +163,18 @@ func DecodeMessage(payload channel.VerifiedCallback) (channel.ProviderEvent, err
 	if err != nil || receiveID == "" || message.ToUserName != receiveID || message.AgentID != agentID {
 		return channel.ProviderEvent{}, runtime.ErrVersionMismatch
 	}
-	return channel.ProviderEvent{
+	event := channel.ProviderEvent{
 		SchemaVersion: 1, Channel: "wecom", ExternalAccountID: receiveID,
 		ExternalMessageID: message.MsgID, ConversationType: "p2p",
-		ExternalUserID: message.FromUserName, MessageType: "text",
-		Text: strings.TrimSpace(message.Content), OccurredAt: time.Unix(message.CreateTime, 0).UTC(),
-	}, nil
+		ExternalUserID: message.FromUserName, MessageType: message.MsgType,
+		OccurredAt: time.Unix(message.CreateTime, 0).UTC(),
+	}
+	if message.MsgType == "text" {
+		event.Text = strings.TrimSpace(message.Content)
+	} else {
+		event.MediaRefs = []channel.MediaRef{{ID: message.MediaID, MessageID: message.MsgID, Kind: message.MsgType, Size: message.FileSize}}
+	}
+	return event, nil
 }
 
 func parseMaterial(secret []byte) (VerificationMaterial, error) {
@@ -186,12 +195,28 @@ func parseMaterial(secret []byte) (VerificationMaterial, error) {
 	return material, nil
 }
 
-func parseTextMessage(body []byte) (textMessage, error) {
-	var message textMessage
+func parseMessage(body []byte) (callbackMessage, error) {
+	var message callbackMessage
 	if len(body) == 0 || len(body) > maxCallbackBytes || decodeXML(body, &message) != nil || message.XMLName.Local != "xml" ||
-		message.ToUserName == "" || message.FromUserName == "" || message.CreateTime <= 0 || message.MsgType != "text" ||
-		message.MsgID == "" || message.AgentID <= 0 || strings.TrimSpace(message.Content) == "" || !utf8.ValidString(message.Content) {
-		return textMessage{}, runtime.ErrInvalidEnvelope
+		message.ToUserName == "" || message.FromUserName == "" || message.CreateTime <= 0 ||
+		message.MsgID == "" || message.AgentID <= 0 || message.FileSize < 0 {
+		return callbackMessage{}, runtime.ErrInvalidEnvelope
+	}
+	switch message.MsgType {
+	case "text":
+		if strings.TrimSpace(message.Content) == "" || !utf8.ValidString(message.Content) || message.MediaID != "" || message.FileSize != 0 {
+			return callbackMessage{}, runtime.ErrInvalidEnvelope
+		}
+	case "image":
+		if message.MediaID == "" || message.Content != "" || message.FileName != "" {
+			return callbackMessage{}, runtime.ErrInvalidEnvelope
+		}
+	case "file":
+		if message.MediaID == "" || message.Content != "" || (message.FileName != "" && !utf8.ValidString(message.FileName)) {
+			return callbackMessage{}, runtime.ErrInvalidEnvelope
+		}
+	default:
+		return callbackMessage{}, runtime.ErrCapabilityUnsupported
 	}
 	return message, nil
 }

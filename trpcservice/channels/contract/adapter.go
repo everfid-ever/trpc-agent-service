@@ -50,8 +50,11 @@ func (e PermanentDeliveryError) Error() string {
 func (e PermanentDeliveryError) Unwrap() error { return e.Err }
 
 type MediaRef struct {
-	ID, Kind, ContentType string
-	Size                  int64
+	ID          string `json:"id"`
+	MessageID   string `json:"message_id,omitempty"`
+	Kind        string `json:"kind"`
+	ContentType string `json:"content_type,omitempty"`
+	Size        int64  `json:"size,omitempty"`
 }
 type CallbackRequest struct {
 	Headers    map[string]string

@@ -10,18 +10,27 @@ import (
 	"strings"
 	"time"
 
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
-type NormalizedText struct {
-	ExternalMessageID string `json:"external_message_id"`
-	ExternalUserID    string `json:"external_user_id"`
-	ExternalChatID    string `json:"external_chat_id"`
-	Text              string `json:"text"`
+type NormalizedInput struct {
+	ExternalMessageID string             `json:"external_message_id"`
+	ExternalUserID    string             `json:"external_user_id"`
+	ExternalChatID    string             `json:"external_chat_id"`
+	ChannelBindingID  string             `json:"channel_binding_id,omitempty"`
+	ExternalAccountID string             `json:"external_account_id,omitempty"`
+	MessageType       string             `json:"message_type,omitempty"`
+	Text              string             `json:"text,omitempty"`
+	MediaRefs         []channel.MediaRef `json:"media_refs,omitempty"`
 }
+
+// NormalizedText preserves the source-compatible name used by the initial
+// text-only fixtures while sharing the version-one normalized input schema.
+type NormalizedText = NormalizedInput
 
 type Worker struct {
 	Store       Store
@@ -76,18 +85,44 @@ func (w Worker) preprocess(ctx context.Context, job Job) error {
 		_, finishErr := w.Store.FinishRejected(ctx, job, "payload_integrity")
 		return finishErr
 	}
-	var normalized NormalizedText
+	var normalized NormalizedInput
 	decoder := json.NewDecoder(strings.NewReader(string(payload.Content)))
 	decoder.DisallowUnknownFields()
 	decodeErr := decoder.Decode(&normalized)
 	var trailing any
 	trailingErr := decoder.Decode(&trailing)
-	if decodeErr != nil || !errors.Is(trailingErr, io.EOF) || strings.TrimSpace(normalized.Text) == "" || normalized.ExternalMessageID == "" || normalized.ExternalUserID == "" {
+	if decodeErr != nil || !errors.Is(trailingErr, io.EOF) || !validNormalizedInput(normalized) {
 		_, finishErr := w.Store.FinishRejected(ctx, job, "invalid_text_payload")
 		return finishErr
 	}
+	// A provider media identifier is an opaque credential-scoped reference, not
+	// executable input. Keep the job recoverable until the staged ArtifactRef is
+	// persisted as the prepared payload consumed by dispatch.
+	if len(normalized.MediaRefs) > 0 {
+		return w.retry(ctx, job, "media_prepared_payload_unavailable")
+	}
 	_, err = w.Store.FinishReady(ctx, job)
 	return err
+}
+
+func validNormalizedInput(value NormalizedInput) bool {
+	if value.ExternalMessageID == "" || value.ExternalUserID == "" || len(value.MediaRefs) > 1 {
+		return false
+	}
+	messageType := value.MessageType
+	if messageType == "" {
+		messageType = "text"
+	}
+	switch messageType {
+	case "text":
+		return strings.TrimSpace(value.Text) != "" && len(value.MediaRefs) == 0
+	case "image", "file":
+		return strings.TrimSpace(value.Text) == "" && value.ChannelBindingID != "" && value.ExternalAccountID != "" &&
+			len(value.MediaRefs) == 1 && value.MediaRefs[0].ID != "" &&
+			value.MediaRefs[0].Kind == messageType && value.MediaRefs[0].Size >= 0
+	default:
+		return false
+	}
 }
 
 func (w Worker) retry(ctx context.Context, job Job, reason string) error {

@@ -172,7 +172,7 @@ func DecodeMessage(payload channel.VerifiedCallback) (DecodeResult, error) {
 	message, sender := event.Event.Message, event.Event.Sender
 	if headerValue.EventType != EventTypeMessageReceive || headerValue.EventID == "" || headerValue.AppID == "" ||
 		message.MessageId == nil || *message.MessageId == "" || message.ChatId == nil || *message.ChatId == "" ||
-		message.ChatType == nil || message.MessageType == nil || *message.MessageType != "text" || message.Content == nil ||
+		message.ChatType == nil || message.MessageType == nil || message.Content == nil ||
 		sender.SenderId.OpenId == nil || *sender.SenderId.OpenId == "" || sender.TenantKey == nil || *sender.TenantKey == "" {
 		return DecodeResult{}, runtime.ErrInvalidEnvelope
 	}
@@ -183,13 +183,9 @@ func DecodeMessage(payload channel.VerifiedCallback) (DecodeResult, error) {
 	if botOpenID == "" {
 		return DecodeResult{}, runtime.ErrVersionMismatch
 	}
-	text, mentionedBot, err := normalizeText(*message.Content, message.Mentions, botOpenID)
+	messageType, text, media, ignored, err := decodeContent(*message.MessageType, *message.Content, message.Mentions, botOpenID, *message.ChatType)
 	if err != nil {
 		return DecodeResult{}, err
-	}
-	ignored := *message.ChatType == "group" && (!mentionedBot || strings.TrimSpace(text) == "")
-	if ignored {
-		text = ""
 	}
 	occurredAt, err := eventTime(message.CreateTime, headerValue.CreateTime)
 	if err != nil {
@@ -199,8 +195,56 @@ func DecodeMessage(payload channel.VerifiedCallback) (DecodeResult, error) {
 		SchemaVersion: 1, Channel: "feishu", ExternalAccountID: headerValue.AppID,
 		ExternalMessageID: *message.MessageId, ConversationType: *message.ChatType,
 		ExternalUserID: *sender.SenderId.OpenId, ExternalChatID: *message.ChatId,
-		MessageType: "text", Text: text, OccurredAt: occurredAt,
+		MessageType: messageType, Text: text, MediaRefs: bindMediaMessage(media, *message.MessageId), OccurredAt: occurredAt,
 	}}, nil
+}
+
+func bindMediaMessage(media []channel.MediaRef, messageID string) []channel.MediaRef {
+	for index := range media {
+		media[index].MessageID = messageID
+	}
+	return media
+}
+
+func decodeContent(messageType, content string, mentions []*larkim.MentionEvent, botOpenID, chatType string) (string, string, []channel.MediaRef, bool, error) {
+	switch messageType {
+	case "text":
+		text, mentionedBot, err := normalizeText(content, mentions, botOpenID)
+		if err != nil {
+			return "", "", nil, false, err
+		}
+		ignored := chatType == "group" && (!mentionedBot || strings.TrimSpace(text) == "")
+		if ignored {
+			text = ""
+		}
+		return "text", text, nil, ignored, nil
+	case "image", "file":
+		// Media-only group events carry no mention span that can prove the bot was
+		// addressed, so the first safe slice accepts them only in p2p chats.
+		if chatType != "p2p" || len(mentions) != 0 {
+			return "", "", nil, false, runtime.ErrInvalidEnvelope
+		}
+		var body struct {
+			ImageKey string `json:"image_key"`
+			FileKey  string `json:"file_key"`
+		}
+		decoder := json.NewDecoder(strings.NewReader(content))
+		decoder.DisallowUnknownFields()
+		decodeErr := decoder.Decode(&body)
+		var trailing any
+		trailingErr := decoder.Decode(&trailing)
+		id := body.ImageKey
+		if messageType == "file" {
+			id = body.FileKey
+		}
+		if decodeErr != nil || trailingErr != io.EOF || id == "" ||
+			(messageType == "image" && body.FileKey != "") || (messageType == "file" && body.ImageKey != "") {
+			return "", "", nil, false, runtime.ErrInvalidEnvelope
+		}
+		return messageType, "", []channel.MediaRef{{ID: id, Kind: messageType}}, false, nil
+	default:
+		return "", "", nil, false, runtime.ErrCapabilityUnsupported
+	}
 }
 
 func normalizeText(content string, mentions []*larkim.MentionEvent, botOpenID string) (string, bool, error) {

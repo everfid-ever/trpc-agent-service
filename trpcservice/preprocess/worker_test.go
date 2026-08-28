@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocessmemory "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/inmemory"
@@ -16,6 +17,37 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 )
+
+func TestWorkerDoesNotDispatchOpaqueProviderMediaReference(t *testing.T) {
+	clock := time.Now().UTC().Truncate(time.Microsecond)
+	store := preprocessmemory.New()
+	payloads := messagingmemory.New()
+	inbox, _, err := store.ClaimInboxAndSchedule(context.Background(), claim("media-message"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: "media-message", ExternalUserID: "external-user",
+		ChannelBindingID: "binding", ExternalAccountID: "account", MessageType: "image",
+		MediaRefs: []channel.MediaRef{{ID: "provider-image-key", MessageID: "provider-message", Kind: "image"}}})
+	sum := sha256.Sum256(content)
+	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: inbox.TenantID, RequestID: inbox.RequestID,
+		PayloadRef: inbox.PayloadRef, ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &recordingDispatcher{}
+	worker := preprocess.Worker{Store: store, Payloads: payloads, Dispatcher: dispatcher, Owner: "worker",
+		RetryDelay: time.Second, Now: func() time.Time { return clock }}
+	if processed, err := worker.RunOnce(context.Background(), 10); err != nil || processed != 1 || len(dispatcher.requests) != 0 {
+		t.Fatalf("processed=%d requests=%d err=%v", processed, len(dispatcher.requests), err)
+	}
+	if jobs, err := store.ClaimJobs(context.Background(), preprocess.ClaimOptions{Owner: "inspect", Now: clock.Add(500 * time.Millisecond), TTL: time.Second, Limit: 1}); err != nil || len(jobs) != 0 {
+		t.Fatalf("job became runnable before retry delay: jobs=%#v err=%v", jobs, err)
+	}
+	jobs, err := store.ClaimJobs(context.Background(), preprocess.ClaimOptions{Owner: "inspect", Now: clock.Add(2 * time.Second), TTL: time.Second, Limit: 1})
+	if err != nil || len(jobs) != 1 || jobs[0].RejectReason != "media_prepared_payload_unavailable" {
+		t.Fatalf("recoverable media job=%#v err=%v", jobs, err)
+	}
+}
 
 func TestWorkerTransitionsReadyAndRecoversDispatch(t *testing.T) {
 	clock := time.Now().UTC().Truncate(time.Microsecond)

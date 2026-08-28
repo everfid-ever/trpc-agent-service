@@ -34,6 +34,25 @@ func TestPipelinePersistsNormalizedPayloadAndSchedulesExactlyOnce(t *testing.T) 
 	}
 }
 
+func TestPipelinePersistsOpaqueMediaReferenceWithoutDownloading(t *testing.T) {
+	store := preprocessmemory.New()
+	payloads := messagingmemory.New()
+	verified := ingress.VerifiedIngress{Binding: channel.VerifiedBinding{TenantID: "tenant", TenantVersion: 2, AgentAppID: "app",
+		ChannelBindingID: "binding", Channel: "feishu", ExternalAccountID: "account", BindingVersion: 1},
+		Events: []channel.ProviderEvent{{SchemaVersion: 1, Channel: "feishu", ExternalAccountID: "account", ExternalMessageID: "media-message",
+			ExternalUserID: "external-user", ConversationType: "dm", MessageType: "image",
+			MediaRefs: []channel.MediaRef{{ID: "provider-image-key", Kind: "image"}}, OccurredAt: time.Now()}}}
+	pipeline := ingress.Pipeline{Verification: staticVerifier{verified}, Identity: staticIdentity{}, Intake: store, Payloads: payloads}
+	accepted, err := pipeline.Accept(context.Background(), channel.CallbackRequest{})
+	if err != nil || len(accepted) != 1 {
+		t.Fatalf("accepted=%#v err=%v", accepted, err)
+	}
+	payload, err := payloads.GetPayload(context.Background(), "tenant", accepted[0].RequestID)
+	if err != nil || string(payload.Content) != `{"external_message_id":"media-message","external_user_id":"external-user","external_chat_id":"","channel_binding_id":"binding","external_account_id":"account","message_type":"image","media_refs":[{"id":"provider-image-key","kind":"image"}]}` {
+		t.Fatalf("payload=%s err=%v", payload.Content, err)
+	}
+}
+
 type staticVerifier struct{ ingress.VerifiedIngress }
 
 func (v staticVerifier) VerifyAndDecode(context.Context, channel.CallbackRequest) (ingress.VerifiedIngress, error) {

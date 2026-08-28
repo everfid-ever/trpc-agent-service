@@ -18,9 +18,9 @@ import (
 )
 
 type MediaFetchRequest struct {
-	TenantID, RequestID, Channel string
-	Ordinal                      int
-	Media                        channel.MediaRef
+	TenantID, RequestID, Channel, ChannelBindingID, ExternalAccountID string
+	Ordinal                                                           int
+	Media                                                             channel.MediaRef
 }
 
 type MediaDownload struct {

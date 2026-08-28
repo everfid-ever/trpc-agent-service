@@ -44,9 +44,9 @@ type InputDLPScanner interface {
 }
 
 type MediaStageRequest struct {
-	TenantID, RequestID, Channel string
-	Ordinal                      int
-	Media                        channel.MediaRef
+	TenantID, RequestID, Channel, ChannelBindingID, ExternalAccountID string
+	Ordinal                                                           int
+	Media                                                             channel.MediaRef
 }
 
 type StagedMedia struct {
@@ -77,7 +77,8 @@ func (s MediaStager) Stage(ctx context.Context, request MediaStageRequest) (Stag
 		return StagedMedia{}, runtime.ErrInvalidEnvelope
 	}
 	download, err := s.Fetcher.Fetch(ctx, MediaFetchRequest{TenantID: request.TenantID, RequestID: request.RequestID,
-		Channel: request.Channel, Ordinal: request.Ordinal, Media: request.Media})
+		Channel: request.Channel, ChannelBindingID: request.ChannelBindingID, ExternalAccountID: request.ExternalAccountID,
+		Ordinal: request.Ordinal, Media: request.Media})
 	if err != nil {
 		return StagedMedia{}, err
 	}
@@ -139,9 +140,9 @@ func (s MediaStager) Stage(ctx context.Context, request MediaStageRequest) (Stag
 
 func mediaSourceDigest(request MediaStageRequest) string {
 	value, _ := json.Marshal(struct {
-		Channel, ID, Kind, ContentType string
-		Size                           int64
-	}{Channel: request.Channel, ID: request.Media.ID, Kind: request.Media.Kind,
+		Channel, ID, MessageID, Kind, ContentType string
+		Size                                      int64
+	}{Channel: request.Channel, ID: request.Media.ID, MessageID: request.Media.MessageID, Kind: request.Media.Kind,
 		ContentType: request.Media.ContentType, Size: request.Media.Size})
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
@@ -153,7 +154,7 @@ func validateMediaType(content []byte, responseType, claimedType, kind string, a
 		return "", runtime.ErrInvalidEnvelope
 	}
 	response, err := canonicalMediaType(responseType)
-	if err != nil || (response != "" && response != detected) {
+	if err != nil || (response != "" && response != "application/octet-stream" && response != detected) {
 		return "", runtime.ErrInvalidEnvelope
 	}
 	claimed, err := canonicalMediaType(claimedType)

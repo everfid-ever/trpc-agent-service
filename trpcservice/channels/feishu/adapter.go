@@ -93,6 +93,9 @@ func (a *Adapter) Decode(_ context.Context, callback channel.VerifiedCallback) (
 	if err != nil {
 		return nil, err
 	}
+	if decoded.Ignored {
+		return nil, nil
+	}
 	return []channel.ProviderEvent{decoded.Event}, nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
@@ -51,15 +52,25 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 	accepted := make([]AcceptedEvent, 0, len(verified.Events))
 	for _, event := range verified.Events {
 		if event.Channel != verified.Binding.Channel || event.ExternalAccountID != verified.Binding.ExternalAccountID ||
-			event.MessageType != "text" || len(event.MediaRefs) != 0 {
+			!validProviderContent(event) {
 			return nil, runtime.ErrInvalidEnvelope
 		}
 		ids, err := p.Identity.Map(ctx, verified.Binding, event)
 		if err != nil {
 			return nil, err
 		}
-		normalized, err := json.Marshal(preprocess.NormalizedText{ExternalMessageID: event.ExternalMessageID,
-			ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID, Text: event.Text})
+		messageType := event.MessageType
+		if messageType == "text" {
+			messageType = ""
+		}
+		bindingID, accountID := "", ""
+		if len(event.MediaRefs) > 0 {
+			bindingID, accountID = verified.Binding.ChannelBindingID, verified.Binding.ExternalAccountID
+		}
+		normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
+			ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
+			ChannelBindingID: bindingID, ExternalAccountID: accountID,
+			MessageType: messageType, Text: event.Text, MediaRefs: event.MediaRefs})
 		if err != nil {
 			return nil, err
 		}
@@ -87,4 +98,19 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 		accepted = append(accepted, AcceptedEvent{RequestID: requestID, PayloadRef: payloadRef, PreprocessJobID: job.JobID})
 	}
 	return accepted, nil
+}
+
+func validProviderContent(event channel.ProviderEvent) bool {
+	if event.ExternalMessageID == "" || event.ExternalUserID == "" || len(event.MediaRefs) > 1 {
+		return false
+	}
+	switch event.MessageType {
+	case "text":
+		return strings.TrimSpace(event.Text) != "" && len(event.MediaRefs) == 0
+	case "image", "file":
+		return strings.TrimSpace(event.Text) == "" && len(event.MediaRefs) == 1 && event.MediaRefs[0].ID != "" &&
+			event.MediaRefs[0].Kind == event.MessageType && event.MediaRefs[0].Size >= 0
+	default:
+		return false
+	}
 }
