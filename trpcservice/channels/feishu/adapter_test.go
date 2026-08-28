@@ -19,6 +19,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/contracttest"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu/protocol"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
@@ -27,6 +28,7 @@ import (
 	preprocessmemory "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretmemory "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 )
 
@@ -95,6 +97,23 @@ func TestDeliverUsesStableUUIDAndClassifiedSender(t *testing.T) {
 	if _, err := adapter.Deliver(context.Background(), request); err == nil {
 		t.Fatal("classified sender error was swallowed")
 	}
+}
+
+func TestAdapterDeliveryContract(t *testing.T) {
+	contracttest.RunDelivery(t, func(testing.TB) contracttest.DeliveryHarness {
+		sender := &recordingSender{messageID: "om_reply"}
+		content := []byte("contract reply")
+		sum := sha256.Sum256(content)
+		result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request",
+			ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}
+		target := channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: "cli_app", ExternalMessageID: "om_source"}
+		event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding",
+			DeliveryKey: "reply-feishu", ContentRef: result.ResultRef, Target: target, Final: true}
+		return contracttest.DeliveryHarness{Adapter: &feishu.Adapter{Sender: sender}, Event: event, Result: result, Observe: func() contracttest.DeliveryObservation {
+			return contracttest.DeliveryObservation{Calls: sender.calls, ClientRequestID: sender.uuid, Content: []byte(sender.text),
+				Target: channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: sender.destination.ExternalAccountID, ExternalMessageID: sender.replyMessageID}}
+		}}
+	})
 }
 
 func TestOfficialSenderUsesReplyUUIDAndClassifiesHTTPResults(t *testing.T) {
@@ -191,7 +210,10 @@ func TestClientCacheReusesSDKClientAndTenantToken(t *testing.T) {
 
 type recordingSender struct {
 	destination     channel.ReplyDestination
+	replyMessageID  string
+	text            string
 	uuid, messageID string
+	calls           int
 	err             error
 }
 
@@ -209,8 +231,9 @@ type httpClientFunc func(*http.Request) (*http.Response, error)
 
 func (f httpClientFunc) Do(request *http.Request) (*http.Response, error) { return f(request) }
 
-func (s *recordingSender) ReplyText(_ context.Context, destination channel.ReplyDestination, _, _, uuid string) (string, error) {
-	s.destination, s.uuid = destination, uuid
+func (s *recordingSender) ReplyText(_ context.Context, destination channel.ReplyDestination, replyMessageID, text, uuid string) (string, error) {
+	s.destination, s.replyMessageID, s.text, s.uuid = destination, replyMessageID, text, uuid
+	s.calls++
 	return s.messageID, s.err
 }
 

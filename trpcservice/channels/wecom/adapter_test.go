@@ -20,6 +20,7 @@ import (
 	"time"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/contracttest"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
 	ingressmemory "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/inmemory"
@@ -28,6 +29,7 @@ import (
 	preprocessmemory "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretmemory "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 )
 
@@ -98,6 +100,23 @@ func TestDeliverUsesFrozenUserTargetAndSenderClassification(t *testing.T) {
 	if _, err := adapter.Deliver(context.Background(), request); err == nil {
 		t.Fatal("classified sender error was swallowed")
 	}
+}
+
+func TestAdapterDeliveryContract(t *testing.T) {
+	contracttest.RunDelivery(t, func(testing.TB) contracttest.DeliveryHarness {
+		sender := &recordingSender{messageID: "wecom-reply"}
+		content := []byte("contract reply")
+		sum := sha256.Sum256(content)
+		result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request",
+			ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}
+		target := channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: "ww_corp", ExternalUserID: "zhangsan"}
+		event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding",
+			DeliveryKey: "reply-wecom", ContentRef: result.ResultRef, Target: target, Final: true}
+		return contracttest.DeliveryHarness{Adapter: &wecom.Adapter{Sender: sender}, Event: event, Result: result, Observe: func() contracttest.DeliveryObservation {
+			return contracttest.DeliveryObservation{Calls: sender.calls, ClientRequestID: sender.clientRequestID, Content: []byte(sender.text),
+				Target: channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: sender.destination.ExternalAccountID, ExternalUserID: sender.externalUserID}}
+		}}
+	})
 }
 
 func TestOfficialSenderClassifiesResponsesAndRefreshesInvalidTokenOnce(t *testing.T) {
@@ -178,12 +197,16 @@ func TestOfficialSenderTreatsTransportFailureAsAmbiguous(t *testing.T) {
 }
 
 type recordingSender struct {
+	destination                                channel.ReplyDestination
+	text                                       string
 	externalUserID, clientRequestID, messageID string
+	calls                                      int
 	err                                        error
 }
 
-func (s *recordingSender) SendText(_ context.Context, _ channel.ReplyDestination, externalUserID, _ string, clientRequestID string) (string, error) {
-	s.externalUserID, s.clientRequestID = externalUserID, clientRequestID
+func (s *recordingSender) SendText(_ context.Context, destination channel.ReplyDestination, externalUserID, text, clientRequestID string) (string, error) {
+	s.destination, s.externalUserID, s.text, s.clientRequestID = destination, externalUserID, text, clientRequestID
+	s.calls++
 	return s.messageID, s.err
 }
 
