@@ -26,6 +26,9 @@ type Object struct {
 type Store interface {
 	PutObject(context.Context, Object) (Object, error)
 	GetObject(context.Context, string, string) (Object, error)
+	// DeleteObject is idempotent for an absent key and must refuse deletion
+	// when the stored content does not match contentDigest.
+	DeleteObject(context.Context, string, string, string) error
 }
 
 // StableKey returns an opaque tenant prefix and the stable artifact ID. It

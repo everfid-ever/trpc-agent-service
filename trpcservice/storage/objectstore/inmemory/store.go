@@ -57,6 +57,30 @@ func (s *Store) GetObject(ctx context.Context, tenantID, objectKey string) (obje
 	return clone(stored), nil
 }
 
+func (s *Store) DeleteObject(ctx context.Context, tenantID, objectKey, contentDigest string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := objectstore.ValidateKey(tenantID, objectKey); err != nil {
+		return err
+	}
+	if contentDigest == "" {
+		return runtime.ErrInvalidEnvelope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenantID + "\x00" + objectKey
+	stored, ok := s.objects[key]
+	if !ok {
+		return nil
+	}
+	if stored.ContentDigest != contentDigest {
+		return runtime.ErrVersionMismatch
+	}
+	delete(s.objects, key)
+	return nil
+}
+
 func clone(value objectstore.Object) objectstore.Object {
 	value.Content = append([]byte(nil), value.Content...)
 	return value

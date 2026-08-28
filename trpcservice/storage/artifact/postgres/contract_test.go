@@ -10,10 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore"
 	objectmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/inmemory"
 )
 
@@ -26,6 +28,7 @@ func TestObjectBackedArtifactStorePostgreSQL16(t *testing.T) {
 		requestID = "artifact-object-request"
 	)
 	t.Cleanup(func() {
+		_, _ = db.ExecContext(context.Background(), `DELETE FROM artifact_object_upload WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM media_artifact WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM inbox WHERE tenant_id=$1`, tenantID)
 		_, _ = db.ExecContext(context.Background(), `DELETE FROM agent_app WHERE tenant_id=$1`, tenantID)
@@ -48,6 +51,10 @@ VALUES($1,'artifact','account','message',$2,$3,'session','dispatch_pending','inb
 	if _, err := NewWithObjectStore(db, nil).PutArtifact(ctx, firstInput); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
 		t.Fatalf("nil object store err=%v", err)
 	}
+	if _, err := NewWithObjectStoreOptions(db, objects, ObjectStoreOptions{PutTimeout: time.Minute, UploadProtection: time.Second}).
+		PutArtifact(ctx, firstInput); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("unsafe upload protection err=%v", err)
+	}
 	first, err := store.PutArtifact(ctx, firstInput)
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +62,10 @@ VALUES($1,'artifact','account','message',$2,$3,'session','dispatch_pending','inb
 	repeated, err := store.PutArtifact(ctx, firstInput)
 	if err != nil || repeated.ArtifactRef != first.ArtifactRef {
 		t.Fatalf("repeated=%#v err=%v", repeated, err)
+	}
+	var uploadCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM artifact_object_upload WHERE tenant_id=$1`, tenantID).Scan(&uploadCount); err != nil || uploadCount != 0 {
+		t.Fatalf("committed upload intents=%d err=%v", uploadCount, err)
 	}
 	loaded, err := store.GetArtifact(ctx, tenantID, first.ArtifactID)
 	if err != nil || string(loaded.Content) != "object-backed content" {
@@ -94,6 +105,81 @@ VALUES($1,'artifact','account','message',$2,$3,'session','dispatch_pending','inb
 	collision.ContentDigest = hex.EncodeToString(digest[:])
 	if _, err := store.PutArtifact(ctx, collision); !errors.Is(err, runtime.ErrIdempotencyCollision) {
 		t.Fatalf("collision err=%v", err)
+	}
+
+	now := time.Now().UTC()
+	orphanInput := contractArtifact(t, tenantID, requestID, 2, []byte("uncommitted object"))
+	orphanKey, err := objectstore.StableKey(tenantID, orphanInput.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.protectObjectUpload(ctx, orphanInput, orphanKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := objects.PutObject(ctx, objectstore.Object{TenantID: tenantID, ObjectKey: orphanKey,
+		ContentDigest: orphanInput.ContentDigest, Content: orphanInput.Content}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE artifact_object_upload SET protect_until=$3 WHERE tenant_id=$1 AND object_key=$2`,
+		tenantID, orphanKey, now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	reconciler := artifact.ObjectLifecycleReconciler{Store: store, Objects: objects, Owner: "artifact-contract-cleaner",
+		Now: func() time.Time { return now }, ClaimTTL: time.Minute, BatchSize: 10}
+	if handled, err := reconciler.RunOnce(ctx); err != nil || handled != 1 {
+		t.Fatalf("orphan cleanup handled=%d err=%v", handled, err)
+	}
+	if _, err := objects.GetObject(ctx, tenantID, orphanKey); !errors.Is(err, runtime.ErrNotFound) {
+		t.Fatalf("orphan object remains err=%v", err)
+	}
+
+	firstKey, err := objectstore.StableKey(tenantID, first.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO artifact_object_upload(
+tenant_id,object_key,artifact_id,request_id,content_digest,content_size,protect_until)
+VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, firstKey, first.ArtifactID, requestID, first.ContentDigest,
+		len(first.Content), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := reconciler.RunOnce(ctx); err != nil || handled != 1 {
+		t.Fatalf("referenced cleanup handled=%d err=%v", handled, err)
+	}
+	if _, err := objects.GetObject(ctx, tenantID, firstKey); err != nil {
+		t.Fatalf("referenced object removed: %v", err)
+	}
+
+	wrongDigest := strings.Repeat("0", 64)
+	if wrongDigest == first.ContentDigest {
+		wrongDigest = strings.Repeat("1", 64)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO artifact_object_upload(
+tenant_id,object_key,artifact_id,request_id,content_digest,content_size,protect_until)
+VALUES($1,$2,$3,$4,$5,$6,$7)`, tenantID, firstKey, first.ArtifactID, requestID, wrongDigest,
+		len(first.Content), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if handled, err := reconciler.RunOnce(ctx); !errors.Is(err, runtime.ErrVersionMismatch) || handled != 1 {
+		t.Fatalf("mismatched reference handled=%d err=%v", handled, err)
+	}
+	var state, errorClass string
+	var attempt int
+	var quarantinedAt time.Time
+	if err := db.QueryRowContext(ctx, `SELECT state,cleanup_attempt,last_error_class,quarantined_at
+FROM artifact_object_upload WHERE tenant_id=$1 AND object_key=$2`, tenantID, firstKey).
+		Scan(&state, &attempt, &errorClass, &quarantinedAt); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(artifact.ObjectQuarantined) || attempt != 1 ||
+		errorClass != artifact.CleanupErrorVersionMismatch || quarantinedAt.IsZero() {
+		t.Fatalf("state=%q attempt=%d class=%q quarantined_at=%v", state, attempt, errorClass, quarantinedAt)
+	}
+	if handled, err := reconciler.RunOnce(ctx); err != nil || handled != 0 {
+		t.Fatalf("quarantined row reclaimed handled=%d err=%v", handled, err)
+	}
+	if _, err := objects.GetObject(ctx, tenantID, firstKey); err != nil {
+		t.Fatalf("quarantined object removed: %v", err)
 	}
 }
 

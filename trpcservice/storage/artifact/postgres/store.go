@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
@@ -22,9 +23,16 @@ const (
 )
 
 type Store struct {
-	db           *sql.DB
-	objects      objectstore.Store
-	objectBacked bool
+	db               *sql.DB
+	objects          objectstore.Store
+	objectBacked     bool
+	objectPutTimeout time.Duration
+	uploadProtection time.Duration
+}
+
+type ObjectStoreOptions struct {
+	PutTimeout       time.Duration
+	UploadProtection time.Duration
 }
 
 // New returns the PostgreSQL bytea reference backend. It remains available for
@@ -33,7 +41,12 @@ type Store struct {
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
 func NewWithObjectStore(db *sql.DB, objects objectstore.Store) *Store {
-	return &Store{db: db, objects: objects, objectBacked: true}
+	return NewWithObjectStoreOptions(db, objects, ObjectStoreOptions{})
+}
+
+func NewWithObjectStoreOptions(db *sql.DB, objects objectstore.Store, options ObjectStoreOptions) *Store {
+	return &Store{db: db, objects: objects, objectBacked: true,
+		objectPutTimeout: options.PutTimeout, uploadProtection: options.UploadProtection}
 }
 
 func (s *Store) PutArtifact(ctx context.Context, in artifact.Record) (artifact.Record, error) {
@@ -43,29 +56,65 @@ func (s *Store) PutArtifact(ctx context.Context, in artifact.Record) (artifact.R
 	if err := validateInput(in); err != nil {
 		return artifact.Record{}, err
 	}
-	storageKind := storagePostgres
-	content, objectKey := in.Content, ""
 	if s.objectBacked {
 		if s.objects == nil {
 			return artifact.Record{}, runtime.ErrCapabilityUnsupported
 		}
+		existing, err := s.GetArtifact(ctx, in.TenantID, in.ArtifactID)
+		switch {
+		case err == nil && sameArtifact(existing, in):
+			return existing, nil
+		case err == nil:
+			return artifact.Record{}, runtime.ErrIdempotencyCollision
+		case !errors.Is(err, runtime.ErrNotFound):
+			return artifact.Record{}, err
+		}
+	}
+	storageKind := storagePostgres
+	content, objectKey := in.Content, ""
+	var upload artifact.ObjectUpload
+	if s.objectBacked {
 		var err error
 		objectKey, err = objectstore.StableKey(in.TenantID, in.ArtifactID)
 		if err != nil {
 			return artifact.Record{}, err
 		}
-		storedObject, err := s.objects.PutObject(ctx, objectstore.Object{TenantID: in.TenantID, ObjectKey: objectKey,
+		upload, err = s.protectObjectUpload(ctx, in, objectKey)
+		if err != nil {
+			return artifact.Record{}, err
+		}
+		putCtx, cancel := context.WithTimeout(ctx, s.putTimeout())
+		storedObject, err := s.objects.PutObject(putCtx, objectstore.Object{TenantID: in.TenantID, ObjectKey: objectKey,
 			ContentDigest: in.ContentDigest, Content: in.Content})
+		cancel()
 		if err != nil {
 			return artifact.Record{}, err
 		}
 		if !sameObject(storedObject, in.TenantID, objectKey, in.ContentDigest, in.Content) {
 			return artifact.Record{}, runtime.ErrVersionMismatch
 		}
+		upload, err = s.renewObjectUpload(ctx, upload)
+		if err != nil {
+			if existing, resolved, resolveErr := s.resolveConcurrentArtifact(ctx, in); resolved || resolveErr != nil {
+				return existing, resolveErr
+			}
+			return artifact.Record{}, err
+		}
 		storageKind, content = storageObject, nil
 	}
-	stored, err := s.insertMetadata(ctx, in, storageKind, objectKey, content)
+	var stored storedMetadata
+	var err error
+	if storageKind == storageObject {
+		stored, err = s.commitObjectMetadata(ctx, in, upload)
+	} else {
+		stored, err = s.insertMetadata(ctx, in, storageKind, objectKey, content)
+	}
 	if err != nil {
+		if errors.Is(err, runtime.ErrVersionConflict) {
+			if existing, resolved, resolveErr := s.resolveConcurrentArtifact(ctx, in); resolved || resolveErr != nil {
+				return existing, resolveErr
+			}
+		}
 		return artifact.Record{}, err
 	}
 	storedRecord, err := s.hydrate(ctx, stored)
@@ -105,11 +154,19 @@ type storedMetadata struct {
 }
 
 func (s *Store) insertMetadata(ctx context.Context, in artifact.Record, storageKind, objectKey string, content []byte) (storedMetadata, error) {
+	return insertMetadata(ctx, s.db, in, storageKind, objectKey, content)
+}
+
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func insertMetadata(ctx context.Context, query queryRower, in artifact.Record, storageKind, objectKey string, content []byte) (storedMetadata, error) {
 	var nullableObjectKey any
 	if objectKey != "" {
 		nullableObjectKey = objectKey
 	}
-	stored, err := scanMetadata(s.db.QueryRowContext(ctx, `INSERT INTO media_artifact(
+	stored, err := scanMetadata(query.QueryRowContext(ctx, `INSERT INTO media_artifact(
 tenant_id,request_id,artifact_id,artifact_ref,ordinal,source_digest,content_digest,media_type,kind,content,malware_scan_version,dlp_version,storage_kind,object_key,content_size)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 ON CONFLICT (tenant_id,artifact_id) DO UPDATE SET artifact_id=EXCLUDED.artifact_id

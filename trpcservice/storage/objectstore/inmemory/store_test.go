@@ -47,4 +47,16 @@ func TestStoreIsImmutableAndTenantScoped(t *testing.T) {
 	if _, err := store.PutObject(context.Background(), collision); !errors.Is(err, runtime.ErrIdempotencyCollision) {
 		t.Fatalf("collision err=%v", err)
 	}
+	if err := store.DeleteObject(context.Background(), "tenant-a", objectKey, collision.ContentDigest); !errors.Is(err, runtime.ErrVersionMismatch) {
+		t.Fatalf("wrong digest delete err=%v", err)
+	}
+	if err := store.DeleteObject(context.Background(), "tenant-a", objectKey, loaded.ContentDigest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteObject(context.Background(), "tenant-a", objectKey, loaded.ContentDigest); err != nil {
+		t.Fatalf("idempotent delete err=%v", err)
+	}
+	if _, err := store.GetObject(context.Background(), "tenant-a", objectKey); !errors.Is(err, runtime.ErrNotFound) {
+		t.Fatalf("deleted object err=%v", err)
+	}
 }
