@@ -152,12 +152,29 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		WorkerReclaimInterval: 5 * time.Second, WorkerCancelPoll: 100 * time.Millisecond, WorkerDrainTimeout: 30 * time.Second,
 		WorkerBundleFailureBackoff: 250 * time.Millisecond, WorkerBundleCloseTimeout: 5 * time.Second,
 	}
+	config.DLPEndpoint = strings.TrimSpace(getenv("TRPC_DLP_ENDPOINT"))
+	config.DLPProbeTenant = strings.TrimSpace(getenv("TRPC_DLP_PROBE_TENANT_ID"))
+	config.DLPSecretRef = strings.TrimSpace(getenv("TRPC_DLP_SECRET_REF"))
 	var err error
 	if config.RedisDB, err = envInt(getenv, "TRPC_REDIS_DB", 0); err != nil || config.RedisDB < 0 {
 		return productionConfig{}, errors.New("invalid TRPC_REDIS_DB")
 	}
 	if config.PayloadKeyVersion, err = envInt64(getenv, "TRPC_PAYLOAD_KEY_VERSION", 0); err != nil || config.PayloadKeyVersion < 1 {
 		return productionConfig{}, errors.New("invalid TRPC_PAYLOAD_KEY_VERSION")
+	}
+	if config.DLPEndpoint != "" || config.DLPProbeTenant != "" || config.DLPSecretRef != "" {
+		if config.DLPEndpoint == "" || config.DLPProbeTenant == "" || config.DLPSecretRef == "" {
+			return productionConfig{}, errors.New("incomplete worker DLP configuration")
+		}
+		if config.DLPSecretVersion, err = envInt64(getenv, "TRPC_DLP_SECRET_VERSION", 0); err != nil || config.DLPSecretVersion < 1 {
+			return productionConfig{}, errors.New("invalid TRPC_DLP_SECRET_VERSION")
+		}
+		if config.DLPBackendVersion, err = envInt64(getenv, "TRPC_DLP_BACKEND_VERSION", 0); err != nil || config.DLPBackendVersion < 1 {
+			return productionConfig{}, errors.New("invalid TRPC_DLP_BACKEND_VERSION")
+		}
+		if config.DLPAllowInsecure, err = envBool(getenv, "TRPC_DLP_ALLOW_INSECURE", false); err != nil {
+			return productionConfig{}, errors.New("invalid TRPC_DLP_ALLOW_INSECURE")
+		}
 	}
 	if config.WorkerShardCount, err = envInt(getenv, "TRPC_WORKER_SHARD_COUNT", config.WorkerShardCount); err != nil || config.WorkerShardCount < 1 || config.WorkerShardCount > 4096 {
 		return productionConfig{}, errors.New("invalid TRPC_WORKER_SHARD_COUNT")

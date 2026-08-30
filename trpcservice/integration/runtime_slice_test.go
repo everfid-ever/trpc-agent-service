@@ -36,6 +36,8 @@ import (
 	coordredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
@@ -103,6 +105,7 @@ func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
 		t.Fatal(err)
 	}
 	providerProfiles := providerpostgres.New(db, catalog)
+	governanceStore := governancepostgres.New(db)
 	var appTable, revisionTable, configTable bool
 	if err := db.QueryRow(`SELECT to_regclass('public.agent_app') IS NOT NULL,
 to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_snapshot') IS NOT NULL`).
@@ -113,8 +116,8 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		t.Fatalf("migration tables app=%t revision=%t config=%t", appTable, revisionTable, configTable)
 	}
 	snapshots := []profile.ExecutionProfileSnapshot{
-		prepareTenant(t, providerProfiles, tenants, apps, configs, tenantA, "runtime-a", "fake-a"),
-		prepareTenant(t, providerProfiles, tenants, apps, configs, tenantB, "runtime-b", "fake-b"),
+		prepareTenant(t, providerProfiles, governanceStore, tenants, apps, configs, tenantA, "runtime-a", "fake-a"),
+		prepareTenant(t, providerProfiles, governanceStore, tenants, apps, configs, tenantB, "runtime-b", "fake-b"),
 	}
 	profiles := profilememory.NewResolver(snapshots...)
 	tasks := gatewaypostgres.NewTaskStore(db)
@@ -122,7 +125,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	inbox := messagingpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
 	model := &delayedModel{inner: mockmodel.New(), delay: 150 * time.Millisecond}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}, Policies: governanceStore}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, err := profiles.Resolve(ctx, key)
 		if err != nil {
@@ -147,6 +150,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 			inner: worker.RunnerExecutor{
 				Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 				Payloads: payloads, Inputs: worker.JSONTextInputDecoder{},
+				Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore},
 				EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
 					return "runner", "event://" + value.ID, nil
 				},
@@ -744,7 +748,7 @@ WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, tenantID, appID, sess
 	}
 }
 
-func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, tenants *tenantpostgres.Repository, apps *agentpostgres.Repository, configs *configpostgres.Repository, tenantID, tenantKey, bindingID string) profile.ExecutionProfileSnapshot {
+func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, governanceStore *governancepostgres.Store, tenants *tenantpostgres.Repository, apps *agentpostgres.Repository, configs *configpostgres.Repository, tenantID, tenantKey, bindingID string) profile.ExecutionProfileSnapshot {
 	t.Helper()
 	ctx := context.Background()
 	meta := tenant.ChangeMetadata{ActorType: "test", ActorID: "slice", ReasonCode: "setup", CorrelationID: tenantKey, TraceID: tenantKey}
@@ -753,6 +757,14 @@ func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, 
 		t.Fatalf("create tenant %s: %v", tenantID, err)
 	}
 	if _, err := providerProfiles.PublishModel(ctx, provider.ModelProfileSnapshot{TenantID: tenantID, ProfileID: "mock", ProfileKey: "runtime-model", DisplayName: "Runtime Model", Status: "active", SchemaVersion: 1, Provider: "mock", Model: "mock", Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+	policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow, AllowedModels: []governance.VersionedRef{{ID: "mock", Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
+	policyDigest, _, err := governance.PolicyDigest(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := governanceStore.PublishPolicy(ctx, governance.PolicySnapshot{TenantID: tenantID, Version: 1, SchemaVersion: 1, Policy: policy, ContentDigest: policyDigest, PublishedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	appMeta := agentapp.ChangeMetadata{ActorType: "test", ActorID: "slice", Reason: "setup", CorrelationID: tenantKey, TraceID: tenantKey}

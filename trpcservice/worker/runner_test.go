@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	governancememory "github.com/liuzengh/trpc-agent-service/trpcservice/governance/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
@@ -84,6 +87,20 @@ func TestDrainRunnerEventsUnblocksProducer(t *testing.T) {
 	case <-produced:
 	case <-time.After(time.Second):
 		t.Fatal("event producer remained blocked")
+	}
+}
+
+func TestConsumeRunnerEventsDeduplicatesAndAccumulatesUsage(t *testing.T) {
+	events := make(chan *event.Event, 4)
+	usage := &model.Usage{PromptTokens: 3, CompletionTokens: 2, PromptTokensDetails: model.PromptTokensDetails{CachedTokens: 1}}
+	events <- &event.Event{ID: "model-1", Response: &model.Response{Usage: usage}}
+	events <- &event.Event{ID: "model-1", Response: &model.Response{Usage: usage}}
+	events <- &event.Event{ID: "model-2", Response: &model.Response{Usage: &model.Usage{PromptTokens: 4, CompletionTokens: 1}}}
+	events <- event.NewResponseEvent("runner", "done", &model.Response{Done: true, Object: model.ObjectTypeRunnerCompletion})
+	close(events)
+	result, err := consumeRunnerEvents(context.Background(), events)
+	if err != nil || result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 3 || result.Usage.CachedInputTokens != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 
@@ -159,6 +176,49 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
 	if err != nil || result.KeyVersion != 7 {
 		t.Fatalf("result key version=%d err=%v", result.KeyVersion, err)
+	}
+}
+
+func TestRunnerExecutorGovernanceDenyCommitsWithoutBuildingOrCallingModel(t *testing.T) {
+	envelope := runtime.ExecutionEnvelope{SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1,
+		AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1, RequestID: "denied-request", SessionID: "session",
+		UserID: "user", Channel: "fake", InputSeq: 1, PayloadRef: "payload://denied", CreatedAt: time.Now().UTC()}
+	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1, AgentAppRevision: 1,
+		ContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1}
+	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: key, TenantVersion: 1, AgentAppVersion: 1, ContentDigest: "digest",
+		AppName: "tenant-a/app", AgentKind: agentapp.AgentKindLLM, ModelProfileRef: profile.VersionedRef{ID: "model", Version: 1}})
+	var builds atomic.Int64
+	bundles := profilememory.NewBundleManager(func(context.Context, profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
+		builds.Add(1)
+		return nil, nil, runtime.ErrCapabilityUnsupported
+	})
+	payloads := messagingmemory.New()
+	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+		PayloadRef: envelope.PayloadRef, ContentDigest: "digest", Content: []byte(`{"text":"hello"}`), KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	governanceStore := governancememory.New(0, 0)
+	policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionDeny,
+		AllowedModels: []governance.VersionedRef{{ID: "model", Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
+	digest, _, _ := governance.PolicyDigest(policy)
+	if err := governanceStore.PublishPolicy(governance.PolicySnapshot{TenantID: envelope.TenantID, Version: 1,
+		SchemaVersion: 1, Policy: policy, ContentDigest: digest, PublishedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := sessionmemory.New()
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions,
+		Payloads: payloads, Inputs: JSONTextInputDecoder{}, EncodeEvent: func(context.Context, *event.Event) (string, string, error) { return "event", "event://denied", nil },
+		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}}
+	if err := executor.ExecuteWithLease(context.Background(), envelope, 9, nil); err != nil {
+		t.Fatal(err)
+	}
+	if builds.Load() != 0 {
+		t.Fatalf("bundle/model path entered %d times", builds.Load())
+	}
+	terminal, err := sessions.GetTerminalByInputSeq(context.Background(), sessionstore.TerminalKey{SessionKey: sessionstore.SessionKey{TenantID: envelope.TenantID,
+		AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}, InputSeq: 1})
+	if err != nil || terminal.Outcome != runtime.OutcomeDenied {
+		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 }
 

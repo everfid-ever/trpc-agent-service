@@ -24,7 +24,10 @@ import (
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
 	coordinationredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/httpdlp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
@@ -33,6 +36,7 @@ import (
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
@@ -89,7 +93,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	providerRepo := providerpostgres.New(db, catalog)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
 	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Subject: "worker-model"}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models}
+	governanceStore := governancepostgres.New(db)
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore}
 	bundles := profilememory.NewBundleManagerWithPolicy(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
@@ -103,12 +108,25 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	}, profilememory.BundleManagerPolicy{FailureBackoff: configValue.WorkerBundleFailureBackoff, CloseTimeout: configValue.WorkerBundleCloseTimeout})
 
 	tasks := gatewaypostgres.NewTaskStore(db)
+	runGovernance := governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}
+	var dlpScanner *httpdlp.Scanner
+	if configValue.DLPEndpoint != "" {
+		authorizer, authErr := newDLPAuthorizer(secretProvider, configValue.DLPBackendVersion, secrets.SecretRef{Ref: configValue.DLPSecretRef, Version: configValue.DLPSecretVersion})
+		if authErr != nil {
+			return errors.New("worker DLP authorization configuration rejected")
+		}
+		scanner := httpdlp.Scanner{Endpoint: configValue.DLPEndpoint, Authorize: authorizer, ProbeTenantID: configValue.DLPProbeTenant,
+			Timeout: configValue.ProbeTimeout, MaxBytes: 16 << 20, AllowInsecure: configValue.DLPAllowInsecure}
+		dlpScanner = &scanner
+		guard := governance.ScannerContentGuard{Scanner: scanner}
+		runGovernance.InputGuard, runGovernance.OutputGuard = guard, guard
+	}
 	sessions := sessionpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef,
-		EventDrainTimeout: configValue.WorkerBundleCloseTimeout}
+		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance}
 	dispatchBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment, Group: configValue.WorkerGroup,
 		ShardCount: uint32(configValue.WorkerShardCount), ReadBlock: 250 * time.Millisecond, ReclaimIdle: configValue.WorkerLeaseTTL})
 	if err != nil {
@@ -147,7 +165,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 		}}
 
 	migrationReadiness := migrations.NewRunner(db)
-	monitor, err := health.NewMonitor(lifecycle, []health.Dependency{
+	dependencies := []health.Dependency{
 		{Name: "postgres", Probe: db.PingContext}, {Name: "postgres_schema", Probe: migrationReadiness.Ready},
 		{Name: "redis", Probe: func(ctx context.Context) error { return redis.Ping(ctx).Err() }},
 		{Name: "object_store", Probe: objects.Probe}, {Name: "secret_provider", Probe: secretProvider.ProbeRoot},
@@ -156,7 +174,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 			clear(value.Bytes)
 			return resolveErr
 		}},
-	}, configValue.ProbeTimeout, configValue.ProbeInterval)
+	}
+	if dlpScanner != nil {
+		dependencies = append(dependencies, health.Dependency{Name: "governance_dlp", Probe: dlpScanner.Probe})
+	}
+	monitor, err := health.NewMonitor(lifecycle, dependencies, configValue.ProbeTimeout, configValue.ProbeInterval)
 	if err != nil {
 		return errors.New("readiness configuration rejected")
 	}

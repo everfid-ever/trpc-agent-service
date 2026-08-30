@@ -9,8 +9,10 @@ import (
 	"fmt"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/cycleagent"
@@ -54,6 +56,7 @@ type Factory struct {
 	Skills      SkillResolver
 	Checkpoints CheckpointResolver
 	Callbacks   Callbacks
+	Policies    governance.Repository
 }
 
 func (f Factory) Build(ctx context.Context, snapshot profile.ExecutionProfileSnapshot) (agentcore.Agent, error) {
@@ -153,7 +156,15 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		if err != nil {
 			return nil, err
 		}
-		options = append(options, llmagent.WithTools(tools))
+		refs := make([]governance.VersionedRef, len(snapshot.ToolRefs))
+		for index, ref := range snapshot.ToolRefs {
+			refs[index] = governance.VersionedRef{ID: ref.ID, Version: ref.Version}
+		}
+		guarded, err := servicetool.GuardCallables(f.Policies, refs, tools)
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, llmagent.WithTools(guarded))
 	}
 	if len(snapshot.SkillRefs) != 0 {
 		if f.Skills == nil {

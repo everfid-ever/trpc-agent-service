@@ -324,6 +324,25 @@ func TestLoadWorkerConfigDefaultsToAllShards(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerConfigOptionalDLPIsAllOrNothing(t *testing.T) {
+	environment := workerEnvironment()
+	environment["TRPC_DLP_ENDPOINT"] = "https://dlp.example.test/"
+	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
+		t.Fatal("partial DLP configuration accepted")
+	}
+	environment["TRPC_DLP_PROBE_TENANT_ID"] = "tenant-probe"
+	environment["TRPC_DLP_SECRET_REF"] = "secret://dlp/service"
+	environment["TRPC_DLP_SECRET_VERSION"] = "3"
+	environment["TRPC_DLP_BACKEND_VERSION"] = "5"
+	config, err := loadWorkerConfig(mapEnvironment(environment))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.DLPSecretVersion != 3 || config.DLPBackendVersion != 5 || config.DLPEndpoint == "" {
+		t.Fatalf("config=%#v", config)
+	}
+}
+
 func TestRunWorkerRoleRejectsMissingDependenciesBeforeOpeningClients(t *testing.T) {
 	err := runWorkerRole(context.Background(), func(string) string { return "" }, testLogger())
 	if err == nil || !strings.Contains(err.Error(), "configuration rejected") {

@@ -39,6 +39,8 @@ import (
 	coordinationredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -148,7 +150,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	configRepo := configpostgres.New(db, tenantRepo)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
 	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Subject: "worker-model"}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models}
+	governanceStore := governancepostgres.New(db)
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
@@ -163,7 +166,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	defer bundles.Close(context.Background())
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
 		Sessions: sessionpostgres.New(db), Payloads: payloads, Artifacts: artifactpostgres.New(db),
-		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second}
+		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
+		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}}
 	workerConsumer := worker.Consumer{WorkerID: "webui-local-worker", Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
 		Leases: leases, Sessions: sessionpostgres.New(db), Parker: tasks, Statuses: tasks, Executor: executor,
 		LeaseTTL: 30 * time.Second, RenewInterval: 10 * time.Second, RetryWait: 250 * time.Millisecond,
@@ -311,6 +315,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	apps := agentpostgres.New(db)
 	configs := configpostgres.New(db, tenants)
 	providers := providerpostgres.New(db, catalog)
+	governanceStore := governancepostgres.New(db)
 	root, err := tenants.Get(ctx, webUILocalTenantID)
 	if errors.Is(err, tenant.ErrNotFound) {
 		metadata := tenant.ChangeMetadata{ActorType: "system", ActorID: "webui-local", ReasonCode: "local_bootstrap",
@@ -325,6 +330,16 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 			SchemaVersion: 1, Provider: "deepseek", Model: "deepseek-v4-flash", Endpoint: "https://api.deepseek.com",
 			SecretRef: secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, Version: 1})
 		if err != nil {
+			return webUILocalBootstrap{}, err
+		}
+		policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow,
+			AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
+		policyDigest, _, digestErr := governance.PolicyDigest(policy)
+		if digestErr != nil {
+			return webUILocalBootstrap{}, digestErr
+		}
+		if err = governanceStore.PublishPolicy(ctx, governance.PolicySnapshot{TenantID: webUILocalTenantID, Version: 1, SchemaVersion: 1,
+			Policy: policy, ContentDigest: policyDigest, PublishedAt: time.Now().UTC()}); err != nil {
 			return webUILocalBootstrap{}, err
 		}
 		appMetadata := agentapp.ChangeMetadata{ActorType: "system", ActorID: "webui-local", Reason: "local_bootstrap",

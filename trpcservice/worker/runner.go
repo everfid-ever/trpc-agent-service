@@ -13,6 +13,7 @@ import (
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -22,6 +23,7 @@ import (
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
 type InputDecoder interface {
@@ -46,6 +48,7 @@ type RunnerExecutor struct {
 	Inputs            InputDecoder
 	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
+	Governance        governance.RunGuard
 	EventDrainTimeout time.Duration
 }
 
@@ -133,14 +136,30 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if err := w.hydrateArtifacts(ctx, envelope, &message); err != nil {
 		return err
 	}
+	var permit governance.RunPermit
+	if w.Governance != nil {
+		permit, err = w.Governance.Begin(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, payload.Content)
+		if err != nil {
+			return err
+		}
+		if permit.Decision.Action != governance.ActionAllow {
+			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeDenied, permit.Decision)
+		}
+	}
 
 	lease, err := w.Bundles.Acquire(ctx, key)
 	if err != nil {
+		if w.Governance != nil {
+			_ = w.Governance.Refund(ctx, permit, "bundle_acquire_failed")
+		}
 		return err
 	}
 	defer lease.Release()
 	run, err := lease.Bundle().NewRunner(turn.SessionService())
 	if err != nil {
+		if w.Governance != nil {
+			_ = w.Governance.Refund(ctx, permit, "runner_create_failed")
+		}
 		return err
 	}
 	var events <-chan *event.Event
@@ -151,17 +170,58 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 	}()
 
-	runCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID})
-	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message,
-		agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID))
+	runCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion})
+	runOptions := []agentcore.RunOption{agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID)}
+	if w.Governance != nil {
+		toolRule := func(value agenttool.Tool) governance.Decision {
+			versioned, ok := value.(governance.VersionedTool)
+			if !ok || value == nil || value.Declaration() == nil {
+				return governance.Decision{Action: governance.ActionDeny, ReasonCode: governance.ReasonToolDenied}
+			}
+			ref := versioned.GovernanceToolRef()
+			if ref.ID != value.Declaration().Name {
+				return governance.Decision{Action: governance.ActionDeny, ReasonCode: governance.ReasonToolDenied}
+			}
+			return governance.ToolDecision(permit.Policy, ref)
+		}
+		runOptions = append(runOptions,
+			agentcore.WithToolFilter(func(_ context.Context, value agenttool.Tool) bool {
+				return toolRule(value).Action == governance.ActionAllow
+			}),
+			agentcore.WithToolExecutionFilter(func(_ context.Context, value agenttool.Tool) bool {
+				return toolRule(value).Action == governance.ActionAllow
+			}),
+			agentcore.WithToolPermissionPolicyFunc(func(_ context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
+				if request == nil || toolRule(request.Tool).Action != governance.ActionAllow {
+					return agenttool.DenyPermission(governance.ReasonToolDenied), nil
+				}
+				return agenttool.AllowPermission(), nil
+			}))
+	}
+	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message, runOptions...)
 	if err != nil {
 		return err
 	}
-	content, err := consumeRunnerEvents(ctx, events)
+	runResult, err := consumeRunnerEvents(ctx, events)
 	if err != nil {
 		closeRunner(run, events, w.EventDrainTimeout)
 		runnerClosed = true
 		return err
+	}
+	content := runResult.Content
+	if w.Governance != nil {
+		decision, finishErr := w.Governance.Finish(ctx, permit, runResult.Usage, []byte(content))
+		if finishErr != nil {
+			decision = governance.Decision{DecisionID: governance.StableDecisionID(envelope.TenantID, envelope.RequestID, "settlement", envelope.PolicyVersion), TenantID: envelope.TenantID,
+				RequestID: envelope.RequestID, Stage: "settlement", Action: governance.ActionDeny, ReasonCode: governance.ReasonUsageUnavailable, PolicyVersion: envelope.PolicyVersion, ReservationID: permit.Reservation.ReservationID}
+			if recordErr := w.Governance.Record(ctx, decision); recordErr != nil {
+				return recordErr
+			}
+			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeFailed, decision)
+		}
+		if decision.Action != governance.ActionAllow {
+			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeDenied, decision)
+		}
 	}
 	latest, err := w.Tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: envelope.TenantID, RequestID: envelope.RequestID})
 	if err != nil {
@@ -286,27 +346,62 @@ func verifyAuthoritativeEnvelope(trusted, delivered runtime.ExecutionEnvelope) e
 	return nil
 }
 
-func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (string, error) {
+func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope, head sessionstore.SessionHead,
+	fence uint64, beforeCommit func(context.Context) error, outcome runtime.Outcome, decision governance.Decision) error {
+	if turn != nil {
+		_ = turn.Rollback(ctx)
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return err
+		}
+	}
+	_, err := w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: head.SessionKey, RequestID: envelope.RequestID,
+		CommitID: envelope.RequestID + ":" + string(outcome) + ":governance", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
+		ExpectedVersion: head.Version, Outcome: outcome, Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "governance:" + decision.DecisionID,
+			PayloadRef: "governance://" + envelope.TenantID + "/" + decision.DecisionID, EventSeq: 1, TraceParent: envelope.TraceParent}}})
+	if errors.Is(err, runtime.ErrAlreadyTerminal) {
+		return nil
+	}
+	return err
+}
+
+type runnerResult struct {
+	Content string
+	Usage   governance.Usage
+}
+
+func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runnerResult, error) {
 	var content strings.Builder
+	var resultUsage governance.Usage
+	usageEvents := make(map[string]struct{})
 	completed := false
 	for {
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return runnerResult{}, ctx.Err()
 		case value, ok := <-events:
 			if !ok {
 				if !completed {
-					return "", runtime.ErrBackendUnavailable
+					return runnerResult{}, runtime.ErrBackendUnavailable
 				}
-				return content.String(), nil
+				return runnerResult{Content: content.String(), Usage: resultUsage}, nil
 			}
 			if value == nil {
 				continue
 			}
 			if value.IsTerminalError() {
-				return "", runtime.ErrBackendUnavailable
+				return runnerResult{}, runtime.ErrBackendUnavailable
 			}
 			if value.Response != nil {
+				if value.Usage != nil && value.ID != "" {
+					if _, seen := usageEvents[value.ID]; !seen {
+						usageEvents[value.ID] = struct{}{}
+						resultUsage.InputTokens += int64(value.Usage.PromptTokens)
+						resultUsage.OutputTokens += int64(value.Usage.CompletionTokens)
+						resultUsage.CachedInputTokens += int64(value.Usage.PromptTokensDetails.CachedTokens)
+					}
+				}
 				for _, choice := range value.Choices {
 					if choice.Delta.Content != "" {
 						content.WriteString(choice.Delta.Content)
