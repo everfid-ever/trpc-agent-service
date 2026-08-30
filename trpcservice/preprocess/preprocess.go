@@ -23,16 +23,18 @@ const (
 )
 
 type ClaimRequest struct {
-	Inbox         messaging.ClaimInboxRequest
-	TenantVersion int64
-	UserID        string
-	TraceParent   string
+	Inbox            messaging.ClaimInboxRequest
+	TenantVersion    int64
+	ConfigVersion    int64
+	ChannelBindingID string
+	UserID           string
+	TraceParent      string
 }
 
 type Job struct {
 	TenantID, RequestID, JobID, PayloadRef, PreparedPayloadRef, AgentAppID string
-	SessionID, UserID, Channel, TraceParent                                string
-	TenantVersion                                                          int64
+	SessionID, UserID, Channel, ChannelBindingID, TraceParent              string
+	TenantVersion, ConfigVersion                                           int64
 	State                                                                  State
 	Attempt                                                                int
 	Version                                                                int64

@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 21 {
+	if len(all) != 23 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,38 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestPreprocessBindingScopeMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[22]
+	if migration.Version != "000023" || migration.Name != "preprocess_binding_scope" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"ADD COLUMN channel_binding_id", "ADD COLUMN config_version", "preprocess_job_channel_binding_fk", "REFERENCES public.channel_binding"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestWebUIChannelMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[21]
+	if migration.Version != "000022" || migration.Name != "webui_channel" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.webui_message", "client_request_id", "provider_message_id", "content_digest", "webui_message_mailbox_idx", "REFERENCES public.execution_record", "CREATE OR REPLACE FUNCTION public.populate_channel_send_secret", "v_version >= 1"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

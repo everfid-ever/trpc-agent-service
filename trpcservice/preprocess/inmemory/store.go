@@ -28,7 +28,8 @@ func (s *Store) ClaimInboxAndSchedule(ctx context.Context, in preprocess.ClaimRe
 	}
 	if in.Inbox.TenantID == "" || in.Inbox.Channel == "" || in.Inbox.ExternalAccountID == "" || in.Inbox.ExternalMessageID == "" ||
 		in.Inbox.AgentAppID == "" || in.Inbox.SessionID == "" || in.Inbox.PayloadDigest == "" || in.Inbox.KeyVersion < 1 ||
-		in.Inbox.InitialState != messaging.InboxPreprocessPending || in.TenantVersion < 1 || in.UserID == "" {
+		in.Inbox.InitialState != messaging.InboxPreprocessPending || in.TenantVersion < 1 || in.ConfigVersion < 1 ||
+		in.ChannelBindingID == "" || in.UserID == "" {
 		return messaging.InboxRecord{}, preprocess.Job{}, runtime.ErrInvariantViolation
 	}
 	requestID, payloadRef := messaging.StableInboxIdentity(in.Inbox.InboxKey)
@@ -40,7 +41,8 @@ func (s *Store) ClaimInboxAndSchedule(ctx context.Context, in preprocess.ClaimRe
 		KeyVersion: in.Inbox.KeyVersion, CreatedAt: now, UpdatedAt: now}
 	job := preprocess.Job{TenantID: in.Inbox.TenantID, RequestID: requestID, JobID: jobID, PayloadRef: payloadRef,
 		AgentAppID: in.Inbox.AgentAppID, SessionID: in.Inbox.SessionID, UserID: in.UserID, Channel: in.Inbox.Channel,
-		TraceParent: in.TraceParent, TenantVersion: in.TenantVersion, State: preprocess.Pending, CreatedAt: now, UpdatedAt: now}
+		ChannelBindingID: in.ChannelBindingID, TraceParent: in.TraceParent, TenantVersion: in.TenantVersion,
+		ConfigVersion: in.ConfigVersion, State: preprocess.Pending, CreatedAt: now, UpdatedAt: now}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existing, ok := s.inboxes[in.Inbox.InboxKey]; ok {
@@ -50,6 +52,7 @@ func (s *Store) ClaimInboxAndSchedule(ctx context.Context, in preprocess.ClaimRe
 			existing.PayloadRef != record.PayloadRef || existing.PayloadDigest != record.PayloadDigest || existing.KeyVersion != record.KeyVersion ||
 			existingJob.JobID != job.JobID || existingJob.TenantVersion != job.TenantVersion || existingJob.AgentAppID != job.AgentAppID ||
 			existingJob.SessionID != job.SessionID || existingJob.UserID != job.UserID || existingJob.Channel != job.Channel ||
+			existingJob.ChannelBindingID != job.ChannelBindingID || existingJob.ConfigVersion != job.ConfigVersion ||
 			existingJob.PayloadRef != job.PayloadRef {
 			return messaging.InboxRecord{}, preprocess.Job{}, runtime.ErrIdempotencyCollision
 		}

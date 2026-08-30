@@ -159,7 +159,8 @@ func claim(messageID string) preprocess.ClaimRequest {
 	key := messaging.InboxKey{TenantID: "tenant", Channel: "fake", ExternalAccountID: "account", ExternalMessageID: messageID}
 	return preprocess.ClaimRequest{Inbox: messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: "app", SessionID: "session",
 		ExternalUserID: "external-user", PayloadDigest: string(make([]byte, 64)), KeyVersion: 1,
-		InitialState: messaging.InboxPreprocessPending}, TenantVersion: 1, UserID: "user", TraceParent: "trace"}
+		InitialState: messaging.InboxPreprocessPending}, TenantVersion: 1, ConfigVersion: 1,
+		ChannelBindingID: "binding", UserID: "user", TraceParent: "trace"}
 }
 
 type recordingDispatcher struct {

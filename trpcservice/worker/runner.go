@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -453,7 +454,7 @@ func encodeResultRef(ctx context.Context, encoder ResultRefEncoder, envelope run
 // decoders provide the same normalized user-message contract.
 type JSONTextInputDecoder struct{}
 
-func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.ExecutionEnvelope, payload []byte) (model.Message, error) {
+func (JSONTextInputDecoder) DecodeInput(ctx context.Context, envelope runtime.ExecutionEnvelope, payload []byte) (model.Message, error) {
 	if err := ctx.Err(); err != nil {
 		return model.Message{}, err
 	}
@@ -462,8 +463,12 @@ func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.Execution
 		ExternalMessageID string                     `json:"external_message_id,omitempty"`
 		ExternalUserID    string                     `json:"external_user_id,omitempty"`
 		ExternalChatID    string                     `json:"external_chat_id,omitempty"`
+		ChannelBindingID  string                     `json:"channel_binding_id,omitempty"`
+		ExternalAccountID string                     `json:"external_account_id,omitempty"`
+		ConfigVersion     int64                      `json:"config_version,omitempty"`
 		MessageType       string                     `json:"message_type,omitempty"`
 		Text              string                     `json:"text,omitempty"`
+		MediaRefs         []channel.MediaRef         `json:"media_refs,omitempty"`
 		Media             []preprocess.PreparedMedia `json:"media,omitempty"`
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))
@@ -472,6 +477,18 @@ func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.Execution
 		return model.Message{}, runtime.ErrInvalidEnvelope
 	}
 	if value.SchemaVersion != 0 && value.SchemaVersion != 1 {
+		return model.Message{}, runtime.ErrInvalidEnvelope
+	}
+	// Normalized text payloads carry the frozen config version. It is part of
+	// the authenticated execution contract and must agree with the envelope;
+	// accepting a different version would allow a payload/profile mix-up.
+	if value.ConfigVersion != 0 && value.ConfigVersion != envelope.ConfigVersion {
+		return model.Message{}, runtime.ErrVersionMismatch
+	}
+	// Raw media references are an ingress/preprocess concern. Worker execution
+	// only accepts PreparedInput media, whose artifact identities have already
+	// passed malware/DLP checks and tenant-scoped hydration.
+	if len(value.MediaRefs) > 0 {
 		return model.Message{}, runtime.ErrInvalidEnvelope
 	}
 	var trailing any

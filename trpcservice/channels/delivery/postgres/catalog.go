@@ -45,7 +45,7 @@ func (c *Catalog) ListDeliveryDestinations(ctx context.Context) ([]channel.Reply
 FROM channel_binding binding
 JOIN config_snapshot snapshot USING (tenant_id,config_version)
 JOIN tenant root ON root.tenant_id=binding.tenant_id
-WHERE snapshot.state='published' AND root.status IN ('active','suspended') AND binding.channel IN ('feishu','wecom')
+WHERE snapshot.state='published' AND root.status IN ('active','suspended') AND binding.channel IN ('feishu','wecom','webui')
 ORDER BY binding.tenant_id,binding.channel,binding.binding_id,binding.external_account_id`)
 	if err != nil {
 		return nil, classify(ctx, err)

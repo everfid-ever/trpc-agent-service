@@ -105,6 +105,7 @@ func TestLoadChannelConfigHasOnlyCallbackDependencies(t *testing.T) {
 		"TRPC_CHANNEL_PROBE_TENANT_ID":   "probe-tenant",
 		"TRPC_CHANNEL_CANDIDATE_TTL":     "45s",
 		"TRPC_CHANNEL_CALLBACK_MAX_BODY": "2097152",
+		"TRPC_WEBUI_ENABLED":             "true",
 	}
 	config, err := loadChannelConfig(mapEnvironment(values))
 	if err != nil {
@@ -113,7 +114,7 @@ func TestLoadChannelConfigHasOnlyCallbackDependencies(t *testing.T) {
 	if config.RedisAddress != "" || config.S3Bucket != "" || config.ClamAVAddress != "" || config.DLPEndpoint != "" {
 		t.Fatalf("channel role picked up unrelated dependencies: %+v", config)
 	}
-	if config.ChannelProbeTenant != "probe-tenant" || config.ChannelCandidateTTL != 45*time.Second || config.ChannelCallbackMaxBody != 2<<20 {
+	if config.ChannelProbeTenant != "probe-tenant" || config.ChannelCandidateTTL != 45*time.Second || config.ChannelCallbackMaxBody != 2<<20 || !config.WebUIEnabled {
 		t.Fatalf("unexpected channel configuration: %+v", config)
 	}
 	for _, name := range []string{"TRPC_POSTGRES_DSN", "TRPC_SECRET_ROOT", "TRPC_PAYLOAD_KEY_REF", "TRPC_PAYLOAD_KEY_VERSION", "TRPC_CHANNEL_PROBE_TENANT_ID"} {
@@ -138,6 +139,7 @@ func TestLoadChannelConfigRejectsUnsafeCallbackLimits(t *testing.T) {
 		{name: "TRPC_CHANNEL_CANDIDATE_TTL", value: "11m"},
 		{name: "TRPC_CHANNEL_CALLBACK_MAX_BODY", value: "0"},
 		{name: "TRPC_CHANNEL_CALLBACK_MAX_BODY", value: "16777217"},
+		{name: "TRPC_WEBUI_ENABLED", value: "sometimes"},
 	} {
 		copy := cloneEnvironment(base)
 		copy[item.name] = item.value
@@ -153,12 +155,13 @@ func TestLoadChannelDeliveryConfigRequiresOnlyDeliveryDependencies(t *testing.T)
 		"TRPC_REDIS_ENVIRONMENT": "production", "TRPC_CHANNEL_DELIVERY_GROUP": "channel-owners", "TRPC_SECRET_ROOT": "/var/run/secrets/trpc-agent-service",
 		"TRPC_PAYLOAD_KEY_REF": "secret://messaging/payload", "TRPC_PAYLOAD_KEY_VERSION": "7", "TRPC_CHANNEL_PROBE_TENANT_ID": "probe-tenant",
 		"TRPC_CHANNEL_DELIVERY_REFRESH": "3s", "TRPC_CHANNEL_DELIVERY_CLAIM_TTL": "30s", "TRPC_CHANNEL_DELIVERY_CLAIM_RENEW": "10s",
+		"TRPC_WEBUI_ENABLED": "true",
 	}
 	config, err := loadChannelDeliveryConfig(mapEnvironment(values))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.RedisEnvironment != "production" || config.ChannelDeliveryGroup != "channel-owners" || config.ChannelDeliveryRefresh != 3*time.Second || config.S3Bucket != "" {
+	if config.RedisEnvironment != "production" || config.ChannelDeliveryGroup != "channel-owners" || config.ChannelDeliveryRefresh != 3*time.Second || config.S3Bucket != "" || !config.WebUIEnabled {
 		t.Fatalf("unexpected delivery configuration: %+v", config)
 	}
 	for _, name := range []string{"TRPC_POSTGRES_DSN", "TRPC_REDIS_ADDRESS", "TRPC_REDIS_ENVIRONMENT", "TRPC_CHANNEL_DELIVERY_GROUP", "TRPC_SECRET_ROOT", "TRPC_PAYLOAD_KEY_REF", "TRPC_PAYLOAD_KEY_VERSION", "TRPC_CHANNEL_PROBE_TENANT_ID"} {
@@ -174,7 +177,7 @@ func TestLoadChannelDeliveryConfigRejectsUnsafeLeaseAndLimits(t *testing.T) {
 	base := map[string]string{"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_REDIS_ADDRESS": "redis:6379",
 		"TRPC_REDIS_ENVIRONMENT": "production", "TRPC_CHANNEL_DELIVERY_GROUP": "channel-owners", "TRPC_SECRET_ROOT": "/secrets",
 		"TRPC_PAYLOAD_KEY_REF": "payload", "TRPC_PAYLOAD_KEY_VERSION": "1", "TRPC_CHANNEL_PROBE_TENANT_ID": "probe"}
-	for _, item := range []struct{ name, value string }{{"TRPC_CHANNEL_DELIVERY_CLAIM_TTL", "5s"}, {"TRPC_CHANNEL_DELIVERY_CLAIM_RENEW", "30s"}, {"TRPC_CHANNEL_REPLY_RECLAIM_LIMIT", "0"}, {"TRPC_CHANNEL_DELIVERY_MAX_ATTEMPTS", "1001"}} {
+	for _, item := range []struct{ name, value string }{{"TRPC_WEBUI_ENABLED", "sometimes"}, {"TRPC_CHANNEL_DELIVERY_CLAIM_TTL", "5s"}, {"TRPC_CHANNEL_DELIVERY_CLAIM_RENEW", "30s"}, {"TRPC_CHANNEL_REPLY_RECLAIM_LIMIT", "0"}, {"TRPC_CHANNEL_DELIVERY_MAX_ATTEMPTS", "1001"}} {
 		copy := cloneEnvironment(base)
 		copy[item.name] = item.value
 		if _, err := loadChannelDeliveryConfig(mapEnvironment(copy)); err == nil {

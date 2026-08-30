@@ -28,6 +28,8 @@ import (
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	channeldelivery "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/fake"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui"
+	webuipostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/coordination"
@@ -417,6 +419,29 @@ crashObserved:
 	if gatewayStatus.Outcome != runtime.OutcomeSucceeded || model.inner.Calls(tenantA, gatewayHandle.RequestID) != 1 {
 		t.Fatalf("gateway terminal=%#v model calls=%d", gatewayStatus, model.inner.Calls(tenantA, gatewayHandle.RequestID))
 	}
+	// The local browser provider uses the same frozen DeliveryRequest contract
+	// as external IMs and persists only mailbox metadata; result plaintext stays
+	// in the encrypted ResultStore.
+	gatewayResult, err := payloads.GetResult(context.Background(), tenantA, gatewayHandle.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webuiMailbox := webuipostgres.New(db)
+	webuiAdapter := &webui.Adapter{Mailbox: webuiMailbox}
+	webuiTarget := channel.DeliveryTarget{Channel: "webui", ExternalAccountID: "local-account-fake-a",
+		ExternalUserID: "browser-user", ExternalChatID: "browser-chat"}
+	webuiDelivery, err := webuiAdapter.Deliver(context.Background(), channel.DeliveryRequest{Event: channel.ReplyEvent{
+		SchemaVersion: 1, TenantID: tenantA, RequestID: gatewayHandle.RequestID, ChannelBindingID: "fake-a-webui",
+		ConfigVersion: snapshots[0].Key.ConfigVersion, DeliveryKey: gatewayHandle.RequestID + ":webui", ContentRef: gatewayResult.ResultRef,
+		Target: webuiTarget, Final: true}, ClientRequestID: gatewayHandle.RequestID + ":webui:0", Target: webuiTarget,
+		Content: gatewayResult.Content, ContentDigest: gatewayResult.ContentDigest})
+	if err != nil || !webuiDelivery.Delivered || webuiDelivery.ProviderMessageID == "" {
+		t.Fatalf("webui delivery=%#v err=%v", webuiDelivery, err)
+	}
+	storedWebUI, err := webuiMailbox.GetMessageByClientRequestID(context.Background(), tenantA, gatewayHandle.RequestID+":webui:0")
+	if err != nil || storedWebUI.RequestID != gatewayHandle.RequestID || storedWebUI.ContentRef != gatewayResult.ResultRef {
+		t.Fatalf("webui mailbox=%#v err=%v", storedWebUI, err)
+	}
 
 	// Reconstruct the HTTP façade to prove status and terminal replay come from
 	// shared authorities rather than a process-local subscriber or task map.
@@ -753,13 +778,15 @@ func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, 
 	}
 	publishedConfig, err := configs.Publish(ctx, config.PublishInput{
 		TenantID: tenantID, ExpectedTenantVersion: created.Version, Metadata: meta,
-		Payload: config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: 1, ChannelBindings: []config.ChannelBinding{{
-			BindingID: bindingID, Channel: "fake", ExternalAccountID: "shared-account", AgentAppID: appID,
-			SecretRef: secrets.SecretRef{Ref: "secret://fake", Version: 1},
-			// Keep the fixture compatible with the database-level send-secret
-			// completeness invariant used by all channel bindings.
-			SendSecretRef: secrets.SecretRef{Ref: "secret://fake-send", Version: 1},
-		}}},
+		Payload: config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: 1, ChannelBindings: []config.ChannelBinding{
+			{BindingID: bindingID, Channel: "fake", ExternalAccountID: "shared-account", AgentAppID: appID,
+				SecretRef: secrets.SecretRef{Ref: "secret://fake", Version: 1},
+				// Keep the fixture compatible with the database-level send-secret
+				// completeness invariant used by all channel bindings.
+				SendSecretRef: secrets.SecretRef{Ref: "secret://fake-send", Version: 1}},
+			{BindingID: bindingID + "-webui", Channel: "webui", ExternalAccountID: "local-account-" + bindingID,
+				AgentAppID: appID, SecretRef: secrets.SecretRef{Ref: "secret://webui", Version: 1}},
+		}},
 	})
 	if err != nil {
 		t.Fatalf("publish config %s: %v", tenantID, err)

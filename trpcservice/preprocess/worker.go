@@ -245,7 +245,7 @@ func (w Worker) dispatch(ctx context.Context, job Job) error {
 	}
 	_, err := w.Dispatcher.Dispatch(ctx, gateway.DispatchRequest{
 		Tenant: tenant.Context{TenantID: job.TenantID, TenantVersion: job.TenantVersion, AgentAppID: job.AgentAppID,
-			SubjectID: job.UserID, Channel: job.Channel, TrustedSource: "verified-channel-ingress"},
+			SubjectID: job.UserID, Channel: job.Channel, TrustedSource: "channel_binding:" + job.ChannelBindingID},
 		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: payloadRef, TraceParent: job.TraceParent,
 	})
 	if err != nil {

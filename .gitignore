@@ -17,5 +17,6 @@ data/*
 !data/README.md
 .workbuddy
 deploy/compose/.env.m2
+deploy/compose/.env.m3-im
 deploy/compose/secrets/*
 !deploy/compose/secrets/.gitkeep

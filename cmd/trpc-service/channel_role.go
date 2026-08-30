@@ -21,6 +21,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
 	ingresspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui"
+	webuipostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	wecomprotocol "github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom/protocol"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
@@ -75,10 +77,23 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	if err != nil {
 		return errors.New("WeCom callback configuration rejected")
 	}
-	callbackMux, err := httpcallback.NewMux(
+	callbackRoutes := []httpcallback.Route{
 		httpcallback.Route{Pattern: "/callbacks/feishu", Endpoint: feishuEndpoint},
 		httpcallback.Route{Pattern: "/callbacks/wecom", Endpoint: wecomEndpoint},
-	)
+	}
+	var webuiBrowser http.Handler
+	if configValue.WebUIEnabled {
+		webuiMailbox := webuipostgres.New(db)
+		webuiAdapter := &webui.Adapter{Protocol: webui.Verifier{}, Mailbox: webuiMailbox}
+		webuiEndpoint, endpointErr := newChannelEndpoint(webuiAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody)
+		if endpointErr != nil {
+			return errors.New("WebUI callback configuration rejected")
+		}
+		callbackRoutes = append(callbackRoutes, httpcallback.Route{Pattern: "/callbacks/webui", Endpoint: webuiEndpoint})
+		webuiBrowser = webui.BrowserHandler{Callback: webuiEndpoint, Routes: bindingStore, Secrets: secretProvider,
+			Messages: webuiMailbox, Results: payloads}
+	}
+	callbackMux, err := httpcallback.NewMux(callbackRoutes...)
 	if err != nil {
 		return errors.New("callback mux configuration rejected")
 	}
@@ -109,6 +124,10 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	defer listener.Close()
 	mux := http.NewServeMux()
 	mux.Handle("/callbacks/", readinessGate{Checker: monitor, Handler: callbackMux})
+	if webuiBrowser != nil {
+		mux.Handle("/webui", readinessGate{Checker: monitor, Handler: webuiBrowser})
+		mux.Handle("/webui/", readinessGate{Checker: monitor, Handler: webuiBrowser})
+	}
 	mux.Handle("/livez", health.Handler{Checker: monitor})
 	mux.Handle("/readyz", health.Handler{Checker: monitor})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second,

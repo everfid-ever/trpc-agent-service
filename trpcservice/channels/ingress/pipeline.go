@@ -85,7 +85,8 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 			Inbox: messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: verified.Binding.AgentAppID, SessionID: ids.SessionID,
 				ExternalChatID: event.ExternalChatID, ExternalUserID: event.ExternalUserID, PayloadDigest: contentDigest,
 				KeyVersion: keyVersion, InitialState: messaging.InboxPreprocessPending},
-			TenantVersion: verified.Binding.TenantVersion, UserID: ids.UserID, TraceParent: event.TraceParent,
+			TenantVersion: verified.Binding.TenantVersion, ConfigVersion: verified.Binding.BindingVersion,
+			ChannelBindingID: verified.Binding.ChannelBindingID, UserID: ids.UserID, TraceParent: event.TraceParent,
 		})
 		if err != nil {
 			return nil, err

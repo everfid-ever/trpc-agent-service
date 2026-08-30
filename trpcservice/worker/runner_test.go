@@ -12,6 +12,7 @@ import (
 
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -188,5 +189,34 @@ func TestJSONTextInputDecoderHydratesOnlyTenantScopedArtifactRefs(t *testing.T) 
 	}
 	if !bytes.Equal(message.ContentParts[0].Image.Data, content) || message.ContentParts[0].Image.URL != "" {
 		t.Fatalf("hydrated message=%#v", message)
+	}
+}
+
+func TestJSONTextInputDecoderAcceptsFrozenNormalizedTextAndRejectsRawMedia(t *testing.T) {
+	decoder := JSONTextInputDecoder{}
+	envelope := runtime.ExecutionEnvelope{TenantID: "tenant-a", RequestID: "request", ConfigVersion: 7}
+	normalized, err := json.Marshal(preprocess.NormalizedInput{
+		ExternalMessageID: "message", ExternalUserID: "user", ExternalChatID: "chat",
+		ConfigVersion: 7, Text: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := decoder.DecodeInput(context.Background(), envelope, normalized)
+	if err != nil || message.Content != "hello" {
+		t.Fatalf("message=%#v err=%v", message, err)
+	}
+	if _, err := decoder.DecodeInput(context.Background(), runtime.ExecutionEnvelope{ConfigVersion: 8}, normalized); !errors.Is(err, runtime.ErrVersionMismatch) {
+		t.Fatalf("mismatched config version err=%v", err)
+	}
+	rawMedia, err := json.Marshal(preprocess.NormalizedInput{
+		ExternalMessageID: "message", ExternalUserID: "user", ExternalChatID: "chat", Text: "hello",
+		MediaRefs: []channel.MediaRef{{ID: "media", Kind: "image"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decoder.DecodeInput(context.Background(), envelope, rawMedia); !errors.Is(err, runtime.ErrInvalidEnvelope) {
+		t.Fatalf("raw media refs err=%v", err)
 	}
 }

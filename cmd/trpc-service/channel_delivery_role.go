@@ -23,6 +23,8 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery"
 	deliverypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui"
+	webuipostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
@@ -68,7 +70,11 @@ func runChannelDeliveryRole(parent context.Context, getenv func(string) string, 
 		}}}}
 	wecomTokens := &wecom.TokenProvider{Secrets: sendCredentials, Client: providerHTTP}
 	wecomAdapter := &wecom.Adapter{Sender: wecom.OfficialSender{Tokens: wecomTokens, Client: providerHTTP}}
-	catalog, err := deliverypostgres.New(db, feishuAdapter, wecomAdapter)
+	adapters := []channel.Adapter{feishuAdapter, wecomAdapter}
+	if configValue.WebUIEnabled {
+		adapters = append(adapters, &webui.Adapter{Mailbox: webuipostgres.New(db)})
+	}
+	catalog, err := deliverypostgres.New(db, adapters...)
 	if err != nil {
 		return errors.New("delivery catalog configuration rejected")
 	}

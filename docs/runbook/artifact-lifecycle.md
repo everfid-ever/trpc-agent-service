@@ -4,7 +4,7 @@
 [`deploy/compose/README.md`](../../deploy/compose/README.md)。Compose 只负责可重复启动
 PostgreSQL/Redis/MinIO 和角色容器，不自动迁移或伪造控制面、Secret、Gateway 身份。
 
-`cmd/trpc-service artifact` 组合 Artifact lifecycle、依赖 readiness 和 health listener；`cmd/trpc-service preprocess` 组合持久 Preprocess Worker、媒体 staging、Artifact、扫描器和 `PrepareDispatch`；`cmd/trpc-service channel` 组合 Feishu/WeCom callback、持久候选验签、身份映射、加密 payload 和 durable Inbox/PreprocessJob；`cmd/trpc-service channel-delivery` 组合 Reply Queue/Delivery Ledger 与双 IM sender；`cmd/trpc-service worker` 组合持久 Task/Session/Bundle/Runner 与 DeepSeek Model client；`cmd/trpc-service gateway` 组合签名认证、durable run、SSE 和 OpenAI façade。各 role 共享只读配置/Secret 约束，但进程生命周期与租约 owner 独立；均不会创建 InMemory fallback。
+`cmd/trpc-service artifact` 组合 Artifact lifecycle、依赖 readiness 和 health listener；`cmd/trpc-service preprocess` 组合持久 Preprocess Worker、媒体 staging、Artifact、扫描器和 `PrepareDispatch`；`cmd/trpc-service channel` 组合 Feishu/WeCom callback、可选 WebUI callback、持久候选验签、身份映射、加密 payload 和 durable Inbox/PreprocessJob；`cmd/trpc-service channel-delivery` 组合 Reply Queue/Delivery Ledger 与各 Channel Adapter；`cmd/trpc-service worker` 组合持久 Task/Session/Bundle/Runner 与 DeepSeek Model client；`cmd/trpc-service gateway` 组合签名认证、durable run、SSE 和 OpenAI façade。各 role 共享只读配置/Secret 约束，但进程生命周期与租约 owner 独立；均不会创建 InMemory fallback。
 
 ## 启动前置条件
 
@@ -39,22 +39,33 @@ Worker 的 shard 由 `TRPC_WORKER_SHARD_COUNT` 与可选 `TRPC_WORKER_SHARDS` �
 
 AWS 凭据由官方 SDK default credential chain 解析，优先使用 Kubernetes Web Identity、实例角色或其他 workload identity。不得把凭据写入普通 ConfigMap、命令行参数或日志。
 
-## M2 外部 Provider smoke
+## M3 外部 Provider 最终验收
 
-真实 Feishu/WeCom smoke 会产生可见消息，只能对授权测试消息和测试用户执行。凭据必须分别放在权限不宽于 `0600` 的绝对路径文件中：Feishu 文件使用严格 `{"app_id":"...","app_secret":"..."}`，WeCom Agent 文件使用严格 `{"corp_id":"...","corp_secret":"...","agent_id":123}`。环境变量只携带文件路径与非密钥 locator，不得携带 Secret 值：
+真实 Feishu/WeCom 凭据与外部 API 验证按 [M2-SD-003](../design/8.m2-scope-decisions.md) 移到 M3 最终验收，不阻塞无企业资源环境中的 M2 仓库内闭环。该 smoke 会产生可见消息，只能对授权测试消息和测试用户执行。凭据必须分别放在权限不宽于 `0600` 的绝对路径文件中：Feishu 文件使用严格 `{"app_id":"...","app_secret":"..."}`，WeCom Agent 文件使用严格 `{"corp_id":"...","corp_secret":"...","agent_id":123}`。环境变量只携带文件路径与非密钥 locator，不得携带 Secret 值。
+
+推荐复制模板后一键执行；本机没有 Go 时脚本自动使用 Docker：
 
 ```bash
-TRPC_M2_IM_PROVIDER_SMOKE=1 \
-TRPC_M2_FEISHU_SECRET_FILE=/absolute/secret/feishu.json \
-TRPC_M2_FEISHU_APP_ID=cli_xxx \
-TRPC_M2_FEISHU_MESSAGE_ID=om_xxx \
-TRPC_M2_WECOM_SECRET_FILE=/absolute/secret/wecom.json \
-TRPC_M2_WECOM_CORP_ID=ww_xxx \
-TRPC_M2_WECOM_USER_ID=test_user \
-bash scripts/m2_im_provider_smoke_test.sh
+cp deploy/compose/.env.m3-im.example deploy/compose/.env.m3-im
+chmod 600 /absolute/secret/feishu.json /absolute/secret/wecom.json
+bash scripts/m3_im_provider_smoke_test.sh
 ```
 
-测试只有在 Feishu Reply API 和 WeCom Agent message API 均返回有效 provider message ID 时通过。该入口验证真实 provider credential/API，不替代 production PostgreSQL binding locator 与 CSI Secret scope contract；后者继续由组合根和 repository/credential tests 验收。WeCom Bot/WebSocket 与群聊 mention 已按 [M2-SD-001](../design/8.m2-scope-decisions.md)正式移出 M2，不能用本 smoke 宣称 Bot 能力。
+`.env.m3-im` 只填写 secret 文件绝对路径、App/Corp ID、飞书已有授权消息 ID 和企微测试用户 ID。`TRPC_M3_IM_PROVIDERS` 可取 `feishu`、`wecom` 或 `feishu,wecom`。测试只有在所有选中 Provider 返回有效 provider message ID 时通过。该入口验证真实 provider credential/API，不替代 production PostgreSQL binding locator 与 CSI Secret scope contract；后者继续由组合根和 repository/credential tests 验收。WeCom Bot/WebSocket 与群聊 mention 已按 [M2-SD-001](../design/8.m2-scope-decisions.md)正式移出 M2，不能用本 smoke 宣称 Bot 能力。
+
+## 本地 WebUI Channel 验收
+
+没有 Feishu/WeCom 企业凭据时，可在 `channel` 与 `channel-delivery` role 同时设置 `TRPC_WEBUI_ENABLED=true`，发布正常的 `channel=webui` ChannelBinding 后访问 `/webui/`。verification material 必须是严格 JSON：`{"token":"至少 16 字符的随机值","external_account_id":"local-webui"}`。浏览器只在页面内存保存 token，并以时间戳、nonce 和 HMAC-SHA256 签名请求；服务端仍使用 opaque route、candidate scoped verifier、durable callback、身份/Session、Preprocess、Reply Queue 与 Delivery Ledger，回复正文仍从加密 ResultStore 读取，WebUI mailbox 不保存明文。
+
+本地一键验收可使用 Compose 的 `webui` profile。先将 DeepSeek API key 单独写入被 git 忽略的 `deploy/compose/secrets/deepseek-api-key`，再执行：
+
+```bash
+docker compose -f deploy/compose/docker-compose.m2.yml --profile webui up --build
+```
+
+访问 `http://localhost:58081/webui/`，默认 Route Key/Account ID 为 `local-webui`，Channel Token 为 `local-webui-token-change-me`。本 profile 的 `webui-local` 组合根只用于隔离本地环境：它自动应用 embedded migrations、幂等发布本地 tenant/DeepSeek profile/Agent App/ChannelBinding，并组合既有 Preprocess、Dispatch/Wakeup/Reply Relay、Redis Worker、Reply Queue、Delivery Ledger 和 `webui.Adapter`。更换 token 或 Secret generation 前应使用 `docker compose -f deploy/compose/docker-compose.m2.yml --profile webui down -v` 清理一次性本地数据；生产环境不得自动 migration/seed，也不得使用默认 token。
+
+该验收用于证明 provider-neutral 内部链路、重启恢复与重复投递语义，不代表 Feishu/WeCom 的真实凭据、外部网络和 provider API 已通过。真实 provider smoke 仍按上一节在授权环境执行，范围口径见 [M2-SD-002/M2-SD-003](../design/8.m2-scope-decisions.md)。
 
 DLP bearer 不再接受明文环境变量。部署生成器必须调用 `trpcservice/secrets/filesystem.StableFilename`，为每个获授权的完整坐标 `(tenant, subject, purpose, resource, resource_version, ref, ref_version)` 在 `TRPC_SECRET_ROOT` 投影一个文件；DLP 使用 `subject=tenant`、`purpose=backend_connect`、`resource=http-dlp`，payload key 使用 `purpose=payload_encrypt`、`resource=messaging-payload` 且 `resource_version=TRPC_PAYLOAD_KEY_VERSION`。文件名是不透明 SHA-256 标识，SecretRef 不会被当作路径。目录不得 group/world-writable，文件必须为普通、非空、至多 64 KiB 且权限为 `0400` 或 `0600`；volume 必须只读挂载。
 

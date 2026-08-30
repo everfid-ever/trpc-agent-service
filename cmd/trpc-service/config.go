@@ -55,6 +55,7 @@ type productionConfig struct {
 	ChannelProviderTimeout                               time.Duration
 	ChannelReplyReclaimLimit, ChannelDeliveryMaxAttempts int
 	ChannelDeliveryMaxReconcile                          int
+	WebUIEnabled                                         bool
 
 	WorkerID, WorkerGroup, WorkerControlGroup, WorkerProbeTenant string
 	WorkerShardCount, WorkerReclaimLimit                         int
@@ -260,6 +261,9 @@ func loadChannelConfig(getenv func(string) string) (productionConfig, error) {
 		ProbeTimeout:       5 * time.Second, ProbeInterval: 15 * time.Second, ShutdownTimeout: 30 * time.Second,
 		ChannelCandidateTTL: 30 * time.Second, ChannelCallbackMaxBody: 1 << 20}
 	var err error
+	if config.WebUIEnabled, err = envBool(getenv, "TRPC_WEBUI_ENABLED", false); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_WEBUI_ENABLED")
+	}
 	if config.PayloadKeyVersion, err = envInt64(getenv, "TRPC_PAYLOAD_KEY_VERSION", 0); err != nil || config.PayloadKeyVersion < 1 {
 		return productionConfig{}, errors.New("invalid TRPC_PAYLOAD_KEY_VERSION")
 	}
@@ -306,6 +310,9 @@ func loadChannelDeliveryConfig(getenv func(string) string) (productionConfig, er
 		ChannelProviderTimeout:   15 * time.Second,
 		ChannelReplyReclaimLimit: 100, ChannelDeliveryMaxAttempts: 8, ChannelDeliveryMaxReconcile: 8}
 	var err error
+	if config.WebUIEnabled, err = envBool(getenv, "TRPC_WEBUI_ENABLED", false); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_WEBUI_ENABLED")
+	}
 	if config.RedisDB, err = envInt(getenv, "TRPC_REDIS_DB", 0); err != nil || config.RedisDB < 0 {
 		return productionConfig{}, errors.New("invalid TRPC_REDIS_DB")
 	}

@@ -175,7 +175,8 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 		Inbox: messaging.ClaimInboxRequest{InboxKey: preprocessKey, AgentAppID: key.AgentAppID, SessionID: "preprocess-session",
 			ExternalChatID: "contract-chat", ExternalUserID: "contract-user", PayloadDigest: strings.Repeat("9", 64),
 			KeyVersion: 1, InitialState: messaging.InboxPreprocessPending},
-		TenantVersion: tenantVersion, UserID: "derived-user", TraceParent: "preprocess-trace",
+		TenantVersion: tenantVersion, ConfigVersion: 1, ChannelBindingID: "contract-binding",
+		UserID: "derived-user", TraceParent: "preprocess-trace",
 	})
 	if err != nil || originalJob.State != preprocess.Pending {
 		t.Fatalf("preprocess claim inbox=%#v job=%#v err=%v", preprocessInbox, originalJob, err)
@@ -184,7 +185,8 @@ WHERE tenant_id=$1 AND active_config_version IS NULL RETURNING version`, key.Ten
 		Inbox: messaging.ClaimInboxRequest{InboxKey: preprocessKey, AgentAppID: key.AgentAppID, SessionID: "preprocess-session",
 			ExternalChatID: "contract-chat", ExternalUserID: "contract-user", PayloadDigest: strings.Repeat("9", 64),
 			KeyVersion: 1, InitialState: messaging.InboxPreprocessPending},
-		TenantVersion: tenantVersion, UserID: "derived-user", TraceParent: "retry-trace",
+		TenantVersion: tenantVersion, ConfigVersion: 1, ChannelBindingID: "contract-binding",
+		UserID: "derived-user", TraceParent: "retry-trace",
 	}
 	_, retriedJob, err := preprocessStore.ClaimInboxAndSchedule(ctx, traceRetry)
 	if err != nil || retriedJob.JobID != originalJob.JobID || retriedJob.TraceParent != originalJob.TraceParent {
