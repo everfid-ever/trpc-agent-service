@@ -1,5 +1,9 @@
 # M2 Docker environment
 
+For a complete Chinese quick-start, parameter reference, Secret explanation,
+health checks, and troubleshooting guide, see
+[`docs/runbook/getting-started.md`](../../docs/runbook/getting-started.md).
+
 This Compose file is a local acceptance harness, not a production deployment.
 It provides PostgreSQL 16, Redis 7, and an optional MinIO S3-compatible store.
 The application image contains the same multi-role binary used by the
