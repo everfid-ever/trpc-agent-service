@@ -1,12 +1,32 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+)
 
 func TestDecodeRejectsUnknownFieldsAndTrailingData(t *testing.T) {
 	for _, data := range []string{`{"schema_version":1,"default_agent_app_id":"app","policy_version":1,"unknown":true}`, `{"schema_version":1,"default_agent_app_id":"app","policy_version":1}{}`} {
 		if _, err := DecodeV1([]byte(data)); err == nil {
 			t.Fatalf("accepted %s", data)
 		}
+	}
+}
+
+func TestProviderBindingsRequireIndependentSendSecret(t *testing.T) {
+	for _, channel := range []string{"feishu", "wecom"} {
+		binding := ChannelBinding{Channel: channel}
+		if ValidSendSecret(binding) {
+			t.Fatalf("channel=%s accepted missing send secret", channel)
+		}
+		binding.SendSecretRef = secrets.SecretRef{Ref: "send", Version: 1}
+		if !ValidSendSecret(binding) {
+			t.Fatalf("channel=%s rejected complete send secret", channel)
+		}
+	}
+	if !ValidSendSecret(ChannelBinding{Channel: "fake"}) {
+		t.Fatal("fake binding unexpectedly requires provider send credentials")
 	}
 }
 func TestDigestNormalizesBindingOrder(t *testing.T) {

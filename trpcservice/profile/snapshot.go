@@ -18,7 +18,9 @@ type RuntimePolicyV1 map[string]any
 
 type ExecutionProfileKey struct {
 	TenantID         string
+	TenantVersion    int64
 	AgentAppID       string
+	AgentAppVersion  int64
 	AgentAppRevision int64
 	ContentDigest    string
 	ConfigVersion    int64

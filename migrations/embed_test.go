@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 20 {
+	if len(all) != 21 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestChannelSendCredentialsMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[20]
+	if migration.Version != "000021" || migration.Name != "channel_send_credentials" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"send_secret_ref text", "send_secret_version bigint", "populate_channel_send_secret", "BEFORE INSERT", "channel IN ('feishu', 'wecom')", "REVOKE ALL ON FUNCTION"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

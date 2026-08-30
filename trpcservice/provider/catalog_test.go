@@ -55,3 +55,23 @@ func TestCatalogRejectsEndpointBypassAndCapabilityLie(t *testing.T) {
 		t.Fatalf("capability lie: got %v", err)
 	}
 }
+
+func TestDeepSeekModelSchemaPinsOfficialProductionSurface(t *testing.T) {
+	catalog, err := NewCatalog(DeepSeekModelSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeModel(ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "model", ProfileKey: "deepseek",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "deepseek", Model: "deepseek-v4-flash",
+		Endpoint: "https://api.deepseek.com", SecretRef: secrets.SecretRef{Ref: "secret/deepseek", Version: 1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Options["timeout_ms"] != "60000" || value.Options["channel_buffer_size"] != "256" {
+		t.Fatalf("defaults=%#v", value.Options)
+	}
+	value.Model = "deepseek-chat"
+	if _, err := catalog.NormalizeModel(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("deprecated model: %v", err)
+	}
+}

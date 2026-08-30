@@ -73,6 +73,19 @@ type PayloadRecord struct {
 	CreatedAt                                      time.Time
 }
 
+// PayloadCipherKey is a short-lived tenant-scoped encryption key. Callers
+// must clear Bytes as soon as the current crypto operation completes.
+type PayloadCipherKey struct {
+	Bytes   []byte
+	Version int64
+}
+
+// PayloadKeyResolver resolves the exact key generation recorded beside an
+// encrypted payload. Implementations must not fall back to current/latest.
+type PayloadKeyResolver interface {
+	ResolvePayloadKey(context.Context, string, int64) (PayloadCipherKey, error)
+}
+
 // PayloadStore persists normalized inbound payloads before durable ACK so a
 // dispatcher can recover them after process restart.
 type PayloadStore interface {

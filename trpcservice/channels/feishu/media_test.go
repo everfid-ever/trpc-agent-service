@@ -23,7 +23,7 @@ func TestOfficialMediaFetcherUsesScopedTokenAndBoundedResourceRoute(t *testing.T
 	}}
 	fetcher := feishu.OfficialMediaFetcher{Tokens: tokens, Client: client}
 	download, err := fetcher.Fetch(context.Background(), preprocess.MediaFetchRequest{TenantID: "tenant", RequestID: "request",
-		Channel: "feishu", ChannelBindingID: "binding", ExternalAccountID: "app",
+		Channel: "feishu", ChannelBindingID: "binding", ExternalAccountID: "app", ConfigVersion: 1,
 		Media: channel.MediaRef{ID: "image-key", MessageID: "message-1", Kind: "image"}})
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestOfficialMediaFetcherRefreshesInvalidTokenOnceWithoutLeakingIt(t *testin
 		return mediaHTTPResponse(http.StatusOK, "text/plain", "safe"), nil
 	}}
 	download, err := (feishu.OfficialMediaFetcher{Tokens: tokens, Client: client}).Fetch(context.Background(), preprocess.MediaFetchRequest{
-		TenantID: "tenant", RequestID: "request", Channel: "feishu", ChannelBindingID: "binding", ExternalAccountID: "app",
+		TenantID: "tenant", RequestID: "request", Channel: "feishu", ChannelBindingID: "binding", ExternalAccountID: "app", ConfigVersion: 1,
 		Media: channel.MediaRef{ID: "file-key", MessageID: "message-1", Kind: "file"}})
 	if err != nil {
 		t.Fatal(err)

@@ -28,6 +28,9 @@ type ServerInvocationContext struct {
 	Protocol       string
 	IdempotencyKey string
 	TraceParent    string
+	CanRead        bool
+	CanCancel      bool
+	CanRun         bool
 }
 
 func WithServerInvocationContext(ctx context.Context, value ServerInvocationContext) context.Context {
@@ -73,7 +76,7 @@ func (b *GatewayRunnerBridge) Run(ctx context.Context, userID, sessionID string,
 	}
 	trusted, ok := ServerInvocationFromContext(ctx)
 	if !ok || trusted.Tenant.Validate() != nil || trusted.PrincipalID == "" || trusted.Tenant.SubjectID != trusted.PrincipalID || trusted.UserID == "" ||
-		trusted.SessionID == "" || trusted.Protocol == "" || trusted.IdempotencyKey == "" {
+		trusted.SessionID == "" || trusted.Protocol == "" || trusted.IdempotencyKey == "" || !trusted.CanRun {
 		return nil, ErrUnauthenticated
 	}
 	if userID != trusted.UserID || sessionID != trusted.SessionID {

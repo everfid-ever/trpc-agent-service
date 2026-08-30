@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -284,18 +285,64 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 
 	// Reply publication is at-least-once. Inject a crash after Redis XADD but
 	// before the Outbox mark, then prove the Delivery Ledger suppresses the
-	// duplicate provider effect for the repeated delivery key.
+	// duplicate provider effect for the repeated delivery key. Delivery must
+	// traverse the same Redis Reply Queue consume/reclaim boundary used by the
+	// channel-delivery production role; a synchronous provider shortcut would
+	// not exercise the process handoff.
 	providerAdapter := &deliveryAdapterStub{}
 	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryAdapterResolver{adapter: providerAdapter}, Owner: "runtime-adapter"}
-	delivering := deliveringReplyPublisher{stream: businessPublisher, delivery: deliveryService}
+	replyQueue, err := relayredis.NewReplyQueue(redisClient, businessPublisher, relayredis.ReplyQueueConfig{
+		Group: "channel-delivery", ReadBlock: 20 * time.Millisecond, ReclaimIdle: 50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationA := channel.ReplyDestination{TenantID: tenantA, Channel: "fake", ChannelBindingID: "fake-a",
+		ExternalAccountID: "shared-account", ConfigVersion: snapshots[0].Key.ConfigVersion}
+	destinationB := channel.ReplyDestination{TenantID: tenantB, Channel: "fake", ChannelBindingID: "fake-b",
+		ExternalAccountID: "shared-account", ConfigVersion: snapshots[1].Key.ConfigVersion}
+	consumerCtx, stopDeliveryConsumers := context.WithCancel(context.Background())
+	deliveryDone := make(chan error, 3)
+	crashingQueue := &failFirstReplyACK{inner: replyQueue}
+	go func() {
+		deliveryDone <- (channeldelivery.Consumer{Queue: crashingQueue, Deliverer: deliveryService, Destination: destinationA,
+			ConsumerID: "channel-delivery-crashed", ReclaimInterval: time.Hour, ReclaimLimit: 100}).Run(consumerCtx)
+	}()
+	go func() {
+		deliveryDone <- (channeldelivery.Consumer{Queue: replyQueue, Deliverer: deliveryService, Destination: destinationB,
+			ConsumerID: "channel-delivery-b", ReclaimInterval: 10 * time.Millisecond, ReclaimLimit: 100}).Run(consumerCtx)
+	}()
+	t.Cleanup(stopDeliveryConsumers)
 	flakyReplyOutbox := &failFirstPublishedMark{inner: inbox}
-	replyRelay := relay.ReplyRelay{Outbox: flakyReplyOutbox, Results: payloads, Routes: inbox, Replies: delivering,
+	replyRelay := relay.ReplyRelay{Outbox: flakyReplyOutbox, Results: payloads, Routes: inbox, Replies: businessPublisher,
 		Owner: "runtime-reply-relay", ClaimTTL: 40 * time.Millisecond, ClaimRenewInterval: 10 * time.Millisecond}
 	if count, err := replyRelay.RunOnce(context.Background()); err == nil || count != len(handles)-1 {
 		// One publish succeeds but its injected mark fails; the other rows are
 		// marked normally in the same batch.
 		t.Fatalf("first reply relay count=%d want=%d err=%v", count, len(handles)-1, err)
 	}
+	crashDeadline := time.After(2 * time.Second)
+	for {
+		select {
+		case crashErr := <-deliveryDone:
+			if crashErr != nil && strings.Contains(crashErr.Error(), "injected reply ACK crash") {
+				goto crashObserved
+			}
+			// The healthy tenant consumer is cancelled when the injected
+			// crash consumer exits; its context-canceled result is expected
+			// and must not mask the injected ACK failure.
+		case <-crashDeadline:
+			t.Fatal("channel delivery did not reach injected post-provider ACK crash")
+		}
+	}
+crashObserved:
+	time.Sleep(60 * time.Millisecond)
+	recoveryConsumer := channeldelivery.Consumer{Queue: replyQueue, Deliverer: deliveryService, Destination: destinationA,
+		ConsumerID: "channel-delivery-recovered", ReclaimInterval: 10 * time.Millisecond, ReclaimLimit: 100}
+	if reclaimed, err := recoveryConsumer.ReclaimOnce(context.Background()); err != nil || reclaimed != 1 {
+		t.Fatalf("channel delivery reclaim count=%d err=%v", reclaimed, err)
+	}
+	go func() { deliveryDone <- recoveryConsumer.Run(consumerCtx) }()
 	// Allow the database claim lease and the relay's default one-second retry
 	// horizon to elapse on slower CI hosts before declaring the replay lost.
 	replayDeadline := time.Now().Add(3 * time.Second)
@@ -311,12 +358,79 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	if replayed != 1 {
 		t.Fatalf("replayed reply relay count=%d", replayed)
 	}
+	providerDeadline := time.Now().Add(3 * time.Second)
+	for providerAdapter.callCount() != len(handles) && time.Now().Before(providerDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if calls := providerAdapter.callCount(); calls != len(handles) {
 		t.Fatalf("provider effects=%d want=%d", calls, len(handles))
 	}
+	// The outbox replay above generated a duplicate queue item. Let the
+	// recovered consumer ACK it, then prove the durable sent ledger suppressed
+	// a second provider effect.
+	time.Sleep(100 * time.Millisecond)
+	if calls := providerAdapter.callCount(); calls != len(handles) {
+		t.Fatalf("provider duplicate after reclaim/replay effects=%d want=%d", calls, len(handles))
+	}
+	stopDeliveryConsumers()
 	var publishedReplies int
 	if err := db.QueryRow(`SELECT count(*) FROM outbox WHERE kind='reply' AND state='published'`).Scan(&publishedReplies); err != nil || publishedReplies != len(handles) {
 		t.Fatalf("published replies=%d want=%d err=%v", publishedReplies, len(handles), err)
+	}
+
+	// Mount the production durable Gateway contract on the same PostgreSQL,
+	// Redis relay and Worker authorities. This closes the multi-role slice that
+	// the fake channel entrypoint above intentionally does not exercise.
+	gatewayPrincipal := gateway.Principal{Authenticated: true, TenantID: tenantA, TenantVersion: tenantRows[tenantA].Version,
+		SubjectID: "gateway-principal", UserID: "gateway-user", AgentAppID: appID, SessionID: "gateway-session",
+		CanRead: true, CanCancel: true, CanRun: true}
+	cursors, err := gateway.NewCursorCodec([]byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cursors.Close() })
+	gatewayEvents := gateway.TerminalEventStore{Tasks: tasks, Results: payloads}
+	newGatewayAPI := func() http.Handler {
+		api, buildErr := gateway.NewHTTPHandler(gateway.HTTPHandlerOptions{
+			Submitter: gateway.RunSubmitter{Inbox: inbox, Payloads: payloads, Dispatcher: dispatcher, PayloadKeyVersion: 1},
+			Tasks:     tasks, Events: gatewayEvents, Principals: m2PrincipalResolver{principal: gatewayPrincipal},
+			Routes: gatewaypostgres.HTTPRouteResolver{Tenants: tenants, Configs: configs}, Cursors: cursors,
+			Readiness: m2Readiness{}, MaxBody: 1 << 20, PollInterval: 5 * time.Millisecond,
+			ReplayLimit: 64, MaxSubscribers: 8,
+		})
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		return api
+	}
+	gatewayAPI := newGatewayAPI()
+	gatewayServer := httptest.NewServer(gatewayAPI)
+	gatewayHandle := postGatewayRun(t, gatewayServer.URL, appID, "gateway-session", "gateway-stable-key", "gateway multi-role smoke")
+	gatewayDuplicate := postGatewayRun(t, gatewayServer.URL, appID, "gateway-session", "gateway-stable-key", "gateway multi-role smoke")
+	if gatewayHandle.RequestID == "" || gatewayDuplicate.RequestID != gatewayHandle.RequestID {
+		t.Fatalf("gateway idempotency first=%#v duplicate=%#v", gatewayHandle, gatewayDuplicate)
+	}
+	if code := postGatewayRunStatus(t, gatewayServer.URL, appID, "gateway-session", "gateway-stable-key", "gateway collision"); code != http.StatusConflict {
+		t.Fatalf("gateway idempotency collision code=%d", code)
+	}
+	gatewayStatus := waitForTerminal(t, tasks, tenantA, gatewayHandle.RequestID)
+	if gatewayStatus.Outcome != runtime.OutcomeSucceeded || model.inner.Calls(tenantA, gatewayHandle.RequestID) != 1 {
+		t.Fatalf("gateway terminal=%#v model calls=%d", gatewayStatus, model.inner.Calls(tenantA, gatewayHandle.RequestID))
+	}
+
+	// Reconstruct the HTTP façade to prove status and terminal replay come from
+	// shared authorities rather than a process-local subscriber or task map.
+	gatewayServer.Close()
+	restartedGateway := httptest.NewServer(newGatewayAPI())
+	t.Cleanup(restartedGateway.Close)
+	recovered := getGatewayStatus(t, restartedGateway.URL, gatewayHandle.RequestID)
+	if recovered.Outcome != runtime.OutcomeSucceeded || recovered.ResultRef != gatewayStatus.ResultRef {
+		t.Fatalf("gateway restart recovered=%#v want=%#v", recovered, gatewayStatus)
+	}
+	replay := getGatewayEvents(t, restartedGateway.URL, gatewayHandle.RequestID)
+	wantContent := "mock-result://" + tenantA + "/" + gatewayHandle.RequestID
+	if !strings.Contains(replay, "event: message.completed") || !strings.Contains(replay, "event: run.completed") || !strings.Contains(replay, wantContent) {
+		t.Fatalf("gateway terminal replay=%q", replay)
 	}
 
 	// A node receiving stale/out-of-order TenantControl events must reload the
@@ -430,15 +544,13 @@ park_deadline=now()+interval '1 minute',version=version+1 WHERE tenant_id=$1 AND
 	if err != nil {
 		t.Fatal(err)
 	}
-	cancelResult, err := tasks.RequestCancel(context.Background(), gateway.CancelRequest{TenantID: tenantA, RequestID: "cancel-request", ExpectedVersion: cancelStatus.Version,
-		ActorID: "runtime-test", ReasonCode: "requested", TraceParent: "00-00000000000000000000000000000001-0000000000000001-01"})
-	if err != nil || !cancelResult.Accepted || cancelResult.CancelVersion != 1 {
-		t.Fatalf("cancel result=%#v err=%v", cancelResult, err)
+	cancelResult, cancelCode := requestGatewayCancel(t, gatewayAPI, "cancel-request", cancelStatus.Version)
+	if cancelCode != http.StatusAccepted || !cancelResult.Accepted || cancelResult.CancelVersion != 1 {
+		t.Fatalf("cancel result=%#v code=%d", cancelResult, cancelCode)
 	}
-	retryResult, retryErr := tasks.RequestCancel(context.Background(), gateway.CancelRequest{TenantID: tenantA, RequestID: "cancel-request", ExpectedVersion: cancelStatus.Version,
-		ActorID: "runtime-test", ReasonCode: "requested", TraceParent: "00-00000000000000000000000000000001-0000000000000001-01"})
-	if retryErr != nil || !retryResult.Accepted || retryResult.Version != cancelResult.Version || retryResult.CancelVersion != cancelResult.CancelVersion {
-		t.Fatalf("cancel retry=%#v err=%v", retryResult, retryErr)
+	retryResult, retryCode := requestGatewayCancel(t, gatewayAPI, "cancel-request", cancelStatus.Version)
+	if retryCode != http.StatusAccepted || !retryResult.Accepted || retryResult.Version != cancelResult.Version || retryResult.CancelVersion != cancelResult.CancelVersion {
+		t.Fatalf("cancel retry=%#v code=%d", retryResult, retryCode)
 	}
 	cancelStatus, err = tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantA, RequestID: "cancel-request"})
 	if err != nil || cancelStatus.Outcome != runtime.OutcomeQueued || !cancelStatus.CancelRequested {
@@ -644,13 +756,17 @@ func prepareTenant(t *testing.T, providerProfiles *providerpostgres.Repository, 
 		Payload: config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: 1, ChannelBindings: []config.ChannelBinding{{
 			BindingID: bindingID, Channel: "fake", ExternalAccountID: "shared-account", AgentAppID: appID,
 			SecretRef: secrets.SecretRef{Ref: "secret://fake", Version: 1},
+			// Keep the fixture compatible with the database-level send-secret
+			// completeness invariant used by all channel bindings.
+			SendSecretRef: secrets.SecretRef{Ref: "secret://fake-send", Version: 1},
 		}}},
 	})
 	if err != nil {
 		t.Fatalf("publish config %s: %v", tenantID, err)
 	}
 	key := profile.ExecutionProfileKey{
-		TenantID: tenantID, AgentAppID: appID, AgentAppRevision: publishedApp.Revision.Revision,
+		TenantID: tenantID, TenantVersion: publishedConfig.Tenant.Version,
+		AgentAppID: appID, AgentAppVersion: publishedApp.App.Version, AgentAppRevision: publishedApp.Revision.Revision,
 		ContentDigest: publishedApp.Revision.ContentDigest, ConfigVersion: publishedConfig.Snapshot.ConfigVersion, PolicyVersion: 1,
 	}
 	return profile.ExecutionProfileSnapshot{
@@ -700,6 +816,122 @@ func postMessage(t *testing.T, baseURL, binding, messageID, chatID string) gatew
 		t.Errorf("decode handle: %v", err)
 	}
 	return handle
+}
+
+type m2PrincipalResolver struct{ principal gateway.Principal }
+
+func (r m2PrincipalResolver) Resolve(*http.Request) (gateway.Principal, error) {
+	return r.principal, nil
+}
+
+type m2Readiness struct{}
+
+func (m2Readiness) Ready() bool { return true }
+
+func postGatewayRun(t *testing.T, baseURL, appID, sessionID, idempotencyKey, text string) gateway.ExecutionHandle {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"agent_app_id": appID, "session_id": sessionID, "text": text})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/agent-runs", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", idempotencyKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		value, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		t.Fatalf("gateway run code=%d body=%q", response.StatusCode, value)
+	}
+	var handle gateway.ExecutionHandle
+	if err := json.NewDecoder(response.Body).Decode(&handle); err != nil {
+		t.Fatal(err)
+	}
+	return handle
+}
+
+func postGatewayRunStatus(t *testing.T, baseURL, appID, sessionID, idempotencyKey, text string) int {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"agent_app_id": appID, "session_id": sessionID, "text": text})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/agent-runs", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", idempotencyKey)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	return response.StatusCode
+}
+
+func getGatewayStatus(t *testing.T, baseURL, requestID string) gateway.ExecutionStatus {
+	t.Helper()
+	response, err := http.Get(baseURL + "/v1/agent-runs/" + requestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		value, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+		t.Fatalf("gateway status code=%d body=%q", response.StatusCode, value)
+	}
+	var status gateway.ExecutionStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
+func getGatewayEvents(t *testing.T, baseURL, requestID string) string {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get(baseURL + "/v1/agent-runs/" + requestID + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	value, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("gateway events code=%d body=%q", response.StatusCode, value)
+	}
+	return string(value)
+}
+
+func requestGatewayCancel(t *testing.T, handler http.Handler, requestID string, expectedVersion int64) (gateway.CancelResult, int) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"expected_version": expectedVersion, "reason_code": "runtime_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/agent-runs/"+requestID+"/cancel", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("traceparent", "00-00000000000000000000000000000001-0000000000000001-01")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted && response.Code != http.StatusOK {
+		t.Fatalf("gateway cancel code=%d body=%q", response.Code, response.Body.String())
+	}
+	var result gateway.CancelResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result, response.Code
 }
 
 func waitForTerminal(t *testing.T, tasks *gatewaypostgres.TaskStore, tenantID, requestID string) gateway.ExecutionStatus {
@@ -857,16 +1089,29 @@ func (s *failFirstPublishedMark) failures() int {
 	return 0
 }
 
-type deliveringReplyPublisher struct {
-	stream   channel.ReplyPublisher
-	delivery channeldelivery.Service
+type failFirstReplyACK struct {
+	inner  channel.ReplyQueue
+	mu     sync.Mutex
+	failed bool
 }
 
-func (p deliveringReplyPublisher) PublishReply(ctx context.Context, destination channel.ReplyDestination, event channel.ReplyEvent) error {
-	if err := p.stream.PublishReply(ctx, destination, event); err != nil {
-		return err
+func (q *failFirstReplyACK) ConsumeReplies(ctx context.Context, destination channel.ReplyDestination, options channel.ReplyConsumerOptions, handle func(context.Context, channel.ReplyDelivery) error) error {
+	return q.inner.ConsumeReplies(ctx, destination, options, handle)
+}
+
+func (q *failFirstReplyACK) AckReply(ctx context.Context, destination channel.ReplyDestination, delivery channel.ReplyDelivery) error {
+	q.mu.Lock()
+	if !q.failed {
+		q.failed = true
+		q.mu.Unlock()
+		return errors.New("injected reply ACK crash")
 	}
-	return p.delivery.Deliver(ctx, event)
+	q.mu.Unlock()
+	return q.inner.AckReply(ctx, destination, delivery)
+}
+
+func (q *failFirstReplyACK) ReclaimReplies(ctx context.Context, destination channel.ReplyDestination, options channel.ReplyConsumerOptions) ([]channel.ReplyDelivery, error) {
+	return q.inner.ReclaimReplies(ctx, destination, options)
 }
 
 type deliveryAdapterResolver struct{ adapter channel.Adapter }

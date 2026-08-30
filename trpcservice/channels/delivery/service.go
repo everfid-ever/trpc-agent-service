@@ -18,6 +18,10 @@ type AdapterResolver interface {
 	ResolveAdapter(context.Context, string, string) (channel.Adapter, error)
 }
 
+type VersionedAdapterResolver interface {
+	ResolveVersionedAdapter(context.Context, string, string, int64) (channel.Adapter, error)
+}
+
 // Compatibility aliases keep delivery callers source-compatible while the
 // error taxonomy itself lives in the provider-neutral Adapter contract.
 type AmbiguousError = channel.AmbiguousDeliveryError
@@ -59,7 +63,7 @@ type Service struct {
 
 func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	if s.Results == nil || s.Ledger == nil || s.Adapters == nil || event.SchemaVersion != 1 ||
-		s.Owner == "" || event.TenantID == "" || event.RequestID == "" || event.ChannelBindingID == "" || event.DeliveryKey == "" || event.ContentRef == "" ||
+		s.Owner == "" || event.TenantID == "" || event.RequestID == "" || event.ChannelBindingID == "" || event.ConfigVersion < 1 || event.DeliveryKey == "" || event.ContentRef == "" ||
 		event.Target.Channel == "" || event.Target.ExternalAccountID == "" {
 		return runtime.ErrInvariantViolation
 	}
@@ -100,7 +104,7 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 			return runtime.ErrInvariantViolation
 		}
 	}
-	adapter, err := s.Adapters.ResolveAdapter(ctx, event.TenantID, event.ChannelBindingID)
+	adapter, err := s.resolveAdapter(ctx, event)
 	if err != nil {
 		return s.finishRetry(ctx, record, err, 0)
 	}
@@ -147,7 +151,7 @@ func (s Service) reconcile(ctx context.Context, event channel.ReplyEvent, record
 	if record.NotBefore.After(time.Now()) {
 		return DeferredError{NotBefore: record.NotBefore}
 	}
-	adapter, err := s.Adapters.ResolveAdapter(ctx, event.TenantID, event.ChannelBindingID)
+	adapter, err := s.resolveAdapter(ctx, event)
 	if err != nil {
 		return s.deferReconciliation(ctx, record, err)
 	}
@@ -178,6 +182,13 @@ func (s Service) reconcile(ctx context.Context, event channel.ReplyEvent, record
 	default:
 		return s.deferReconciliation(ctx, record, runtime.ErrInvariantViolation)
 	}
+}
+
+func (s Service) resolveAdapter(ctx context.Context, event channel.ReplyEvent) (channel.Adapter, error) {
+	if resolver, ok := s.Adapters.(VersionedAdapterResolver); ok {
+		return resolver.ResolveVersionedAdapter(ctx, event.TenantID, event.ChannelBindingID, event.ConfigVersion)
+	}
+	return s.Adapters.ResolveAdapter(ctx, event.TenantID, event.ChannelBindingID)
 }
 
 func (s Service) finishRetry(ctx context.Context, record messaging.DeliveryRecord, cause error, delay time.Duration) error {

@@ -119,6 +119,23 @@ func TestProviderConcurrentResolveAndTraversalLikeRefRemainScoped(t *testing.T) 
 	wait.Wait()
 }
 
+func TestProviderProbeRootChecksPrivateMount(t *testing.T) {
+	root := t.TempDir()
+	provider, err := secretfs.New(root, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ProbeRoot(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ProbeRoot(context.Background()); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("probe err=%v", err)
+	}
+}
+
 func fixture() (secrets.Scope, secrets.SecretRef) {
 	return secrets.Scope{TenantID: "tenant-a", Subject: "tenant-a", Purpose: secrets.PurposeBackendConnect,
 		ResourceID: "http-dlp", ResourceVersion: 4}, secrets.SecretRef{Ref: "secret://dlp/service", Version: 7}

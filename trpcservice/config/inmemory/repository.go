@@ -37,7 +37,7 @@ func (r *Repository) Validate(ctx context.Context, in config.ValidateInput) erro
 	}
 	seenChannels := map[string]struct{}{}
 	for _, binding := range in.Payload.ChannelBindings {
-		if binding.BindingID == "" || binding.Channel == "" || binding.ExternalAccountID == "" || binding.AgentAppID == "" || binding.SecretRef.Ref == "" || binding.SecretRef.Version < 1 {
+		if binding.BindingID == "" || binding.Channel == "" || binding.ExternalAccountID == "" || binding.AgentAppID == "" || binding.SecretRef.Ref == "" || binding.SecretRef.Version < 1 || !config.ValidSendSecret(binding) {
 			return config.ErrInvalid
 		}
 		key := binding.Channel + "\x00" + binding.ExternalAccountID

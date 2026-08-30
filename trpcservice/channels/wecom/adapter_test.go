@@ -79,7 +79,7 @@ func TestEncryptedCallbackRunsThroughCommonDurablePipeline(t *testing.T) {
 		t.Fatalf("accepted=%#v err=%v", accepted, err)
 	}
 	stored, err := payloads.GetPayload(context.Background(), "tenant", accepted[0].RequestID)
-	if err != nil || string(stored.Content) != `{"external_message_id":"message-1","external_user_id":"zhangsan","external_chat_id":"","text":"hello"}` {
+	if err != nil || string(stored.Content) != `{"external_message_id":"message-1","external_user_id":"zhangsan","external_chat_id":"","config_version":1,"text":"hello"}` {
 		t.Fatalf("payload=%s err=%v", stored.Content, err)
 	}
 }
@@ -89,7 +89,7 @@ func TestDeliverUsesFrozenUserTargetAndSenderClassification(t *testing.T) {
 	adapter := &wecom.Adapter{Sender: sender}
 	content := []byte("reply")
 	sum := sha256.Sum256(content)
-	request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding"}, ClientRequestID: "stable-key",
+	request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding", ConfigVersion: 1}, ClientRequestID: "stable-key",
 		Target:  channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: "ww_corp", ExternalUserID: "zhangsan"},
 		Content: content, ContentDigest: hex.EncodeToString(sum[:])}
 	result, err := adapter.Deliver(context.Background(), request)
@@ -111,7 +111,7 @@ func TestAdapterDeliveryContract(t *testing.T) {
 			ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}
 		target := channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: "ww_corp", ExternalUserID: "zhangsan"}
 		event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding",
-			DeliveryKey: "reply-wecom", ContentRef: result.ResultRef, Target: target, Final: true}
+			DeliveryKey: "reply-wecom", ConfigVersion: 1, ContentRef: result.ResultRef, Target: target, Final: true}
 		return contracttest.DeliveryHarness{Adapter: &wecom.Adapter{Sender: sender}, Event: event, Result: result, Observe: func() contracttest.DeliveryObservation {
 			return contracttest.DeliveryObservation{Calls: sender.calls, ClientRequestID: sender.clientRequestID, Content: []byte(sender.text),
 				Target: channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: sender.destination.ExternalAccountID, ExternalUserID: sender.externalUserID}}
@@ -162,7 +162,7 @@ func TestOfficialSenderClassifiesResponsesAndRefreshesInvalidTokenOnce(t *testin
 			})
 			tokens := &recordingTokens{}
 			sender := wecom.OfficialSender{Tokens: tokens, Client: client, BaseURL: "https://unit.test"}
-			messageID, err := sender.SendText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "ww_corp"}, "zhangsan", "hello", "stable-key")
+			messageID, err := sender.SendText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "ww_corp", ConfigVersion: 1}, "zhangsan", "hello", "stable-key")
 			if test.checkErr != nil {
 				if !test.checkErr(err) {
 					t.Fatalf("message=%q err=%T %v", messageID, err, err)
@@ -189,7 +189,7 @@ func TestOfficialSenderTreatsTransportFailureAsAmbiguous(t *testing.T) {
 	sender := wecom.OfficialSender{Tokens: &recordingTokens{}, Client: httpClientFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("connection reset")
 	})}
-	_, err := sender.SendText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "ww_corp"}, "zhangsan", "hello", "stable-key")
+	_, err := sender.SendText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "ww_corp", ConfigVersion: 1}, "zhangsan", "hello", "stable-key")
 	var ambiguous channel.AmbiguousDeliveryError
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("error=%T %v", err, err)

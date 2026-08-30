@@ -27,9 +27,17 @@ func (m ProtocolInvocationMiddleware) ServeHTTP(w http.ResponseWriter, r *http.R
 		return
 	}
 	trusted, err := m.Resolver.ResolveProtocolInvocation(r)
-	if err != nil || trusted.Tenant.Validate() != nil || trusted.PrincipalID == "" ||
+	if err != nil {
+		writeControlError(w, err)
+		return
+	}
+	if trusted.Tenant.Validate() != nil || trusted.PrincipalID == "" ||
 		trusted.UserID == "" || trusted.SessionID == "" || trusted.Protocol == "" || trusted.IdempotencyKey == "" {
 		writeControlError(w, ErrUnauthenticated)
+		return
+	}
+	if protocolForPath(r.URL.Path) != trusted.Protocol {
+		writeControlError(w, ErrForbidden)
 		return
 	}
 	m.Next.ServeHTTP(w, r.WithContext(WithServerInvocationContext(r.Context(), trusted)))

@@ -108,7 +108,8 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 		PayloadRef: "payload://request", CreatedAt: time.Now().UTC(),
 	}
 	key := profile.ExecutionProfileKey{
-		TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID,
+		TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion,
+		AgentAppID: envelope.AgentAppID, AgentAppVersion: envelope.AgentAppVersion,
 		AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest,
 		ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion,
 	}
@@ -134,7 +135,7 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	payloads := messagingmemory.New()
 	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{
 		TenantID: envelope.TenantID, RequestID: envelope.RequestID, PayloadRef: envelope.PayloadRef,
-		ContentDigest: "payload-digest", Content: []byte(`{"text":"hello"}`), KeyVersion: 1,
+		ContentDigest: "payload-digest", Content: []byte(`{"text":"hello"}`), KeyVersion: 7,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +154,10 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	}
 	if calls := mock.Calls(envelope.TenantID, envelope.RequestID); calls != 1 {
 		t.Fatalf("model calls=%d", calls)
+	}
+	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
+	if err != nil || result.KeyVersion != 7 {
+		t.Fatalf("result key version=%d err=%v", result.KeyVersion, err)
 	}
 }
 

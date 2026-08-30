@@ -16,3 +16,6 @@ vendor/
 data/*
 !data/README.md
 .workbuddy
+deploy/compose/.env.m2
+deploy/compose/secrets/*
+!deploy/compose/secrets/.gitkeep

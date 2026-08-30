@@ -40,6 +40,7 @@ func NewPublisher(client redisclient.UniversalClient, config Config) (*Publisher
 func (p *Publisher) PublishReply(ctx context.Context, destination channel.ReplyDestination, event channel.ReplyEvent) error {
 	if destination.TenantID == "" || destination.Channel == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" ||
 		event.SchemaVersion != 1 || event.TenantID != destination.TenantID || event.ChannelBindingID != destination.ChannelBindingID || event.DeliveryKey == "" ||
+		event.ConfigVersion < 1 || (destination.ConfigVersion > 0 && event.ConfigVersion != destination.ConfigVersion) ||
 		event.Target.Channel != destination.Channel || event.Target.ExternalAccountID != destination.ExternalAccountID ||
 		(event.Target.ExternalMessageID == "" && event.Target.ExternalChatID == "" && event.Target.ExternalUserID == "") {
 		return runtime.ErrInvariantViolation
@@ -54,6 +55,7 @@ func (p *Publisher) PublishReply(ctx context.Context, destination channel.ReplyD
 		"tenant_id":           event.TenantID,
 		"channel":             destination.Channel,
 		"binding_id":          event.ChannelBindingID,
+		"config_version":      strconv.FormatInt(event.ConfigVersion, 10),
 		"external_account_id": destination.ExternalAccountID,
 		"delivery_key":        event.DeliveryKey,
 		"traceparent":         event.TraceParent,

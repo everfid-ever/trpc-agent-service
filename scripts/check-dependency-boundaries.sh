@@ -6,6 +6,8 @@ cd "$repo_root"
 
 required_module="trpc.group/trpc-go/trpc-agent-go"
 required_version="v1.11.2"
+required_a2a_module="trpc.group/trpc-go/trpc-a2a-go"
+required_a2a_version="v0.2.6-0.20260721084546-18c8244d0acb"
 required_feishu_module="github.com/larksuite/oapi-sdk-go/v3"
 required_feishu_version="v3.10.0"
 required_aws_module="github.com/aws/aws-sdk-go-v2"
@@ -32,6 +34,7 @@ if [[ "$actual_feishu_version" != "$required_feishu_version" ]]; then
 fi
 
 for baseline in \
+  "$required_a2a_module $required_a2a_version" \
   "$required_aws_module $required_aws_version" \
   "$required_aws_config_module $required_aws_config_version" \
   "$required_aws_credentials_module $required_aws_credentials_version" \

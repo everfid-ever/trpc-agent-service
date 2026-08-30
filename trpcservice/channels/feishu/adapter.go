@@ -109,7 +109,8 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 		return channel.DeliveryResult{}, runtime.ErrVersionMismatch
 	}
 	destination := channel.ReplyDestination{TenantID: request.Event.TenantID, Channel: request.Target.Channel,
-		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID}
+		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID,
+		ConfigVersion: request.Event.ConfigVersion}
 	messageID, err := a.Sender.ReplyText(ctx, destination, request.Target.ExternalMessageID, string(request.Content), request.ClientRequestID)
 	if err != nil {
 		return channel.DeliveryResult{}, err
@@ -140,9 +141,10 @@ type ClientProvider interface {
 }
 
 type cachedClient struct {
-	appID   string
-	version int64
-	client  *lark.Client
+	appID         string
+	configVersion int64
+	secretVersion int64
+	client        *lark.Client
 }
 
 // ClientCache keeps one SDK client per binding and credential generation.
@@ -156,7 +158,7 @@ type ClientCache struct {
 }
 
 func (c *ClientCache) ResolveFeishuClient(ctx context.Context, destination channel.ReplyDestination) (*lark.Client, error) {
-	if c == nil || c.Credentials == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" {
+	if c == nil || c.Credentials == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" || destination.ConfigVersion < 1 {
 		return nil, runtime.ErrInvariantViolation
 	}
 	credentials, err := c.Credentials.ResolveFeishuSendCredentials(ctx, destination)
@@ -170,10 +172,8 @@ func (c *ClientCache) ResolveFeishuClient(ctx context.Context, destination chann
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if existing, ok := c.clients[key]; ok {
-		if existing.version > credentials.Version || (existing.version == credentials.Version && existing.appID != credentials.AppID) {
-			return nil, runtime.ErrVersionMismatch
-		}
-		if existing.version == credentials.Version && existing.client != nil {
+		if existing.configVersion == destination.ConfigVersion && existing.secretVersion == credentials.Version &&
+			existing.appID == credentials.AppID && existing.client != nil {
 			return existing.client, nil
 		}
 	}
@@ -188,7 +188,8 @@ func (c *ClientCache) ResolveFeishuClient(ctx context.Context, destination chann
 	if c.clients == nil {
 		c.clients = make(map[string]cachedClient)
 	}
-	c.clients[key] = cachedClient{appID: credentials.AppID, version: credentials.Version, client: client}
+	c.clients[key] = cachedClient{appID: credentials.AppID, configVersion: destination.ConfigVersion,
+		secretVersion: credentials.Version, client: client}
 	return client, nil
 }
 

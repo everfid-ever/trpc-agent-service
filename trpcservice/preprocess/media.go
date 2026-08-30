@@ -45,6 +45,7 @@ type InputDLPScanner interface {
 
 type MediaStageRequest struct {
 	TenantID, RequestID, Channel, ChannelBindingID, ExternalAccountID string
+	ConfigVersion                                                     int64
 	Ordinal                                                           int
 	Media                                                             channel.MediaRef
 }
@@ -78,7 +79,7 @@ func (s MediaStager) Stage(ctx context.Context, request MediaStageRequest) (Stag
 	}
 	download, err := s.Fetcher.Fetch(ctx, MediaFetchRequest{TenantID: request.TenantID, RequestID: request.RequestID,
 		Channel: request.Channel, ChannelBindingID: request.ChannelBindingID, ExternalAccountID: request.ExternalAccountID,
-		Ordinal: request.Ordinal, Media: request.Media})
+		ConfigVersion: request.ConfigVersion, Ordinal: request.Ordinal, Media: request.Media})
 	if err != nil {
 		return StagedMedia{}, err
 	}

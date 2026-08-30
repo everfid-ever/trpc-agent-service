@@ -26,7 +26,7 @@ func TestOfficialMediaFetcherRefreshesProviderTokenAndRedactsResolvedURL(t *test
 		return wecomMediaResponse(http.StatusOK, "application/pdf", "%PDF-1.4\n"), nil
 	})
 	download, err := (wecom.OfficialMediaFetcher{Tokens: tokens, Client: client}).Fetch(context.Background(), preprocess.MediaFetchRequest{
-		TenantID: "tenant", RequestID: "request", Channel: "wecom", ChannelBindingID: "binding", ExternalAccountID: "corp",
+		TenantID: "tenant", RequestID: "request", Channel: "wecom", ChannelBindingID: "binding", ExternalAccountID: "corp", ConfigVersion: 1,
 		Media: channel.MediaRef{ID: "media-id", MessageID: "message-1", Kind: "file"}})
 	if err != nil {
 		t.Fatal(err)

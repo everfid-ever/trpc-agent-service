@@ -4,6 +4,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -51,10 +52,12 @@ func (w DeterministicTestExecutor) ExecuteWithLease(ctx context.Context, envelop
 		trusted.UserID != envelope.UserID || trusted.Channel != envelope.Channel {
 		return runtime.ErrTenantScope
 	}
-	if trusted != envelope {
+	trustedCreatedAt, deliveredCreatedAt := trusted.CreatedAt, envelope.CreatedAt
+	trusted.CreatedAt, envelope.CreatedAt = time.Time{}, time.Time{}
+	if trusted != envelope || !trustedCreatedAt.Equal(deliveredCreatedAt) {
 		return runtime.ErrVersionMismatch
 	}
-	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
+	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion, AgentAppID: envelope.AgentAppID, AgentAppVersion: envelope.AgentAppVersion, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
 	snapshot, err := w.Profiles.Resolve(ctx, key)
 	if err != nil {
 		return err

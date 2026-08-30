@@ -47,6 +47,10 @@ func TestRunHandlerUsesAuthorizedRouteAndStableIdempotency(t *testing.T) {
 	if err != nil || status.Envelope.UserID != "principal-user" || status.Envelope.SessionID != "canonical-session" || status.Envelope.TraceParent != "first-trace" {
 		t.Fatalf("status=%#v err=%v", status, err)
 	}
+	payload, err := fixture.payloads.GetPayload(context.Background(), "tenant-a", firstHandle.RequestID)
+	if err != nil || payload.KeyVersion != 7 {
+		t.Fatalf("payload key version=%d err=%v", payload.KeyVersion, err)
+	}
 
 	collision := createRun(t, handler, "same-key", `{"agent_app_id":"app","text":"different"}`)
 	if collision.Code != http.StatusConflict {
@@ -79,7 +83,7 @@ func TestGatewayRunnerBridgeRequiresTrustedContextAndReplaysTerminalEvents(t *te
 		t.Fatal("bridge accepted missing trusted context")
 	}
 	trusted := gateway.ServerInvocationContext{Tenant: fixture.route.Tenant, PrincipalID: "principal-a",
-		UserID: fixture.route.UserID, SessionID: fixture.route.SessionID, Protocol: "openai", IdempotencyKey: "openai-key"}
+		UserID: fixture.route.UserID, SessionID: fixture.route.SessionID, Protocol: "openai", IdempotencyKey: "openai-key", CanRun: true}
 	ctx := gateway.WithServerInvocationContext(context.Background(), trusted)
 	if _, err := bridge.Run(ctx, "spoofed", trusted.SessionID, model.NewUserMessage("hello")); err == nil {
 		t.Fatal("bridge accepted spoofed user")
@@ -121,7 +125,7 @@ func TestGatewayRunnerBridgeDisconnectDoesNotCancelDurableExecution(t *testing.T
 	bridge.PollInterval = time.Millisecond
 	ctx, cancel := context.WithCancel(gateway.WithServerInvocationContext(context.Background(), gateway.ServerInvocationContext{
 		Tenant: fixture.route.Tenant, PrincipalID: "principal-a", UserID: fixture.route.UserID,
-		SessionID: fixture.route.SessionID, Protocol: "a2a", IdempotencyKey: "disconnect-key",
+		SessionID: fixture.route.SessionID, Protocol: "a2a", IdempotencyKey: "disconnect-key", CanRun: true,
 	}))
 	events, err := bridge.Run(ctx, fixture.route.UserID, fixture.route.SessionID, model.NewUserMessage("hello"))
 	if err != nil {
@@ -157,7 +161,7 @@ func TestProtocolInvocationMiddlewareFailsClosedAndInjectsTrustedContext(t *test
 	}
 	fixture := newRunFixture()
 	trusted := gateway.ServerInvocationContext{Tenant: fixture.route.Tenant, PrincipalID: "principal-a",
-		UserID: fixture.route.UserID, SessionID: fixture.route.SessionID, Protocol: "openai", IdempotencyKey: "key"}
+		UserID: fixture.route.UserID, SessionID: fixture.route.SessionID, Protocol: "openai", IdempotencyKey: "key", CanRun: true}
 	response = httptest.NewRecorder()
 	gateway.ProtocolInvocationMiddleware{Resolver: staticInvocationResolver{trusted: trusted}, Next: next}.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || observed.IdempotencyKey != "key" || observed.Tenant.TenantID != "tenant-a" {
@@ -168,6 +172,7 @@ func TestProtocolInvocationMiddlewareFailsClosedAndInjectsTrustedContext(t *test
 type runFixture struct {
 	submitter gateway.RunSubmitter
 	tasks     *gatewaymemory.TaskStore
+	payloads  *messagingmemory.Store
 	route     gateway.RunRoute
 }
 
@@ -179,8 +184,8 @@ func newRunFixture() runFixture {
 		AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1})
 	tc := tenant.Context{TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", SubjectID: "principal-a",
 		Channel: "gateway", TrustedSource: "test-route"}
-	return runFixture{submitter: gateway.RunSubmitter{Inbox: storage, Payloads: storage,
-		Dispatcher: gateway.BrokerDispatcher{Tasks: tasks, Bindings: bindings}}, tasks: tasks,
+	return runFixture{submitter: gateway.RunSubmitter{Inbox: storage, Payloads: storage, PayloadKeyVersion: 7,
+		Dispatcher: gateway.BrokerDispatcher{Tasks: tasks, Bindings: bindings}}, tasks: tasks, payloads: storage,
 		route: gateway.RunRoute{Tenant: tc, UserID: "principal-user", SessionID: "canonical-session"}}
 }
 

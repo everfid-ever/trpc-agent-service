@@ -33,12 +33,12 @@ type HTTPClient interface {
 
 func (f OfficialMediaFetcher) Fetch(ctx context.Context, request preprocess.MediaFetchRequest) (preprocess.MediaDownload, error) {
 	if f.Tokens == nil || request.Channel != "feishu" || request.TenantID == "" || request.ChannelBindingID == "" ||
-		request.ExternalAccountID == "" || request.Media.ID == "" || request.Media.MessageID == "" ||
+		request.ExternalAccountID == "" || request.ConfigVersion < 1 || request.Media.ID == "" || request.Media.MessageID == "" ||
 		(request.Media.Kind != "image" && request.Media.Kind != "file") {
 		return preprocess.MediaDownload{}, runtime.ErrInvalidEnvelope
 	}
 	destination := channel.ReplyDestination{TenantID: request.TenantID, Channel: "feishu",
-		ChannelBindingID: request.ChannelBindingID, ExternalAccountID: request.ExternalAccountID}
+		ChannelBindingID: request.ChannelBindingID, ExternalAccountID: request.ExternalAccountID, ConfigVersion: request.ConfigVersion}
 	for attempt := 0; attempt < 2; attempt++ {
 		token, err := f.Tokens.ResolveFeishuMediaAccessToken(ctx, destination, attempt == 1)
 		if err != nil {

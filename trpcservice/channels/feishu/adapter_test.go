@@ -76,7 +76,7 @@ func TestEncryptedCallbackRunsThroughCommonDurablePipeline(t *testing.T) {
 		t.Fatalf("accepted=%#v err=%v", accepted, err)
 	}
 	stored, err := payloads.GetPayload(context.Background(), "tenant", accepted[0].RequestID)
-	if err != nil || string(stored.Content) != `{"external_message_id":"om_message","external_user_id":"ou_user","external_chat_id":"oc_chat","text":"hello"}` {
+	if err != nil || string(stored.Content) != `{"external_message_id":"om_message","external_user_id":"ou_user","external_chat_id":"oc_chat","config_version":1,"text":"hello"}` {
 		t.Fatalf("payload=%s err=%v", stored.Content, err)
 	}
 }
@@ -86,7 +86,7 @@ func TestDeliverUsesStableUUIDAndClassifiedSender(t *testing.T) {
 	adapter := &feishu.Adapter{Sender: sender}
 	content := []byte("reply")
 	sum := sha256.Sum256(content)
-	request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding"},
+	request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding", ConfigVersion: 1},
 		ClientRequestID: "stable-uuid", Target: channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: "cli_app", ExternalMessageID: "om_source"},
 		Content: content, ContentDigest: hex.EncodeToString(sum[:])}
 	result, err := adapter.Deliver(context.Background(), request)
@@ -108,7 +108,7 @@ func TestAdapterDeliveryContract(t *testing.T) {
 			ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}
 		target := channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: "cli_app", ExternalMessageID: "om_source"}
 		event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding",
-			DeliveryKey: "reply-feishu", ContentRef: result.ResultRef, Target: target, Final: true}
+			DeliveryKey: "reply-feishu", ConfigVersion: 1, ContentRef: result.ResultRef, Target: target, Final: true}
 		return contracttest.DeliveryHarness{Adapter: &feishu.Adapter{Sender: sender}, Event: event, Result: result, Observe: func() contracttest.DeliveryObservation {
 			return contracttest.DeliveryObservation{Calls: sender.calls, ClientRequestID: sender.uuid, Content: []byte(sender.text),
 				Target: channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: sender.destination.ExternalAccountID, ExternalMessageID: sender.replyMessageID}}
@@ -157,7 +157,7 @@ func TestOfficialSenderUsesReplyUUIDAndClassifiesHTTPResults(t *testing.T) {
 				return lark.NewClient(appID, secret, lark.WithOpenBaseUrl("https://unit.test"), lark.WithOAuthBaseUrl("https://unit.test"), lark.WithHttpClient(httpClient))
 			}}
 			sender := feishu.OfficialSender{Clients: clients}
-			messageID, err := sender.ReplyText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "cli_app"}, "om_source", "hello", "stable-uuid")
+			messageID, err := sender.ReplyText(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "cli_app", ConfigVersion: 1}, "om_source", "hello", "stable-uuid")
 			if test.checkErr != nil {
 				if !test.checkErr(err) {
 					t.Fatalf("message=%q err=%T %v", messageID, err, err)
@@ -196,7 +196,7 @@ func TestClientCacheReusesSDKClientAndTenantToken(t *testing.T) {
 		return lark.NewClient(appID, secret, lark.WithOpenBaseUrl("https://unit.test"), lark.WithOAuthBaseUrl("https://unit.test"), lark.WithHttpClient(httpClient))
 	}}
 	sender := feishu.OfficialSender{Clients: clients}
-	destination := channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "cli_cache_test"}
+	destination := channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "cli_cache_test", ConfigVersion: 1}
 	for index := 1; index <= 2; index++ {
 		messageID, err := sender.ReplyText(context.Background(), destination, "om_source", "hello", fmt.Sprintf("stable-uuid-%d", index))
 		if err != nil || messageID != fmt.Sprintf("om_reply_%d", index) {

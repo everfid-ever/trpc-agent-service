@@ -38,7 +38,7 @@ type Pipeline struct {
 }
 
 func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) ([]AcceptedEvent, error) {
-	if p.Verification == nil || p.Identity == nil || p.Intake == nil || p.Payloads == nil {
+	if p.Verification == nil || p.Identity == nil || p.Intake == nil || p.Payloads == nil || p.KeyVersion < 1 {
 		return nil, runtime.ErrInvariantViolation
 	}
 	verified, err := p.Verification.VerifyAndDecode(ctx, request)
@@ -46,9 +46,6 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 		return nil, err
 	}
 	keyVersion := p.KeyVersion
-	if keyVersion < 1 {
-		keyVersion = 1
-	}
 	accepted := make([]AcceptedEvent, 0, len(verified.Events))
 	for _, event := range verified.Events {
 		if event.Channel != verified.Binding.Channel || event.ExternalAccountID != verified.Binding.ExternalAccountID ||
@@ -70,7 +67,8 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 		normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
 			ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
 			ChannelBindingID: bindingID, ExternalAccountID: accountID,
-			MessageType: messageType, Text: event.Text, MediaRefs: event.MediaRefs})
+			ConfigVersion: verified.Binding.BindingVersion,
+			MessageType:   messageType, Text: event.Text, MediaRefs: event.MediaRefs})
 		if err != nil {
 			return nil, err
 		}

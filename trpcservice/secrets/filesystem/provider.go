@@ -117,6 +117,26 @@ func (p *Provider) Probe(ctx context.Context, scope secrets.Scope, ref secrets.S
 	return err
 }
 
+// ProbeRoot verifies that the projected SecretProvider root is still a
+// readable, private directory. Individual scoped files remain lazy and are
+// checked on every Resolve; this probe only covers the process-wide mount.
+func (p *Provider) ProbeRoot(ctx context.Context) error {
+	if p == nil || p.root == "" {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Stat(p.root)
+	if err != nil {
+		return runtime.ErrBackendUnavailable
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	return nil
+}
+
 func encodeVersion(value int64) string {
 	var bytes [8]byte
 	binary.BigEndian.PutUint64(bytes[:], uint64(value))

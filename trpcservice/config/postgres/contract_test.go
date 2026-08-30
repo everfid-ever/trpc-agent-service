@@ -12,7 +12,11 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
+	deliverypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
 )
@@ -52,11 +56,36 @@ func TestConfigPublishCASRollbackAndImmutabilityPostgreSQL16(t *testing.T) {
 	}
 	repository := New(db, tenantRepository)
 	payload := func(policy int64) config.ConfigV1 {
-		return config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: policy}
+		return config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: appID, PolicyVersion: policy, ChannelBindings: []config.ChannelBinding{{
+			BindingID: "feishu-main", Channel: "feishu", ExternalAccountID: "cli_contract", AgentAppID: appID,
+			SecretRef: secrets.SecretRef{Ref: "verify", Version: 1}, SendSecretRef: secrets.SecretRef{Ref: "send", Version: 2},
+		}}}
 	}
 	first, err := repository.Publish(ctx, config.PublishInput{TenantID: tenantID, ExpectedTenantVersion: created.Version, Payload: payload(1), Metadata: metadata})
 	if err != nil {
 		t.Fatal(err)
+	}
+	var sendRef string
+	var sendVersion int64
+	if err := db.QueryRowContext(ctx, `SELECT send_secret_ref,send_secret_version FROM channel_binding
+WHERE tenant_id=$1 AND config_version=$2 AND binding_id='feishu-main'`, tenantID, first.Snapshot.ConfigVersion).Scan(&sendRef, &sendVersion); err != nil || sendRef != "send" || sendVersion != 2 {
+		t.Fatalf("send credential ref=%q version=%d err=%v", sendRef, sendVersion, err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO channel_binding(tenant_id,config_version,binding_id,channel,external_account_id,agent_app_id,secret_ref,secret_version,send_secret_ref,send_secret_version)
+VALUES($1,$2,'bypass','wecom','corp-bypass',$3,'verify',1,'forged',1)`, tenantID, first.Snapshot.ConfigVersion, appID); sqlState(err) != "23514" {
+		t.Fatalf("direct send credential bypass err=%v state=%s", err, sqlState(err))
+	}
+	deliveryCatalog, err := deliverypostgres.New(db, &feishu.Adapter{}, &wecom.Adapter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations, err := deliveryCatalog.ListDeliveryDestinations(ctx)
+	if err != nil || len(destinations) != 1 || destinations[0].TenantID != tenantID || destinations[0].ChannelBindingID != "feishu-main" || destinations[0].ConfigVersion != 0 {
+		t.Fatalf("delivery destinations=%#v err=%v", destinations, err)
+	}
+	adapter, err := deliveryCatalog.ResolveVersionedAdapter(ctx, tenantID, "feishu-main", first.Snapshot.ConfigVersion)
+	if err != nil || adapter.ID() != "feishu" {
+		t.Fatalf("delivery adapter=%T err=%v", adapter, err)
 	}
 	results := make(chan error, 2)
 	var wait sync.WaitGroup

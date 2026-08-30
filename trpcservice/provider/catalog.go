@@ -68,6 +68,22 @@ type schemaKey struct {
 	Version uint16
 }
 
+// DeepSeekModelSchema is the production schema for DeepSeek's official
+// OpenAI-compatible endpoint. Provider additions remain code-reviewed catalog
+// entries rather than runtime configuration.
+func DeepSeekModelSchema() Schema {
+	return Schema{
+		Kind: KindModel, Name: "deepseek", SchemaVersion: 1,
+		AllowedModels:   []string{"deepseek-v4-flash", "deepseek-v4-pro"},
+		EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.deepseek.com"},
+		OptionRules: map[string]OptionRule{
+			"timeout_ms":          {Type: OptionInteger, Default: "60000", Min: 100, Max: 600000},
+			"channel_buffer_size": {Type: OptionInteger, Default: "256", Min: 1, Max: 4096},
+		},
+		SecretRequirement: "required",
+	}
+}
+
 func NewCatalog(schemas ...Schema) (*Catalog, error) {
 	catalog := &Catalog{schemas: make(map[schemaKey]Schema, len(schemas))}
 	for _, schema := range schemas {

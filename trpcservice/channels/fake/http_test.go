@@ -27,7 +27,7 @@ func TestTwoTenantHTTPVerticalSlice(t *testing.T) {
 	for _, id := range []string{"tenant-a", "tenant-b"} {
 		b := tenant.ExecutionBinding{AgentAppVersion: 1, AgentAppRevision: 1, AgentContentDigest: "digest-" + id, ConfigVersion: 1, PolicyVersion: 1}
 		bindings.Put(id, "app", b)
-		key := profile.ExecutionProfileKey{TenantID: id, AgentAppID: "app", AgentAppRevision: 1, ContentDigest: b.AgentContentDigest, ConfigVersion: 1, PolicyVersion: 1}
+		key := profile.ExecutionProfileKey{TenantID: id, TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1, AgentAppRevision: 1, ContentDigest: b.AgentContentDigest, ConfigVersion: 1, PolicyVersion: 1}
 		snapshots = append(snapshots, profile.ExecutionProfileSnapshot{Key: key, TenantVersion: 1, AgentAppVersion: 1, ContentDigest: b.AgentContentDigest, AgentKind: "llm", Instruction: "help", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1}})
 	}
 	profiles := profilememory.NewResolver(snapshots...)

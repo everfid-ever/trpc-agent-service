@@ -54,12 +54,13 @@ func (r ReplyRelay) publish(ctx context.Context, record messaging.OutboxRecord) 
 	if err != nil {
 		return err
 	}
-	if route.TenantID != record.TenantID || route.RequestID != record.AggregateID || route.ChannelBindingID == "" || route.ExternalAccountID == "" {
+	if route.TenantID != record.TenantID || route.RequestID != record.AggregateID || route.ChannelBindingID == "" || route.ExternalAccountID == "" || route.ConfigVersion < 1 {
 		return runtime.ErrTenantScope
 	}
-	destination := channel.ReplyDestination{TenantID: route.TenantID, Channel: route.Channel, ChannelBindingID: route.ChannelBindingID, ExternalAccountID: route.ExternalAccountID}
+	destination := channel.ReplyDestination{TenantID: route.TenantID, Channel: route.Channel, ChannelBindingID: route.ChannelBindingID,
+		ExternalAccountID: route.ExternalAccountID, ConfigVersion: route.ConfigVersion}
 	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: record.TenantID, RequestID: record.AggregateID,
-		ChannelBindingID: route.ChannelBindingID, DeliveryKey: record.IdempotencyKey,
+		ChannelBindingID: route.ChannelBindingID, DeliveryKey: record.IdempotencyKey, ConfigVersion: route.ConfigVersion,
 		EventSeq: record.EventSeq, Kind: "message.completed", ContentRef: result.ResultRef,
 		Target: channel.DeliveryTarget{Channel: route.Channel, ExternalAccountID: route.ExternalAccountID,
 			ExternalMessageID: route.ExternalMessageID, ExternalChatID: route.ExternalChatID, ExternalUserID: route.ExternalUserID},

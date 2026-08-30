@@ -137,6 +137,7 @@ type ChannelEvent struct {
 type ReplyEvent struct {
 	SchemaVersion                                      uint16
 	TenantID, RequestID, ChannelBindingID, DeliveryKey string
+	ConfigVersion                                      int64
 	EventSeq                                           uint64
 	Kind, ContentRef                                   string
 	Target                                             DeliveryTarget
@@ -145,6 +146,7 @@ type ReplyEvent struct {
 }
 type ReplyDestination struct {
 	TenantID, Channel, ChannelBindingID, ExternalAccountID string
+	ConfigVersion                                          int64
 }
 type ReplyPublisher interface {
 	PublishReply(context.Context, ReplyDestination, ReplyEvent) error

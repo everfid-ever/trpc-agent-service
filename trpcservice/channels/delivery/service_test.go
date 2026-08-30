@@ -65,9 +65,25 @@ func (s resolverStub) ResolveAdapter(context.Context, string, string) (channel.A
 	return s.adapter, nil
 }
 
+type versionedResolverStub struct {
+	adapter channel.Adapter
+	version int64
+}
+
+func (s *versionedResolverStub) ResolveAdapter(context.Context, string, string) (channel.Adapter, error) {
+	return nil, errors.New("unversioned resolver used")
+}
+func (s *versionedResolverStub) ResolveVersionedAdapter(_ context.Context, tenantID, bindingID string, version int64) (channel.Adapter, error) {
+	if tenantID != "tenant" || bindingID != "binding" {
+		return nil, runtime.ErrTenantScope
+	}
+	s.version = version
+	return s.adapter, nil
+}
+
 func testReplyEvent(contentRef string) channel.ReplyEvent {
 	return channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply",
-		ContentRef: contentRef, Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
+		ConfigVersion: 1, ContentRef: contentRef, Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
 }
 
 func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
@@ -93,6 +109,25 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	}
 	if len(adapter.requests) != 1 || string(adapter.requests[0].Content) != "done" || adapter.requests[0].ContentDigest != "digest" || adapter.requests[0].Target != testReplyEvent(result.ResultRef).Target {
 		t.Fatalf("delivery request=%#v", adapter.requests)
+	}
+}
+
+func TestDeliveryUsesFrozenConfigVersionForAdapterResolution(t *testing.T) {
+	store := memory.New()
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	if err := store.PutResult(context.Background(), result); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &adapterStub{}
+	resolver := &versionedResolverStub{adapter: adapter}
+	service := Service{Results: store, Ledger: store, Adapters: resolver, Owner: "adapter-1"}
+	event := testReplyEvent(result.ResultRef)
+	event.ConfigVersion = 17
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if resolver.version != 17 || adapter.calls != 1 {
+		t.Fatalf("version=%d calls=%d", resolver.version, adapter.calls)
 	}
 }
 

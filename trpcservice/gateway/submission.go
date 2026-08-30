@@ -33,13 +33,14 @@ type normalizedRunInput struct {
 // RunSubmitter persists the stable Inbox identity and normalized payload
 // before asking the shared dispatcher to prepare execution.
 type RunSubmitter struct {
-	Inbox      messaging.InboxClaimer
-	Payloads   messaging.PayloadStore
-	Dispatcher Dispatcher
+	Inbox             messaging.InboxClaimer
+	Payloads          messaging.PayloadStore
+	Dispatcher        Dispatcher
+	PayloadKeyVersion int64
 }
 
 func (s RunSubmitter) Submit(ctx context.Context, in RunSubmission) (ExecutionHandle, error) {
-	if s.Inbox == nil || s.Payloads == nil || s.Dispatcher == nil {
+	if s.Inbox == nil || s.Payloads == nil || s.Dispatcher == nil || s.PayloadKeyVersion < 1 {
 		return ExecutionHandle{}, runtime.ErrCapabilityUnsupported
 	}
 	if err := in.Tenant.Validate(); err != nil {
@@ -56,17 +57,18 @@ func (s RunSubmitter) Submit(ctx context.Context, in RunSubmission) (ExecutionHa
 	}
 	digest := sha256.Sum256(payload)
 	digestHex := hex.EncodeToString(digest[:])
+	keyVersion := s.PayloadKeyVersion
 	key := messaging.InboxKey{TenantID: in.Tenant.TenantID, Channel: in.Tenant.Channel,
 		ExternalAccountID: in.Tenant.AgentAppID, ExternalMessageID: in.IdempotencyKey}
 	claimed, err := s.Inbox.ClaimInbox(ctx, messaging.ClaimInboxRequest{InboxKey: key,
 		AgentAppID: in.Tenant.AgentAppID, SessionID: in.SessionID, ExternalUserID: in.UserID,
-		PayloadDigest: digestHex, KeyVersion: 1, InitialState: messaging.InboxDispatchPending})
+		PayloadDigest: digestHex, KeyVersion: keyVersion, InitialState: messaging.InboxDispatchPending})
 	if err != nil {
 		return ExecutionHandle{}, err
 	}
 	if err := s.Payloads.PutPayload(ctx, messaging.PayloadRecord{TenantID: in.Tenant.TenantID,
 		RequestID: claimed.RequestID, PayloadRef: claimed.PayloadRef, ContentDigest: digestHex,
-		Content: payload, KeyVersion: 1}); err != nil {
+		Content: payload, KeyVersion: keyVersion}); err != nil {
 		return ExecutionHandle{}, err
 	}
 	return s.Dispatcher.Dispatch(ctx, DispatchRequest{Tenant: in.Tenant, RequestID: claimed.RequestID,

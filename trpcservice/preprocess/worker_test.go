@@ -31,7 +31,7 @@ func TestWorkerDoesNotDispatchOpaqueProviderMediaReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	content, _ := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: "media-message", ExternalUserID: "external-user",
-		ChannelBindingID: "binding", ExternalAccountID: "account", MessageType: "image",
+		ChannelBindingID: "binding", ExternalAccountID: "account", ConfigVersion: 1, MessageType: "image",
 		MediaRefs: []channel.MediaRef{{ID: "provider-image-key", MessageID: "provider-message", Kind: "image"}}})
 	sum := sha256.Sum256(content)
 	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: inbox.TenantID, RequestID: inbox.RequestID,
@@ -63,11 +63,11 @@ func TestWorkerStagesMediaAndDispatchesPreparedPayload(t *testing.T) {
 	}
 	contentBytes := []byte("\x89PNG\r\n\x1a\n")
 	content, _ := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: "media-ready", ExternalUserID: "external-user",
-		ChannelBindingID: "binding", ExternalAccountID: "account", MessageType: "image",
+		ChannelBindingID: "binding", ExternalAccountID: "account", ConfigVersion: 1, MessageType: "image",
 		MediaRefs: []channel.MediaRef{{ID: "provider-image-key", MessageID: "provider-message", Kind: "image", ContentType: "image/png", Size: int64(len(contentBytes))}}})
 	sum := sha256.Sum256(content)
 	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: inbox.TenantID, RequestID: inbox.RequestID,
-		PayloadRef: inbox.PayloadRef, ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 1}); err != nil {
+		PayloadRef: inbox.PayloadRef, ContentDigest: hex.EncodeToString(sum[:]), Content: content, KeyVersion: 7}); err != nil {
 		t.Fatal(err)
 	}
 	dispatcher := &recordingDispatcher{}
@@ -81,8 +81,8 @@ func TestWorkerStagesMediaAndDispatchesPreparedPayload(t *testing.T) {
 		t.Fatalf("dispatch payload ref=%q raw=%q", dispatcher.requests[0].PayloadRef, inbox.PayloadRef)
 	}
 	prepared, err := payloads.GetPreparedPayload(context.Background(), inbox.TenantID, inbox.RequestID, dispatcher.requests[0].PayloadRef)
-	if err != nil || bytes.Contains(prepared.Content, []byte("provider-image-key")) || !bytes.Contains(prepared.Content, []byte("artifact://")) {
-		t.Fatalf("prepared=%#v err=%v", prepared, err)
+	if err != nil || prepared.KeyVersion != 7 || bytes.Contains(prepared.Content, []byte("provider-image-key")) || !bytes.Contains(prepared.Content, []byte("artifact://")) {
+		t.Fatalf("prepared key version=%d content_len=%d err=%v", prepared.KeyVersion, len(prepared.Content), err)
 	}
 }
 

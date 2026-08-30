@@ -21,7 +21,11 @@ var (
 type Principal struct {
 	Authenticated bool
 	TenantID      string
+	TenantVersion int64
 	SubjectID     string
+	UserID        string
+	AgentAppID    string
+	SessionID     string
 	CanRead       bool
 	CanCancel     bool
 	CanRun        bool

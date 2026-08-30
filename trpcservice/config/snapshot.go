@@ -21,6 +21,13 @@ type ChannelBinding struct {
 	ExternalAccountID string            `json:"external_account_id"`
 	AgentAppID        string            `json:"agent_app_id"`
 	SecretRef         secrets.SecretRef `json:"secret_ref"`
+	SendSecretRef     secrets.SecretRef `json:"send_secret_ref,omitempty"`
+}
+
+func RequiresSendSecret(channel string) bool { return channel == "feishu" || channel == "wecom" }
+
+func ValidSendSecret(binding ChannelBinding) bool {
+	return !RequiresSendSecret(binding.Channel) || (binding.SendSecretRef.Ref != "" && binding.SendSecretRef.Version >= 1)
 }
 
 type BackendBinding struct {

@@ -1,0 +1,118 @@
+name: trpc-agent-m2
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${M2_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${M2_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${M2_POSTGRES_DB:-trpc_agent_service_test}
+    ports:
+      - "${M2_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - m2-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "${M2_REDIS_PORT:-56379}:6379"
+    volumes:
+      - m2-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    profiles: ["gateway-worker"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${M2_MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${M2_MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${M2_MINIO_PORT:-59000}:9000"
+      - "${M2_MINIO_CONSOLE_PORT:-59001}:9001"
+    volumes:
+      - m2-minio:/data
+
+  runtime-test:
+    image: golang:1.25-bookworm
+    profiles: ["runtime-test"]
+    working_dir: /src
+    volumes:
+      - ../..:/src:ro
+    environment:
+      TRPC_MIGRATION_TEST: "1"
+      TRPC_RUNTIME_TEST: "1"
+      TRPC_POSTGRES_ADMIN_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_POSTGRES_TEST_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_TEST_ADDR: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["bash", "scripts/runtime_slice_test.sh"]
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["gateway"]
+    env_file:
+      - path: .env.m2
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    ports:
+      - "${M2_GATEWAY_PORT:-58080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["worker"]
+    env_file:
+      - path: .env.m2
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_PATH_STYLE: "true"
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+volumes:
+  m2-postgres:
+  m2-redis:
+  m2-minio:

@@ -115,7 +115,8 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 		return channel.DeliveryResult{}, runtime.ErrVersionMismatch
 	}
 	destination := channel.ReplyDestination{TenantID: request.Event.TenantID, Channel: request.Target.Channel,
-		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID}
+		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID,
+		ConfigVersion: request.Event.ConfigVersion}
 	messageID, err := a.Sender.SendText(ctx, destination, request.Target.ExternalUserID, string(request.Content), request.ClientRequestID)
 	if err != nil {
 		return channel.DeliveryResult{}, err
@@ -145,7 +146,7 @@ type OfficialSender struct {
 }
 
 func (s OfficialSender) SendText(ctx context.Context, destination channel.ReplyDestination, externalUserID, text, clientRequestID string) (string, error) {
-	if s.Tokens == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" ||
+	if s.Tokens == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" || destination.ConfigVersion < 1 ||
 		externalUserID == "" || text == "" || clientRequestID == "" {
 		return "", runtime.ErrInvariantViolation
 	}

@@ -14,6 +14,7 @@
 | [observability-audit-devops-design.md](5.observability-audit-devops-design.md) | trace、指标、审计、部署、灰度和故障恢复如何落地 |
 | [module-boundaries.md](6.module-boundaries.md) | A/B/C/D 内部模块边界、`trpc-agent-go` 公共 API 依赖和上游能力缺口 |
 | [implementation-roadmap.md](7.implementation-roadmap.md) | 实现顺序、2026-08-21 至 2026-09-11 排期、里程碑和交付门禁 |
+| [m2-scope-decisions.md](8.m2-scope-decisions.md) | M2 范围调整的原因、影响、替代验收、owner 与复查日期 |
 
 ## 推荐阅读顺序
 

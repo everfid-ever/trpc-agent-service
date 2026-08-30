@@ -83,13 +83,20 @@ func (f Factory) build(ctx context.Context, snapshot profile.ExecutionProfileSna
 		}
 		key := profile.ExecutionProfileKey{
 			TenantID:         snapshot.Key.TenantID,
+			TenantVersion:    snapshot.Key.TenantVersion,
 			AgentAppID:       node.AgentRef.AgentAppID,
 			AgentAppRevision: node.AgentRef.Revision,
 			ContentDigest:    node.AgentRef.ContentDigest,
 			ConfigVersion:    snapshot.Key.ConfigVersion,
 			PolicyVersion:    snapshot.Key.PolicyVersion,
 		}
-		child, err := f.Profiles.Resolve(ctx, key)
+		var child profile.ExecutionProfileSnapshot
+		var err error
+		if resolver, ok := f.Profiles.(profile.ChildExecutionProfileResolver); ok {
+			child, err = resolver.ResolveChild(ctx, snapshot, node)
+		} else {
+			child, err = f.Profiles.Resolve(ctx, key)
+		}
 		if err != nil {
 			return nil, err
 		}

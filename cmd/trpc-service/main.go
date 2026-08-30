@@ -23,6 +23,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/httpdlp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	objectstores3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
@@ -31,18 +32,45 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s\n", os.Args[0])
-		fmt.Fprintln(os.Stdout, "Runs the production dependency/readiness and Artifact lifecycle process.")
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker]\n", os.Args[0])
+		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
+	role := "artifact"
+	if len(os.Args) > 1 {
+		role = os.Args[1]
+	}
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
-	if err := run(context.Background(), os.Getenv, logger); err != nil {
+	if err := runRole(context.Background(), os.Getenv, logger, role); err != nil {
 		logger.Printf("trpc-agent-service stopped: %v", err)
 		os.Exit(1)
 	}
 }
 
 func run(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+	return runRole(parent, getenv, logger, "artifact")
+}
+
+func runRole(parent context.Context, getenv func(string) string, logger *log.Logger, role string) error {
+	switch role {
+	case "artifact":
+		return runArtifactRole(parent, getenv, logger)
+	case "preprocess":
+		return runPreprocessRole(parent, getenv, logger)
+	case "channel":
+		return runChannelRole(parent, getenv, logger)
+	case "channel-delivery":
+		return runChannelDeliveryRole(parent, getenv, logger)
+	case "gateway":
+		return runGatewayRole(parent, getenv, logger)
+	case "worker":
+		return runWorkerRole(parent, getenv, logger)
+	default:
+		return errors.New("unsupported service role")
+	}
+}
+
+func runArtifactRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}
@@ -81,6 +109,10 @@ func run(parent context.Context, getenv func(string) string, logger *log.Logger)
 	if err != nil {
 		return errors.New("DLP secret authorization configuration rejected")
 	}
+	payloadKeys, err := payloadkey.New(secretProvider, config.PayloadKeyRef)
+	if err != nil {
+		return errors.New("payload key configuration rejected")
+	}
 	dlpClient := &http.Client{}
 	dlp := httpdlp.Scanner{Endpoint: config.DLPEndpoint, Client: dlpClient, ProbeTenantID: config.DLPProbeTenant,
 		MaxBytes: int(config.S3MaxBytes), AllowInsecure: config.DLPAllowInsecure, Authorize: dlpAuthorize}
@@ -95,6 +127,11 @@ func run(parent context.Context, getenv func(string) string, logger *log.Logger)
 		{Name: "malware_scanner", Probe: malware.Probe},
 		{Name: "secret_provider", Probe: func(ctx context.Context) error {
 			return secretProvider.Probe(ctx, dlpSecretScope(config.DLPProbeTenant, config.DLPBackendVersion), dlpSecretRef)
+		}},
+		{Name: "payload_key_provider", Probe: func(ctx context.Context) error {
+			value, err := payloadKeys.ResolvePayloadKey(ctx, config.DLPProbeTenant, config.PayloadKeyVersion)
+			clear(value.Bytes)
+			return err
 		}},
 		{Name: "input_dlp", Probe: dlp.Probe},
 	}, config.ProbeTimeout, config.ProbeInterval)

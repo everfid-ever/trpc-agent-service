@@ -19,6 +19,7 @@ import (
 
 type MediaFetchRequest struct {
 	TenantID, RequestID, Channel, ChannelBindingID, ExternalAccountID string
+	ConfigVersion                                                     int64
 	Ordinal                                                           int
 	Media                                                             channel.MediaRef
 }

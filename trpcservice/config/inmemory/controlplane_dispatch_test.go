@@ -29,7 +29,7 @@ func TestPublishedControlPlaneDrivesLocalDispatcher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: published.Snapshot.ConfigVersion, PolicyVersion: published.Snapshot.Payload.PolicyVersion}
+	key := profile.ExecutionProfileKey{TenantID: "tenant-a", TenantVersion: published.Tenant.Version, AgentAppID: "app", AgentAppVersion: app.Version, AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: published.Snapshot.ConfigVersion, PolicyVersion: published.Snapshot.Payload.PolicyVersion}
 	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: key, TenantVersion: published.Tenant.Version, AgentAppVersion: app.Version, ContentDigest: revision.ContentDigest, AgentKind: "llm", Instruction: revision.Instruction, ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1}})
 	tasks := gatewaymemory.NewTaskStore()
 	sessions := sessionmemory.New()
@@ -99,7 +99,7 @@ func TestConfigPublishAndRollbackOnlyAffectNewRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldKey := profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: oldExecution.Envelope.ConfigVersion, PolicyVersion: oldExecution.Envelope.PolicyVersion}
+	oldKey := profile.ExecutionProfileKey{TenantID: "tenant-a", TenantVersion: oldExecution.Envelope.TenantVersion, AgentAppID: "app", AgentAppVersion: oldExecution.Envelope.AgentAppVersion, AgentAppRevision: revision.Revision, ContentDigest: revision.ContentDigest, ConfigVersion: oldExecution.Envelope.ConfigVersion, PolicyVersion: oldExecution.Envelope.PolicyVersion}
 	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: oldKey, TenantVersion: oldExecution.Envelope.TenantVersion, AgentAppVersion: oldExecution.Envelope.AgentAppVersion, ContentDigest: revision.ContentDigest})
 	model := mockmodel.New()
 	executor := worker.DeterministicTestExecutor{Tasks: tasks, Profiles: profiles, Sessions: sessionmemory.New(), Model: model}

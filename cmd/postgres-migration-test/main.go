@@ -153,7 +153,11 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	if _, err := db.ExecContext(ctx, probes); err != nil {
 		return fmt.Errorf("contract probes: %w", err)
 	}
-	command := exec.CommandContext(ctx, "go", "test", "-count=1", "./trpcservice/agentapp/postgres", "./trpcservice/config/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/tenant/postgres")
+	// These PostgreSQL contract packages intentionally use a shared disposable
+	// database and some fixtures truncate cross-domain tables. Run them
+	// serially; the default package parallelism otherwise creates test-order
+	// races that look like random foreign-key/version conflicts.
+	command := exec.CommandContext(ctx, "go", "test", "-p=1", "-count=1", "./trpcservice/agentapp/postgres", "./trpcservice/config/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/tenant/postgres")
 	command.Dir = repoRoot
 	command.Env = append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn)
 	output, err := command.CombinedOutput()

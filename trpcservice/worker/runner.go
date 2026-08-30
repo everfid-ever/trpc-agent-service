@@ -75,7 +75,8 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 
 	key := profile.ExecutionProfileKey{
-		TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID,
+		TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion,
+		AgentAppID: envelope.AgentAppID, AgentAppVersion: envelope.AgentAppVersion,
 		AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest,
 		ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion,
 	}
@@ -180,7 +181,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		return runtime.ErrCapabilityUnsupported
 	}
 	resultDigest := sha256.Sum256([]byte(content))
-	if err := resultStore.PutResult(ctx, messaging.ResultRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID, ResultRef: resultRef, ContentDigest: hex.EncodeToString(resultDigest[:]), Content: []byte(content), KeyVersion: 1}); err != nil {
+	if err := resultStore.PutResult(ctx, messaging.ResultRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID, ResultRef: resultRef, ContentDigest: hex.EncodeToString(resultDigest[:]), Content: []byte(content), KeyVersion: payload.KeyVersion}); err != nil {
 		return err
 	}
 	if beforeCommit != nil {
@@ -272,7 +273,13 @@ func verifyAuthoritativeEnvelope(trusted, delivered runtime.ExecutionEnvelope) e
 		trusted.UserID != delivered.UserID || trusted.Channel != delivered.Channel {
 		return runtime.ErrTenantScope
 	}
-	if trusted != delivered {
+	// time.Time is comparable as a Go struct, but its location/monotonic
+	// representation can differ after a PostgreSQL -> JSON -> Redis hop even
+	// when both values denote the same instant. Compare the envelope fields
+	// structurally and use time.Time.Equal for the timestamp instead.
+	trustedCreatedAt, deliveredCreatedAt := trusted.CreatedAt, delivered.CreatedAt
+	trusted.CreatedAt, delivered.CreatedAt = time.Time{}, time.Time{}
+	if trusted != delivered || !trustedCreatedAt.Equal(deliveredCreatedAt) {
 		return runtime.ErrVersionMismatch
 	}
 	return nil
@@ -451,6 +458,7 @@ func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.Execution
 		return model.Message{}, err
 	}
 	var value struct {
+		SchemaVersion     uint16                     `json:"schema_version,omitempty"`
 		ExternalMessageID string                     `json:"external_message_id,omitempty"`
 		ExternalUserID    string                     `json:"external_user_id,omitempty"`
 		ExternalChatID    string                     `json:"external_chat_id,omitempty"`
@@ -461,6 +469,9 @@ func (JSONTextInputDecoder) DecodeInput(ctx context.Context, _ runtime.Execution
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&value); err != nil {
+		return model.Message{}, runtime.ErrInvalidEnvelope
+	}
+	if value.SchemaVersion != 0 && value.SchemaVersion != 1 {
 		return model.Message{}, runtime.ErrInvalidEnvelope
 	}
 	var trailing any

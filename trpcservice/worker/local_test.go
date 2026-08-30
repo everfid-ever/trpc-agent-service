@@ -27,7 +27,7 @@ func TestWorkerRedeliveryAfterCommitDoesNotRepeatModelEffect(t *testing.T) {
 		RequestID: "request", SessionID: "session", UserID: "user", Channel: "fake", InputSeq: 1,
 		PayloadRef: "payload://request", CreatedAt: time.Now().UTC(),
 	}
-	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
+	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion, AgentAppID: envelope.AgentAppID, AgentAppVersion: envelope.AgentAppVersion, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
 	snapshot := profile.ExecutionProfileSnapshot{Key: key, TenantVersion: envelope.TenantVersion, AgentAppVersion: envelope.AgentAppVersion, ContentDigest: envelope.AgentContentDigest}
 	model := mockmodel.New()
 	executor := DeterministicTestExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profilememory.NewResolver(snapshot), Sessions: sessionmemory.New(), Model: model}

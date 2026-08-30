@@ -23,6 +23,7 @@ type NormalizedInput struct {
 	ExternalChatID    string             `json:"external_chat_id"`
 	ChannelBindingID  string             `json:"channel_binding_id,omitempty"`
 	ExternalAccountID string             `json:"external_account_id,omitempty"`
+	ConfigVersion     int64              `json:"config_version,omitempty"`
 	MessageType       string             `json:"message_type,omitempty"`
 	Text              string             `json:"text,omitempty"`
 	MediaRefs         []channel.MediaRef `json:"media_refs,omitempty"`
@@ -118,13 +119,13 @@ func (w Worker) preprocess(ctx context.Context, job Job) error {
 		return finishErr
 	}
 	if len(normalized.MediaRefs) > 0 {
-		return w.prepareMedia(ctx, job, payload.PayloadRef, normalized)
+		return w.prepareMedia(ctx, job, payload.PayloadRef, payload.KeyVersion, normalized)
 	}
 	_, err = w.Store.FinishReady(ctx, job)
 	return err
 }
 
-func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef string, normalized NormalizedInput) error {
+func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef string, sourceKeyVersion int64, normalized NormalizedInput) error {
 	preparedStore, ok := w.Payloads.(messaging.PreparedPayloadStore)
 	if !ok || w.Media == nil || w.ArtifactRetention < time.Second || w.ArtifactRetention%time.Second != 0 {
 		return w.retry(ctx, job, "media_prepared_payload_unavailable")
@@ -132,7 +133,8 @@ func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef stri
 	staged := make([]StagedMedia, 0, len(normalized.MediaRefs))
 	for ordinal, media := range normalized.MediaRefs {
 		value, err := w.Media.Stage(ctx, MediaStageRequest{TenantID: job.TenantID, RequestID: job.RequestID, Channel: job.Channel,
-			ChannelBindingID: normalized.ChannelBindingID, ExternalAccountID: normalized.ExternalAccountID, Ordinal: ordinal, Media: media})
+			ChannelBindingID: normalized.ChannelBindingID, ExternalAccountID: normalized.ExternalAccountID,
+			ConfigVersion: normalized.ConfigVersion, Ordinal: ordinal, Media: media})
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrMediaRejected), errors.Is(err, runtime.ErrInvalidEnvelope), errors.Is(err, runtime.ErrCapabilityUnsupported):
@@ -167,7 +169,7 @@ func (w Worker) prepareMedia(ctx context.Context, job Job, sourcePayloadRef stri
 	digest := sha256.Sum256(content)
 	if err := preparedStore.PutPreparedPayload(ctx, messaging.PreparedPayloadRecord{TenantID: job.TenantID, RequestID: job.RequestID,
 		PayloadRef: preparedRef, SourcePayloadRef: sourcePayloadRef, ContentDigest: hex.EncodeToString(digest[:]), Content: content,
-		KeyVersion: 1, ArtifactRetention: w.ArtifactRetention, ArtifactReferences: artifactReferences}); err != nil {
+		KeyVersion: sourceKeyVersion, ArtifactRetention: w.ArtifactRetention, ArtifactReferences: artifactReferences}); err != nil {
 		if errors.Is(err, runtime.ErrIdempotencyCollision) {
 			_, finishErr := w.Store.FinishRejected(ctx, job, "prepared_payload_collision")
 			return finishErr
@@ -212,7 +214,7 @@ func validNormalizedInput(value NormalizedInput) bool {
 		return strings.TrimSpace(value.Text) != "" && len(value.MediaRefs) == 0
 	case "image", "file":
 		return strings.TrimSpace(value.Text) == "" && value.ChannelBindingID != "" && value.ExternalAccountID != "" &&
-			len(value.MediaRefs) == 1 && value.MediaRefs[0].ID != "" &&
+			value.ConfigVersion >= 1 && len(value.MediaRefs) == 1 && value.MediaRefs[0].ID != "" &&
 			value.MediaRefs[0].Kind == messageType && value.MediaRefs[0].Size >= 0
 	default:
 		return false

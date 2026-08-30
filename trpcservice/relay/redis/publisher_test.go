@@ -25,7 +25,7 @@ func TestPublisherRedis7Contract(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
-	if err := publisher.PublishReply(context.Background(), destination, channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: "result://request", Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}); err != nil {
+	if err := publisher.PublishReply(context.Background(), destination, channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", ConfigVersion: 1, DeliveryKey: "r1_reply", ContentRef: "result://request", Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := publisher.PublishWakeup(context.Background(), relay.WakeupEvent{TenantID: "tenant", AggregateID: "request", IdempotencyKey: "wakeup:request", PayloadRef: "execution://tenant/request"}); err != nil {
@@ -137,7 +137,7 @@ func TestReplyQueueReclaimsAdapterCrashWithoutEarlyACK(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
-	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "r1_reply", ContentRef: "result://request", Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
+	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", ConfigVersion: 1, DeliveryKey: "r1_reply", ContentRef: "result://request", Target: channel.DeliveryTarget{Channel: "fake", ExternalAccountID: "account", ExternalMessageID: "message"}, Final: true}
 	if err := publisher.PublishReply(context.Background(), destination, event); err != nil {
 		t.Fatal(err)
 	}

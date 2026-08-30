@@ -2,6 +2,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -16,28 +17,32 @@ import (
 )
 
 type Store struct {
-	db                *sql.DB
-	payloadKey        []byte
-	payloadKeyVersion int64
+	db          *sql.DB
+	payloadKeys messaging.PayloadKeyResolver
 }
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
 
+// NewWithPayloadKey is retained for tests and single-key compatibility
+// fixtures. Production composition must use NewWithPayloadKeyResolver.
 func NewWithPayloadKey(db *sql.DB, key []byte, keyVersion int64) *Store {
-	return &Store{db: db, payloadKey: append([]byte(nil), key...), payloadKeyVersion: keyVersion}
+	return NewWithPayloadKeyResolver(db, staticPayloadKeyResolver{key: append([]byte(nil), key...), version: keyVersion})
+}
+
+func NewWithPayloadKeyResolver(db *sql.DB, resolver messaging.PayloadKeyResolver) *Store {
+	return &Store{db: db, payloadKeys: resolver}
 }
 
 func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) error {
 	if in.TenantID == "" || in.RequestID == "" || in.PayloadRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
 		return runtime.ErrCommitConflict
 	}
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return runtime.ErrCapabilityUnsupported
+	key, err := s.resolvePayloadKey(ctx, in.TenantID, in.KeyVersion)
+	if err != nil {
+		return err
 	}
-	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
-		return runtime.ErrVersionMismatch
-	}
-	ciphertext, nonce, err := encryptPayload(s.payloadKey, payloadAAD(in), in.Content)
+	defer clear(key)
+	ciphertext, nonce, err := encryptPayload(key, payloadAAD(in), in.Content)
 	if err != nil {
 		return err
 	}
@@ -47,25 +52,23 @@ func (s *Store) PutPayload(ctx context.Context, in messaging.PayloadRecord) erro
 	err = s.db.QueryRowContext(ctx, `INSERT INTO inbound_payload(tenant_id,request_id,payload_ref,payload_ciphertext,payload_nonce,content_digest,key_version)
 VALUES($1,$2,$3,$4,$5,$6,$7)
 ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
-RETURNING payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version`, in.TenantID, in.RequestID, in.PayloadRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
+RETURNING payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version`, in.TenantID, in.RequestID, in.PayloadRef, ciphertext, nonce, in.ContentDigest, in.KeyVersion).
 		Scan(&storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion)
 	if err != nil {
 		return translate(err)
 	}
-	if storedRef != in.PayloadRef || storedDigest != in.ContentDigest || storedKeyVersion != s.payloadKeyVersion {
+	if storedRef != in.PayloadRef || storedDigest != in.ContentDigest || storedKeyVersion != in.KeyVersion {
 		return runtime.ErrIdempotencyCollision
 	}
-	storedContent, err := decryptPayload(s.payloadKey, payloadAAD(in), storedCiphertext, storedNonce)
-	if err != nil || string(storedContent) != string(in.Content) {
+	storedContent, err := decryptPayload(key, payloadAAD(in), storedCiphertext, storedNonce)
+	defer clear(storedContent)
+	if err != nil || !bytes.Equal(storedContent, in.Content) {
 		return runtime.ErrIdempotencyCollision
 	}
 	return nil
 }
 
 func (s *Store) GetPayload(ctx context.Context, tenantID, requestID string) (messaging.PayloadRecord, error) {
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return messaging.PayloadRecord{}, runtime.ErrCapabilityUnsupported
-	}
 	var record messaging.PayloadRecord
 	record.TenantID, record.RequestID = tenantID, requestID
 	var ciphertext, nonce []byte
@@ -78,10 +81,12 @@ WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
 	if err != nil {
 		return messaging.PayloadRecord{}, err
 	}
-	if record.KeyVersion != s.payloadKeyVersion {
-		return messaging.PayloadRecord{}, runtime.ErrVersionMismatch
+	key, err := s.resolvePayloadKey(ctx, record.TenantID, record.KeyVersion)
+	if err != nil {
+		return messaging.PayloadRecord{}, err
 	}
-	record.Content, err = decryptPayload(s.payloadKey, payloadAAD(record), ciphertext, nonce)
+	defer clear(key)
+	record.Content, err = decryptPayload(key, payloadAAD(record), ciphertext, nonce)
 	return record, err
 }
 
@@ -90,15 +95,14 @@ func (s *Store) PutPreparedPayload(ctx context.Context, in messaging.PreparedPay
 		in.ArtifactRetention < time.Second || in.ArtifactRetention%time.Second != 0 || !validPreparedArtifactReferences(in.ArtifactReferences) {
 		return runtime.ErrCommitConflict
 	}
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return runtime.ErrCapabilityUnsupported
+	key, err := s.resolvePayloadKey(ctx, in.TenantID, in.KeyVersion)
+	if err != nil {
+		return err
 	}
-	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
-		return runtime.ErrVersionMismatch
-	}
+	defer clear(key)
 	payload := messaging.PayloadRecord{TenantID: in.TenantID, RequestID: in.RequestID, PayloadRef: in.PayloadRef,
-		ContentDigest: in.ContentDigest, Content: in.Content, KeyVersion: s.payloadKeyVersion}
-	ciphertext, nonce, err := encryptPayload(s.payloadKey, payloadAAD(payload), in.Content)
+		ContentDigest: in.ContentDigest, Content: in.Content, KeyVersion: in.KeyVersion}
+	ciphertext, nonce, err := encryptPayload(key, payloadAAD(payload), in.Content)
 	if err != nil {
 		return err
 	}
@@ -118,18 +122,19 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
 ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
 RETURNING source_payload_ref,payload_ref,content_digest,payload_ciphertext,payload_nonce,key_version,
 artifact_retention_seconds,created_at`, in.TenantID, in.RequestID, in.PayloadRef, in.SourcePayloadRef, ciphertext, nonce,
-		in.ContentDigest, s.payloadKeyVersion, retentionSeconds).
+		in.ContentDigest, in.KeyVersion, retentionSeconds).
 		Scan(&storedSource, &storedRef, &storedDigest, &storedCiphertext, &storedNonce, &storedKeyVersion,
 			&storedRetentionSeconds, &storedCreatedAt)
 	if err != nil {
 		return translate(err)
 	}
 	if storedSource != in.SourcePayloadRef || storedRef != in.PayloadRef || storedDigest != in.ContentDigest ||
-		storedKeyVersion != s.payloadKeyVersion || storedRetentionSeconds != retentionSeconds {
+		storedKeyVersion != in.KeyVersion || storedRetentionSeconds != retentionSeconds {
 		return runtime.ErrIdempotencyCollision
 	}
-	storedContent, err := decryptPayload(s.payloadKey, payloadAAD(payload), storedCiphertext, storedNonce)
-	if err != nil || string(storedContent) != string(in.Content) {
+	storedContent, err := decryptPayload(key, payloadAAD(payload), storedCiphertext, storedNonce)
+	defer clear(storedContent)
+	if err != nil || !bytes.Equal(storedContent, in.Content) {
 		return runtime.ErrIdempotencyCollision
 	}
 	retainUntil := storedCreatedAt.Add(in.ArtifactRetention)
@@ -198,9 +203,6 @@ func (s *Store) GetPreparedPayload(ctx context.Context, tenantID, requestID, pay
 	if tenantID == "" || requestID == "" || !strings.HasPrefix(payloadRef, "prepared://") {
 		return messaging.PayloadRecord{}, runtime.ErrTenantScope
 	}
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return messaging.PayloadRecord{}, runtime.ErrCapabilityUnsupported
-	}
 	record := messaging.PayloadRecord{TenantID: tenantID, RequestID: requestID, PayloadRef: payloadRef}
 	var ciphertext, nonce []byte
 	err := s.db.QueryRowContext(ctx, `SELECT content_digest,payload_ciphertext,payload_nonce,key_version,created_at
@@ -212,10 +214,12 @@ FROM prepared_payload WHERE tenant_id=$1 AND request_id=$2 AND payload_ref=$3`, 
 	if err != nil {
 		return messaging.PayloadRecord{}, err
 	}
-	if record.KeyVersion != s.payloadKeyVersion {
-		return messaging.PayloadRecord{}, runtime.ErrVersionMismatch
+	key, err := s.resolvePayloadKey(ctx, record.TenantID, record.KeyVersion)
+	if err != nil {
+		return messaging.PayloadRecord{}, err
 	}
-	record.Content, err = decryptPayload(s.payloadKey, payloadAAD(record), ciphertext, nonce)
+	defer clear(key)
+	record.Content, err = decryptPayload(key, payloadAAD(record), ciphertext, nonce)
 	return record, err
 }
 
@@ -223,14 +227,13 @@ func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error 
 	if in.TenantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
 		return runtime.ErrCommitConflict
 	}
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return runtime.ErrCapabilityUnsupported
+	key, err := s.resolvePayloadKey(ctx, in.TenantID, in.KeyVersion)
+	if err != nil {
+		return err
 	}
-	if in.KeyVersion != 0 && in.KeyVersion != s.payloadKeyVersion {
-		return runtime.ErrVersionMismatch
-	}
+	defer clear(key)
 	aad := resultAAD(in)
-	ciphertext, nonce, err := encryptPayload(s.payloadKey, aad, in.Content)
+	ciphertext, nonce, err := encryptPayload(key, aad, in.Content)
 	if err != nil {
 		return err
 	}
@@ -239,25 +242,23 @@ func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error 
 	var version int64
 	err = s.db.QueryRowContext(ctx, `INSERT INTO result_payload(tenant_id,request_id,result_ref,result_ciphertext,result_nonce,content_digest,key_version)
 VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,request_id) DO UPDATE SET request_id=EXCLUDED.request_id
-RETURNING result_ref,content_digest,result_ciphertext,result_nonce,key_version`, in.TenantID, in.RequestID, in.ResultRef, ciphertext, nonce, in.ContentDigest, s.payloadKeyVersion).
+RETURNING result_ref,content_digest,result_ciphertext,result_nonce,key_version`, in.TenantID, in.RequestID, in.ResultRef, ciphertext, nonce, in.ContentDigest, in.KeyVersion).
 		Scan(&ref, &digest, &encrypted, &storedNonce, &version)
 	if err != nil {
 		return translate(err)
 	}
-	if ref != in.ResultRef || digest != in.ContentDigest || version != s.payloadKeyVersion {
+	if ref != in.ResultRef || digest != in.ContentDigest || version != in.KeyVersion {
 		return runtime.ErrIdempotencyCollision
 	}
-	content, err := decryptPayload(s.payloadKey, aad, encrypted, storedNonce)
-	if err != nil || string(content) != string(in.Content) {
+	content, err := decryptPayload(key, aad, encrypted, storedNonce)
+	defer clear(content)
+	if err != nil || !bytes.Equal(content, in.Content) {
 		return runtime.ErrIdempotencyCollision
 	}
 	return nil
 }
 
 func (s *Store) GetResult(ctx context.Context, tenantID, requestID string) (messaging.ResultRecord, error) {
-	if len(s.payloadKey) == 0 || s.payloadKeyVersion < 1 {
-		return messaging.ResultRecord{}, runtime.ErrCapabilityUnsupported
-	}
 	record := messaging.ResultRecord{TenantID: tenantID, RequestID: requestID}
 	var ciphertext, nonce []byte
 	err := s.db.QueryRowContext(ctx, `SELECT result_ref,content_digest,result_ciphertext,result_nonce,key_version,created_at FROM result_payload WHERE tenant_id=$1 AND request_id=$2`, tenantID, requestID).
@@ -268,11 +269,54 @@ func (s *Store) GetResult(ctx context.Context, tenantID, requestID string) (mess
 	if err != nil {
 		return messaging.ResultRecord{}, err
 	}
-	if record.KeyVersion != s.payloadKeyVersion {
-		return messaging.ResultRecord{}, runtime.ErrVersionMismatch
+	key, err := s.resolvePayloadKey(ctx, record.TenantID, record.KeyVersion)
+	if err != nil {
+		return messaging.ResultRecord{}, err
 	}
-	record.Content, err = decryptPayload(s.payloadKey, resultAAD(record), ciphertext, nonce)
+	defer clear(key)
+	record.Content, err = decryptPayload(key, resultAAD(record), ciphertext, nonce)
 	return record, err
+}
+
+func (s *Store) resolvePayloadKey(ctx context.Context, tenantID string, version int64) ([]byte, error) {
+	if s == nil || s.payloadKeys == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	if tenantID == "" {
+		return nil, runtime.ErrTenantScope
+	}
+	if version < 1 {
+		return nil, runtime.ErrVersionMismatch
+	}
+	value, err := s.payloadKeys.ResolvePayloadKey(ctx, tenantID, version)
+	if err != nil {
+		clear(value.Bytes)
+		return nil, err
+	}
+	if value.Version != version {
+		clear(value.Bytes)
+		return nil, runtime.ErrVersionMismatch
+	}
+	if len(value.Bytes) != 32 {
+		clear(value.Bytes)
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return value.Bytes, nil
+}
+
+type staticPayloadKeyResolver struct {
+	key     []byte
+	version int64
+}
+
+func (r staticPayloadKeyResolver) ResolvePayloadKey(_ context.Context, _ string, version int64) (messaging.PayloadCipherKey, error) {
+	if version != r.version {
+		return messaging.PayloadCipherKey{}, runtime.ErrVersionMismatch
+	}
+	if len(r.key) != 32 {
+		return messaging.PayloadCipherKey{}, runtime.ErrCapabilityUnsupported
+	}
+	return messaging.PayloadCipherKey{Bytes: append([]byte(nil), r.key...), Version: r.version}, nil
 }
 
 func (s *Store) ResolveReplyRoute(ctx context.Context, tenantID, requestID string) (messaging.ReplyRoute, error) {

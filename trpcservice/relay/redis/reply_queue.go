@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -151,11 +152,13 @@ func decodeReply(destination channel.ReplyDestination, message redisclient.XMess
 	tenantID, tenantOK := replyValueString(message.Values["tenant_id"])
 	channelID, channelOK := replyValueString(message.Values["channel"])
 	bindingID, bindingOK := replyValueString(message.Values["binding_id"])
+	configVersion, versionOK := replyValueString(message.Values["config_version"])
 	accountID, accountOK := replyValueString(message.Values["external_account_id"])
 	deliveryKey, deliveryOK := replyValueString(message.Values["delivery_key"])
-	if !schemaOK || !tenantOK || !channelOK || !bindingOK || !accountOK || !deliveryOK || schemaVersion != "1" ||
+	if !schemaOK || !tenantOK || !channelOK || !bindingOK || !versionOK || !accountOK || !deliveryOK || schemaVersion != "1" ||
 		tenantID != destination.TenantID || tenantID != event.TenantID || bindingID != destination.ChannelBindingID ||
 		bindingID != event.ChannelBindingID || channelID != destination.Channel || accountID != destination.ExternalAccountID ||
+		configVersion != strconv.FormatInt(event.ConfigVersion, 10) || event.ConfigVersion < 1 ||
 		event.Target.Channel != channelID || event.Target.ExternalAccountID != accountID ||
 		(event.Target.ExternalMessageID == "" && event.Target.ExternalChatID == "" && event.Target.ExternalUserID == "") ||
 		deliveryKey != event.DeliveryKey || event.SchemaVersion != 1 ||
