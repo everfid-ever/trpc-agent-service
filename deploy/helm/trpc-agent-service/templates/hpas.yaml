@@ -1,0 +1,25 @@
+{{- range $roleName, $role := .Values.roles }}
+{{- if and $role.enabled $role.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "trpc-agent-service.fullname" $ }}-{{ $roleName }}
+  labels:
+    {{- include "trpc-agent-service.roleLabels" (dict "root" $ "roleName" $roleName) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "trpc-agent-service.fullname" $ }}-{{ $roleName }}
+  minReplicas: {{ $role.autoscaling.minReplicas }}
+  maxReplicas: {{ $role.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $role.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

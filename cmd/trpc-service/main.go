@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -32,7 +34,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-compliance-migrate|webui-local]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-compliance-migrate|webui-local|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -41,7 +43,9 @@ func main() {
 		role = os.Args[1]
 	}
 	logger := log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
-	if err := runRole(context.Background(), os.Getenv, logger, role); err != nil {
+	processContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runRole(processContext, os.Getenv, logger, role); err != nil {
 		logger.Printf("trpc-agent-service stopped: %v", err)
 		os.Exit(1)
 	}
@@ -69,6 +73,8 @@ func runRole(parent context.Context, getenv func(string) string, logger *log.Log
 		return runAuditRelayRole(parent, getenv, logger)
 	case "audit-compliance-migrate":
 		return runAuditComplianceMigrate(parent, getenv, logger)
+	case "prestop":
+		return runPreStop(getenv, syscall.Kill, time.Sleep)
 	case "webui-local":
 		return runWebUILocalRole(parent, getenv, logger)
 	default:

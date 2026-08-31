@@ -1,0 +1,7 @@
+apiVersion: v2
+name: trpc-agent-service
+description: Production role deployments for trpc-agent-service
+type: application
+version: 0.1.0
+appVersion: development
+kubeVersion: ">=1.27.0-0"

@@ -1,0 +1,204 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: registry.example.invalid/trpc-agent-service
+  tag: development
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  automountServiceAccountToken: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+telemetry:
+  endpoint: ""
+  allowInsecure: false
+  serviceVersion: development
+
+secretProvider:
+  enabled: false
+  mountPath: /run/secrets/trpc
+  readOnly: true
+
+networkPolicy:
+  enabled: true
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
+roles:
+  gateway:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-gateway-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 60
+    preStopSettleDelay: 2s
+    env: {}
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+    pdb:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  worker:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 3
+    existingEnvSecret: trpc-agent-worker-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 75
+    preStopSettleDelay: 2s
+    env: {}
+    service: {enabled: false}
+    pdb:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 30
+      targetCPUUtilizationPercentage: 70
+    resources:
+      requests: {cpu: 250m, memory: 256Mi}
+      limits: {memory: 1Gi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  channel:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-channel-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  channel-delivery:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-channel-delivery-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service: {enabled: false}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  preprocess:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-preprocess-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service: {enabled: false}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  artifact:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-artifact-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service: {enabled: false}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  audit-relay:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-audit-relay-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []

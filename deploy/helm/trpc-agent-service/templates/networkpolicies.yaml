@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "trpc-agent-service.fullname" . }}-default-deny
+  labels:
+    {{- include "trpc-agent-service.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "trpc-agent-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Ingress, Egress]
+{{- range $roleName, $role := .Values.roles }}
+{{- if $role.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "trpc-agent-service.fullname" $ }}-{{ $roleName }}
+  labels:
+    {{- include "trpc-agent-service.roleLabels" (dict "root" $ "roleName" $roleName) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "trpc-agent-service.name" $ }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      trpc-agent-service.io/role: {{ $roleName }}
+  policyTypes: [Ingress, Egress]
+  {{- with $role.networkPolicy.ingress }}
+  ingress:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml $.Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml $.Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- with $role.networkPolicy.egress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -9,7 +9,7 @@
 | 在本机直接聊天并验证完整内部链路 | `webui-local` Compose profile | 是 | 首次体验、开发联调、无 Feishu/WeCom 凭据 |
 | 验证 PostgreSQL、Redis 和故障恢复契约 | `runtime-test` Compose profile | 测试脚本创建并删除随机测试库 | CI、后端契约、故障恢复验证 |
 | 独立启动 Gateway 和 Worker | `gateway-worker` Compose profile | 否 | 已具备控制面数据、scoped Secret 和对象存储的集成环境 |
-| 部署全部生产角色 | `trpc-service <role>` | 否 | Kubernetes、独立进程或正式部署系统 |
+| 部署全部生产角色 | [`deploy/helm/trpc-agent-service`](../../deploy/helm/trpc-agent-service/README.md) | 否 | Kubernetes、独立进程或正式部署系统 |
 
 如果只是想确认项目可以正常工作，请从第 2 节的 WebUI 开始。不要从生产多角色模式开始。
 
