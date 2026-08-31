@@ -29,6 +29,43 @@ func TestLoadProductionConfigRequiresEveryCriticalDependency(t *testing.T) {
 	}
 }
 
+func TestLoadAuditRelayConfigRequiresIndependentCompliancePostgreSQL(t *testing.T) {
+	values := map[string]string{"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_AUDIT_RELAY_OWNER": "audit-1",
+		"TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN": "postgres://compliance:secret@compliance/audit",
+		"TRPC_AUDIT_BATCH_SIZE":              "64", "TRPC_AUDIT_CLAIM_TTL": "45s", "TRPC_AUDIT_CLAIM_RENEW": "15s",
+		"TRPC_AUDIT_LAG_POLL_INTERVAL": "2s", "TRPC_AUDIT_LAG_ALERT_AGE": "3m", "TRPC_AUDIT_LAG_ALERT_COUNT": "9000"}
+	config, err := loadAuditRelayConfig(mapEnvironment(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AuditOwner != "audit-1" || config.AuditBatchSize != 64 || config.AuditLagPollInterval != 2*time.Second ||
+		config.AuditLagAlertAge != 3*time.Minute || config.AuditLagAlertCount != 9000 || config.RedisAddress != "" || config.SecretRoot != "" {
+		t.Fatalf("unexpected audit config: %+v", config)
+	}
+	for name, value := range map[string]string{"TRPC_AUDIT_BATCH_SIZE": "0", "TRPC_AUDIT_CLAIM_TTL": "10s", "TRPC_AUDIT_CLAIM_RENEW": "45s",
+		"TRPC_AUDIT_RELAY_OWNER": "bad\nowner", "TRPC_AUDIT_LAG_POLL_INTERVAL": "0s", "TRPC_AUDIT_LAG_ALERT_AGE": "500ms", "TRPC_AUDIT_LAG_ALERT_COUNT": "0"} {
+		copy := cloneEnvironment(values)
+		copy[name] = value
+		if _, err := loadAuditRelayConfig(mapEnvironment(copy)); err == nil {
+			t.Fatalf("%s=%q accepted", name, value)
+		}
+	}
+	copy := cloneEnvironment(values)
+	copy["TRPC_AUDIT_LAG_POLL_INTERVAL"] = "5m"
+	copy["TRPC_AUDIT_LAG_ALERT_AGE"] = "5m"
+	if _, err := loadAuditRelayConfig(mapEnvironment(copy)); err == nil {
+		t.Fatal("audit lag poll interval equal to alert age accepted")
+	}
+	delete(values, "TRPC_POSTGRES_DSN")
+	if _, err := loadAuditRelayConfig(mapEnvironment(values)); err == nil {
+		t.Fatal("missing postgres accepted")
+	}
+	values["TRPC_POSTGRES_DSN"] = values["TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN"]
+	if _, err := loadAuditRelayConfig(mapEnvironment(values)); err == nil {
+		t.Fatal("source database accepted as compliance sink")
+	}
+}
+
 func TestLoadProductionConfigRejectsUnsafeLifecycleValuesWithoutLeakingSecrets(t *testing.T) {
 	for name, value := range map[string]string{
 		"TRPC_ARTIFACT_PUT_TIMEOUT":          "3m",
@@ -230,7 +267,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.WorkerShardCount != 4 || len(config.WorkerShards) != 2 || config.WorkerShards[0] != 0 || config.WorkerShards[1] != 3 ||
-		config.WorkerLeaseRenew >= config.WorkerLeaseTTL || config.WorkerProbeTenant == "" {
+		config.WorkerLeaseRenew >= config.WorkerLeaseTTL || config.WorkerProbeTenant == "" || config.WorkerGraphCheckpointTTL != 7*24*time.Hour {
 		t.Fatalf("config=%#v", config)
 	}
 }
@@ -309,6 +346,11 @@ func TestLoadWorkerConfigRejectsUnsafeTopologyAndTiming(t *testing.T) {
 	environment["TRPC_WORKER_BUNDLE_CLOSE_TIMEOUT"] = "6s"
 	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
 		t.Fatal("expected shutdown budget rejection")
+	}
+	environment = workerEnvironment()
+	environment["TRPC_WORKER_GRAPH_CHECKPOINT_TTL"] = "59m"
+	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
+		t.Fatal("expected graph checkpoint TTL rejection")
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -37,9 +38,13 @@ type RunSubmitter struct {
 	Payloads          messaging.PayloadStore
 	Dispatcher        Dispatcher
 	PayloadKeyVersion int64
+	Telemetry         telemetry.Provider
 }
 
-func (s RunSubmitter) Submit(ctx context.Context, in RunSubmission) (ExecutionHandle, error) {
+func (s RunSubmitter) Submit(ctx context.Context, in RunSubmission) (result ExecutionHandle, resultErr error) {
+	ctx, finish := telemetry.StartOperation(ctx, s.Telemetry, in.TraceParent, telemetry.OperationGatewaySubmit,
+		telemetry.ComponentAttribute(telemetry.ComponentGateway))
+	defer func() { finish(resultErr) }()
 	if s.Inbox == nil || s.Payloads == nil || s.Dispatcher == nil || s.PayloadKeyVersion < 1 {
 		return ExecutionHandle{}, runtime.ErrCapabilityUnsupported
 	}
@@ -72,5 +77,6 @@ func (s RunSubmitter) Submit(ctx context.Context, in RunSubmission) (ExecutionHa
 		return ExecutionHandle{}, err
 	}
 	return s.Dispatcher.Dispatch(ctx, DispatchRequest{Tenant: in.Tenant, RequestID: claimed.RequestID,
-		SessionID: in.SessionID, UserID: in.UserID, PayloadRef: claimed.PayloadRef, TraceParent: in.TraceParent})
+		SessionID: in.SessionID, UserID: in.UserID, PayloadRef: claimed.PayloadRef,
+		TraceParent: telemetry.EffectiveTraceParent(ctx, in.TraceParent)})
 }

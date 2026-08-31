@@ -1,0 +1,27 @@
+groups:
+  - name: trpc-agent-service-operations
+    rules:
+      - record: trpc:operation:requests:rate5m
+        expr: sum by (operation) (rate(trpc_operation_total[5m]))
+      - record: trpc:operation:errors:rate5m
+        expr: sum by (operation) (rate(trpc_operation_total{outcome="error"}[5m]))
+      - record: trpc:operation:error_ratio5m
+        expr: trpc:operation:errors:rate5m / clamp_min(trpc:operation:requests:rate5m, 0.001)
+      - alert: TrpcOperationErrorBudgetBurn
+        expr: trpc:operation:error_ratio5m > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: tRPC operation error ratio is above 5%
+          description: "Operation {{ $labels.operation }} has exceeded the short-window error SLO."
+          runbook: deploy/runbooks/operations-slo.md
+      - alert: TrpcOperationLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le, operation) (rate(trpc_operation_duration_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: tRPC operation p95 latency is above 5 seconds
+          description: "Operation {{ $labels.operation }} is above the latency SLO."
+          runbook: deploy/runbooks/operations-slo.md

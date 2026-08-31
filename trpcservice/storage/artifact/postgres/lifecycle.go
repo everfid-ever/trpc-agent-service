@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -240,7 +241,12 @@ func (s *Store) QuarantineObjectUpload(
 		upload.Version < 1 || errorClass == "" || quarantinedAt.IsZero() {
 		return runtime.ErrInvariantViolation
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE artifact_object_upload SET state='quarantined',
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return translate(err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE artifact_object_upload SET state='quarantined',
 claim_owner=NULL,claim_until=NULL,cleanup_attempt=cleanup_attempt+1,last_error_class=$5,quarantined_at=$6,
 updated_at=clock_timestamp(),version=version+1
 WHERE tenant_id=$1 AND object_key=$2 AND state='cleanup_claimed' AND claim_owner=$3 AND version=$4`,
@@ -251,7 +257,16 @@ WHERE tenant_id=$1 AND object_key=$2 AND state='cleanup_claimed' AND claim_owner
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return runtime.ErrVersionConflict
 	}
-	return nil
+	nextVersion := upload.Version + 1
+	outboxID := fmt.Sprintf("artifact-quarantine-upload:%s:%s:%d", upload.TenantID, upload.ArtifactID, nextVersion)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+VALUES($1,$2,'audit',$3,$4,$2,$5)`,
+		upload.TenantID, outboxID, upload.ArtifactID, nextVersion,
+		fmt.Sprintf("artifact-quarantine://%s/upload/%s/%d", upload.TenantID, upload.ArtifactID, nextVersion))
+	if err != nil {
+		return translate(err)
+	}
+	return tx.Commit()
 }
 
 func scanObjectUpload(row rowScanner) (artifact.ObjectUpload, error) {

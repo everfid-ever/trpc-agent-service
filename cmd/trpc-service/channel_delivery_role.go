@@ -42,6 +42,11 @@ func runChannelDeliveryRole(parent context.Context, getenv func(string) string, 
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "channel-delivery", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -97,6 +102,7 @@ func runChannelDeliveryRole(parent context.Context, getenv func(string) string, 
 		NewConsumer: func(destination channel.ReplyDestination) (delivery.ConsumerRunner, error) {
 			return delivery.Consumer{Queue: queue, Deliverer: service, Destination: destination, ConsumerID: owner,
 				ReclaimInterval: configValue.ChannelReplyReclaimInterval, ReclaimLimit: configValue.ChannelReplyReclaimLimit,
+				Telemetry: telemetryProvider,
 				OnDeliveryError: func(delivery channel.ReplyDelivery, err error) {
 					logger.Printf("channel delivery degraded tenant=%s binding=%s delivery=%s: %v", delivery.Event.TenantID, delivery.Event.ChannelBindingID, delivery.ID, err)
 				}}, nil

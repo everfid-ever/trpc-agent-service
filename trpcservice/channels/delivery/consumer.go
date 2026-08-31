@@ -8,6 +8,7 @@ import (
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type EventDeliverer interface {
@@ -25,6 +26,7 @@ type Consumer struct {
 	ReclaimInterval time.Duration
 	ReclaimLimit    int
 	OnDeliveryError func(channel.ReplyDelivery, error)
+	Telemetry       telemetry.Provider
 }
 
 func (c Consumer) Run(ctx context.Context) error {
@@ -93,7 +95,10 @@ func (c Consumer) reclaimLoop(ctx context.Context) error {
 	}
 }
 
-func (c Consumer) process(ctx context.Context, delivery channel.ReplyDelivery) error {
+func (c Consumer) process(ctx context.Context, delivery channel.ReplyDelivery) (resultErr error) {
+	ctx, finish := telemetry.StartOperation(ctx, c.Telemetry, delivery.Event.TraceParent, telemetry.OperationChannelDeliver,
+		telemetry.ComponentAttribute(telemetry.ComponentChannelDelivery))
+	defer func() { finish(resultErr) }()
 	if delivery.Destination != c.Destination {
 		return runtime.ErrTenantScope
 	}

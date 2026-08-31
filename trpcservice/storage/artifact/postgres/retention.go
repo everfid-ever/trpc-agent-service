@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -105,7 +106,12 @@ func (s *Store) QuarantineArtifactDeletion(
 	if !validClaimedArtifact(value) || errorClass == "" || quarantinedAt.IsZero() {
 		return runtime.ErrInvariantViolation
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE media_artifact SET lifecycle_state='quarantined',claim_owner=NULL,claim_until=NULL,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return translate(err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE media_artifact SET lifecycle_state='quarantined',claim_owner=NULL,claim_until=NULL,
 delete_attempt=delete_attempt+1,last_error_class=$5,quarantined_at=$6,lifecycle_version=lifecycle_version+1
 WHERE tenant_id=$1 AND artifact_id=$2 AND lifecycle_state='delete_claimed' AND claim_owner=$3 AND lifecycle_version=$4`,
 		value.TenantID, value.ArtifactID, value.ClaimOwner, value.Version, errorClass, quarantinedAt)
@@ -115,7 +121,16 @@ WHERE tenant_id=$1 AND artifact_id=$2 AND lifecycle_state='delete_claimed' AND c
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return runtime.ErrVersionConflict
 	}
-	return nil
+	nextVersion := value.Version + 1
+	outboxID := fmt.Sprintf("artifact-quarantine-retention:%s:%s:%d", value.TenantID, value.ArtifactID, nextVersion)
+	_, err = tx.ExecContext(ctx, `INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+VALUES($1,$2,'audit',$3,$4,$2,$5)`,
+		value.TenantID, outboxID, value.ArtifactID, nextVersion,
+		fmt.Sprintf("artifact-quarantine://%s/retention/%s/%d", value.TenantID, value.ArtifactID, nextVersion))
+	if err != nil {
+		return translate(err)
+	}
+	return tx.Commit()
 }
 
 func scanRetainedArtifact(row rowScanner) (artifact.RetainedArtifact, error) {

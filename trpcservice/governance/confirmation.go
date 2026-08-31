@@ -47,6 +47,37 @@ type ConfirmationDecision struct {
 	DecidedAt                           time.Time
 }
 
+type ConfirmationAction struct {
+	TenantID, ConfirmationID, SubjectID, ChannelBindingID, SessionID string
+	Approve                                                          bool
+	ExpectedVersion                                                  int64
+	DecidedAt                                                        time.Time
+}
+
+type ConfirmationActionDecider interface {
+	DecideAction(context.Context, ConfirmationAction) (Confirmation, error)
+}
+
+type ConfirmationActionService struct{ Coordinator ConfirmationCoordinator }
+
+func (s ConfirmationActionService) DecideAction(ctx context.Context, in ConfirmationAction) (Confirmation, error) {
+	if s.Coordinator == nil || in.TenantID == "" || in.ConfirmationID == "" || in.SubjectID == "" ||
+		in.ChannelBindingID == "" || in.SessionID == "" || in.ExpectedVersion < 1 || in.DecidedAt.IsZero() {
+		return Confirmation{}, runtime.ErrInvariantViolation
+	}
+	confirmation, err := s.Coordinator.GetConfirmation(ctx, in.TenantID, in.ConfirmationID)
+	if err != nil {
+		return Confirmation{}, err
+	}
+	if confirmation.SubjectID != in.SubjectID || confirmation.ChannelBindingID != in.ChannelBindingID || confirmation.SessionID != in.SessionID {
+		return Confirmation{}, runtime.ErrTenantScope
+	}
+	return s.Coordinator.Decide(ctx, ConfirmationDecision{TenantID: in.TenantID, ConfirmationID: in.ConfirmationID,
+		SubjectID: in.SubjectID, Approve: in.Approve, ExpectedVersion: in.ExpectedVersion, DecidedAt: in.DecidedAt})
+}
+
+var _ ConfirmationActionDecider = ConfirmationActionService{}
+
 type Grant struct {
 	GrantID, TenantID, ConfirmationID, RequestID, SubjectID string
 	Tool                                                    VersionedRef

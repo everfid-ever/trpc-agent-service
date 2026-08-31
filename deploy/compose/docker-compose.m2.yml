@@ -17,6 +17,23 @@ services:
       timeout: 3s
       retries: 20
 
+  compliance-postgres:
+    image: postgres:16
+    profiles: ["gateway-worker", "audit", "audit-migration"]
+    environment:
+      POSTGRES_USER: ${M2_COMPLIANCE_POSTGRES_USER:-compliance}
+      POSTGRES_PASSWORD: ${M2_COMPLIANCE_POSTGRES_PASSWORD:-compliance}
+      POSTGRES_DB: ${M2_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}
+    ports:
+      - "${M2_COMPLIANCE_POSTGRES_PORT:-55433}:5432"
+    volumes:
+      - m2-compliance-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   redis:
     image: redis:7
     ports:
@@ -41,6 +58,27 @@ services:
       - "${M2_MINIO_CONSOLE_PORT:-59001}:9001"
     volumes:
       - m2-minio:/data
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    profiles: ["gateway-worker", "audit", "webui"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${M2_JAEGER_PORT:-56686}:16686"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.108.0
+    profiles: ["gateway-worker", "audit", "webui"]
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes:
+      - ./otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "${M2_OTEL_HTTP_PORT:-54318}:4318"
+      - "${M2_OTEL_PROMETHEUS_PORT:-59464}:9464"
+    depends_on:
+      jaeger:
+        condition: service_started
 
   runtime-test:
     image: golang:1.25-bookworm
@@ -75,6 +113,9 @@ services:
       TRPC_REDIS_ADDRESS: redis:6379
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${M2_SERVICE_VERSION:-development}
     secrets:
       - deepseek_api_key
     ports:
@@ -84,6 +125,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   gateway:
     build:
@@ -98,6 +141,9 @@ services:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_SECRET_ROOT: /run/secrets/trpc
       TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${M2_SERVICE_VERSION:-development}
     volumes:
       - ./secrets:/run/secrets/trpc:ro
     ports:
@@ -108,6 +154,8 @@ services:
       redis:
         condition: service_healthy
       minio:
+        condition: service_started
+      otel-collector:
         condition: service_started
 
   worker:
@@ -126,6 +174,9 @@ services:
       TRPC_S3_PATH_STYLE: "true"
       TRPC_SECRET_ROOT: /run/secrets/trpc
       TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${M2_SERVICE_VERSION:-development}
     volumes:
       - ./secrets:/run/secrets/trpc:ro
     depends_on:
@@ -135,9 +186,53 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      otel-collector:
+        condition: service_started
+
+  audit-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker", "audit"]
+    command: ["audit-relay"]
+    env_file:
+      - path: .env.m2
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN: postgres://${M2_COMPLIANCE_POSTGRES_USER:-compliance}:${M2_COMPLIANCE_POSTGRES_PASSWORD:-compliance}@compliance-postgres:5432/${M2_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}?sslmode=disable
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_AUDIT_LAG_POLL_INTERVAL: ${M2_AUDIT_LAG_POLL_INTERVAL:-5s}
+      TRPC_AUDIT_LAG_ALERT_AGE: ${M2_AUDIT_LAG_ALERT_AGE:-5m}
+      TRPC_AUDIT_LAG_ALERT_COUNT: ${M2_AUDIT_LAG_ALERT_COUNT:-10000}
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${M2_SERVICE_VERSION:-development}
+    ports:
+      - "${M2_AUDIT_PORT:-58082}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      compliance-postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  audit-compliance-migrate:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["audit-migration"]
+    command: ["audit-compliance-migrate"]
+    environment:
+      TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN: postgres://${M2_COMPLIANCE_POSTGRES_USER:-compliance}:${M2_COMPLIANCE_POSTGRES_PASSWORD:-compliance}@compliance-postgres:5432/${M2_COMPLIANCE_POSTGRES_DB:-trpc_agent_compliance}?sslmode=disable
+    depends_on:
+      compliance-postgres:
+        condition: service_healthy
 
 volumes:
   m2-postgres:
+  m2-compliance-postgres:
   m2-redis:
   m2-minio:
 

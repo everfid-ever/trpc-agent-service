@@ -18,6 +18,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	checkpointredis "github.com/liuzengh/trpc-agent-service/trpcservice/agent/checkpointredis"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
@@ -44,6 +45,7 @@ import (
 	objectstores3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
@@ -55,6 +57,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "worker", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -93,8 +100,15 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	providerRepo := providerpostgres.New(db, catalog)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
 	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Subject: "worker-model"}
+	toolCatalog, err := servicetool.NewCatalog()
+	if err != nil {
+		return errors.New("tool catalog initialization failed")
+	}
+	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: secretProvider}
 	governanceStore := governancepostgres.New(db)
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore}
+	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: configValue.WorkerGraphCheckpointTTL}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Checkpoints: graphCheckpoints,
+		Policies: governanceStore, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManagerWithPolicy(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
@@ -128,7 +142,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef,
 		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,
-		ContinuationTools: agentFactory}
+		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
 	dispatchBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment, Group: configValue.WorkerGroup,
 		ShardCount: uint32(configValue.WorkerShardCount), ReadBlock: 250 * time.Millisecond, ReclaimIdle: configValue.WorkerLeaseTTL})
 	if err != nil {

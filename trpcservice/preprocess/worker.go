@@ -14,6 +14,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -64,6 +65,7 @@ type Worker struct {
 	// ArtifactRetention is independent from audit/log retention. Media
 	// preprocessing fails closed unless this policy is explicitly configured.
 	ArtifactRetention time.Duration
+	Telemetry         telemetry.Provider
 }
 
 func (w Worker) RunOnce(ctx context.Context, limit int) (int, error) {
@@ -98,7 +100,10 @@ func (w Worker) RunOnce(ctx context.Context, limit int) (int, error) {
 	return processed, nil
 }
 
-func (w Worker) preprocess(ctx context.Context, job Job) error {
+func (w Worker) preprocess(ctx context.Context, job Job) (resultErr error) {
+	ctx, finish := telemetry.StartOperation(ctx, w.Telemetry, job.TraceParent, telemetry.OperationChannelPreprocess,
+		telemetry.ComponentAttribute(telemetry.ComponentPreprocess))
+	defer func() { finish(resultErr) }()
 	payload, err := w.Payloads.GetPayload(ctx, job.TenantID, job.RequestID)
 	if err != nil {
 		return w.retry(ctx, job, "payload_unavailable")
@@ -246,7 +251,8 @@ func (w Worker) dispatch(ctx context.Context, job Job) error {
 	_, err := w.Dispatcher.Dispatch(ctx, gateway.DispatchRequest{
 		Tenant: tenant.Context{TenantID: job.TenantID, TenantVersion: job.TenantVersion, AgentAppID: job.AgentAppID,
 			SubjectID: job.UserID, Channel: job.Channel, TrustedSource: "channel_binding:" + job.ChannelBindingID},
-		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: payloadRef, TraceParent: job.TraceParent,
+		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: payloadRef,
+		TraceParent: telemetry.EffectiveTraceParent(ctx, job.TraceParent),
 	})
 	if err != nil {
 		return err

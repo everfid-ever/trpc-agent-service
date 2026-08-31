@@ -12,6 +12,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type IdentityMapper interface {
@@ -35,6 +36,7 @@ type Pipeline struct {
 	Intake       preprocess.Store
 	Payloads     messaging.PayloadStore
 	KeyVersion   int64
+	Telemetry    telemetry.Provider
 }
 
 func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) ([]AcceptedEvent, error) {
@@ -48,55 +50,73 @@ func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) (
 	keyVersion := p.KeyVersion
 	accepted := make([]AcceptedEvent, 0, len(verified.Events))
 	for _, event := range verified.Events {
-		if event.Channel != verified.Binding.Channel || event.ExternalAccountID != verified.Binding.ExternalAccountID ||
-			!validProviderContent(event) {
-			return nil, runtime.ErrInvalidEnvelope
+		traceParent := event.TraceParent
+		if traceParent == "" {
+			traceParent = verified.TraceParent
 		}
-		ids, err := p.Identity.Map(ctx, verified.Binding, event)
-		if err != nil {
-			return nil, err
+		if traceParent == "" {
+			traceParent = headerValue(request.Headers, "traceparent")
 		}
-		messageType := event.MessageType
-		if messageType == "text" {
-			messageType = ""
+		eventCtx, finish := telemetry.StartOperation(ctx, p.Telemetry, traceParent, telemetry.OperationChannelPreprocess,
+			telemetry.ComponentAttribute(telemetry.ComponentPreprocess))
+		acceptedEvent, eventErr := p.acceptEvent(eventCtx, verified, event, keyVersion, traceParent)
+		finish(eventErr)
+		if eventErr != nil {
+			return nil, eventErr
 		}
-		bindingID, accountID := "", ""
-		if len(event.MediaRefs) > 0 {
-			bindingID, accountID = verified.Binding.ChannelBindingID, verified.Binding.ExternalAccountID
-		}
-		normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
-			ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
-			ChannelBindingID: bindingID, ExternalAccountID: accountID,
-			ConfigVersion: verified.Binding.BindingVersion,
-			MessageType:   messageType, Text: event.Text, MediaRefs: event.MediaRefs})
-		if err != nil {
-			return nil, err
-		}
-		digest := sha256.Sum256(normalized)
-		key := messaging.InboxKey{TenantID: verified.Binding.TenantID, Channel: event.Channel,
-			ExternalAccountID: event.ExternalAccountID, ExternalMessageID: event.ExternalMessageID}
-		requestID, payloadRef := messaging.StableInboxIdentity(key)
-		contentDigest := hex.EncodeToString(digest[:])
-		if err := p.Payloads.PutPayload(ctx, messaging.PayloadRecord{TenantID: key.TenantID, RequestID: requestID,
-			PayloadRef: payloadRef, ContentDigest: contentDigest, Content: normalized, KeyVersion: keyVersion}); err != nil {
-			return nil, err
-		}
-		inbox, job, err := p.Intake.ClaimInboxAndSchedule(ctx, preprocess.ClaimRequest{
-			Inbox: messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: verified.Binding.AgentAppID, SessionID: ids.SessionID,
-				ExternalChatID: event.ExternalChatID, ExternalUserID: event.ExternalUserID, PayloadDigest: contentDigest,
-				KeyVersion: keyVersion, InitialState: messaging.InboxPreprocessPending},
-			TenantVersion: verified.Binding.TenantVersion, ConfigVersion: verified.Binding.BindingVersion,
-			ChannelBindingID: verified.Binding.ChannelBindingID, UserID: ids.UserID, TraceParent: event.TraceParent,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if inbox.RequestID != requestID || inbox.PayloadRef != payloadRef || job.RequestID != requestID || job.PayloadRef != payloadRef {
-			return nil, runtime.ErrIdempotencyCollision
-		}
-		accepted = append(accepted, AcceptedEvent{RequestID: requestID, PayloadRef: payloadRef, PreprocessJobID: job.JobID})
+		accepted = append(accepted, acceptedEvent)
 	}
 	return accepted, nil
+}
+
+func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, event channel.ProviderEvent, keyVersion int64, traceParent string) (AcceptedEvent, error) {
+	if event.Channel != verified.Binding.Channel || event.ExternalAccountID != verified.Binding.ExternalAccountID ||
+		!validProviderContent(event) {
+		return AcceptedEvent{}, runtime.ErrInvalidEnvelope
+	}
+	ids, err := p.Identity.Map(ctx, verified.Binding, event)
+	if err != nil {
+		return AcceptedEvent{}, err
+	}
+	messageType := event.MessageType
+	if messageType == "text" {
+		messageType = ""
+	}
+	bindingID, accountID := "", ""
+	if len(event.MediaRefs) > 0 {
+		bindingID, accountID = verified.Binding.ChannelBindingID, verified.Binding.ExternalAccountID
+	}
+	normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
+		ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
+		ChannelBindingID: bindingID, ExternalAccountID: accountID,
+		ConfigVersion: verified.Binding.BindingVersion,
+		MessageType:   messageType, Text: event.Text, MediaRefs: event.MediaRefs})
+	if err != nil {
+		return AcceptedEvent{}, err
+	}
+	digest := sha256.Sum256(normalized)
+	key := messaging.InboxKey{TenantID: verified.Binding.TenantID, Channel: event.Channel,
+		ExternalAccountID: event.ExternalAccountID, ExternalMessageID: event.ExternalMessageID}
+	requestID, payloadRef := messaging.StableInboxIdentity(key)
+	contentDigest := hex.EncodeToString(digest[:])
+	if err := p.Payloads.PutPayload(ctx, messaging.PayloadRecord{TenantID: key.TenantID, RequestID: requestID,
+		PayloadRef: payloadRef, ContentDigest: contentDigest, Content: normalized, KeyVersion: keyVersion}); err != nil {
+		return AcceptedEvent{}, err
+	}
+	inbox, job, err := p.Intake.ClaimInboxAndSchedule(ctx, preprocess.ClaimRequest{
+		Inbox: messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: verified.Binding.AgentAppID, SessionID: ids.SessionID,
+			ExternalChatID: event.ExternalChatID, ExternalUserID: event.ExternalUserID, PayloadDigest: contentDigest,
+			KeyVersion: keyVersion, InitialState: messaging.InboxPreprocessPending},
+		TenantVersion: verified.Binding.TenantVersion, ConfigVersion: verified.Binding.BindingVersion,
+		ChannelBindingID: verified.Binding.ChannelBindingID, UserID: ids.UserID, TraceParent: telemetry.EffectiveTraceParent(ctx, traceParent),
+	})
+	if err != nil {
+		return AcceptedEvent{}, err
+	}
+	if inbox.RequestID != requestID || inbox.PayloadRef != payloadRef || job.RequestID != requestID || job.PayloadRef != payloadRef {
+		return AcceptedEvent{}, runtime.ErrIdempotencyCollision
+	}
+	return AcceptedEvent{RequestID: requestID, PayloadRef: payloadRef, PreprocessJobID: job.JobID}, nil
 }
 
 func validProviderContent(event channel.ProviderEvent) bool {

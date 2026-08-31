@@ -22,6 +22,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	checkpointredis "github.com/liuzengh/trpc-agent-service/trpcservice/agent/checkpointredis"
 	agentapp "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
@@ -59,18 +60,22 @@ import (
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
+	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tool/localnote"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
 const (
-	webUILocalTenantID  = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalAppID     = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalBindingID = "local-webui"
-	webUILocalAccountID = "local-webui"
-	webUILocalModelID   = "deepseek-local"
-	webUILocalRouteKey  = "local-webui"
-	webUILocalToken     = "local-webui-token-change-me"
-	payloadKeyRef       = "secret://local/payload-key"
+	webUILocalTenantID    = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalAppID       = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalChildAppID  = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	webUILocalBindingID   = "local-webui"
+	webUILocalAccountID   = "local-webui"
+	webUILocalModelID     = "deepseek-local"
+	webUILocalRouteKey    = "local-webui"
+	webUILocalToken       = "local-webui-token-change-me"
+	payloadKeyRef         = "secret://local/payload-key"
+	webUILocalInstruction = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
 )
 
 type webUILocalConfig struct {
@@ -97,6 +102,11 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "webui-local", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -124,7 +134,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	webuiMailbox := webuipostgres.New(db)
 	webuiAdapter := &webui.Adapter{Protocol: webui.Verifier{}, Mailbox: webuiMailbox}
 	endpoint, err := newChannelEndpoint(webuiAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
-		preprocessStore, payloads, 1, 1<<20)
+		preprocessStore, payloads, 1, 1<<20, telemetryProvider)
 	if err != nil {
 		return errors.New("WebUI callback configuration rejected")
 	}
@@ -151,7 +161,17 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
 	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Subject: "worker-model"}
 	governanceStore := governancepostgres.New(db)
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads}
+	toolCatalog, err := servicetool.NewCatalog(localnote.Registration(webUILocalTenantID))
+	if err != nil {
+		return errors.New("tool catalog initialization failed")
+	}
+	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: bootstrap.SecretStore}
+	browser.ReplyRoutes = payloads
+	browser.Confirmations = governanceStore
+	browser.Actions = governance.ConfirmationActionService{Coordinator: governanceStore}
+	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: 7 * 24 * time.Hour}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Checkpoints: graphCheckpoints,
+		Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
@@ -168,7 +188,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		Sessions: sessionpostgres.New(db), Payloads: payloads, Artifacts: artifactpostgres.New(db),
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
-		ContinuationTools: agentFactory}
+		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
 	workerConsumer := worker.Consumer{WorkerID: "webui-local-worker", Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
 		Leases: leases, Sessions: sessionpostgres.New(db), Parker: tasks, Statuses: tasks, Executor: executor,
 		LeaseTTL: 30 * time.Second, RenewInterval: 10 * time.Second, RetryWait: 250 * time.Millisecond,
@@ -179,18 +199,21 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 
 	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configRepo}
 	preprocessor := preprocess.Worker{Store: preprocessStore, Payloads: payloads, Dispatcher: dispatcher,
-		Owner: "webui-local-preprocess", LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8}
+		Owner: "webui-local-preprocess", LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8, Telemetry: telemetryProvider}
 	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: "webui-local-dispatch-relay",
-		ShardCount: 4, ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond}
+		ShardCount: 4, ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
+		Telemetry: telemetryProvider}
 	replyRelay := relay.ReplyRelay{Outbox: inbox, Results: payloads, Routes: inbox, Replies: publisher,
-		Owner: "webui-local-reply-relay", ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond}
+		Owner: "webui-local-reply-relay", ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
+		Telemetry: telemetryProvider}
 	wakeupQueue, err := relayredis.NewWakeupQueue(redis, publisher, relayredis.WakeupQueueConfig{
 		Group: "webui-wakeup", ReadBlock: 250 * time.Millisecond, ReclaimIdle: 30 * time.Second})
 	if err != nil {
 		return errors.New("wakeup queue configuration rejected")
 	}
 	wakeupRelay := relay.WakeupRelay{Outbox: inbox, Wakeups: publisher, Owner: "webui-local-wakeup-relay",
-		ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond}
+		ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
+		Telemetry: telemetryProvider}
 	wakeupDispatcher := relay.WakeupDispatcher{ConsumerID: "webui-local-wakeup", Wakeups: wakeupQueue,
 		Store: tasks, Dispatch: streamBroker, ShardCount: 4, ReclaimInterval: 5 * time.Second, ReclaimLimit: 100}
 
@@ -209,7 +232,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	deliverySupervisor := channeldelivery.Supervisor{Catalog: deliveryCatalog, RefreshInterval: time.Second,
 		NewConsumer: func(destination channel.ReplyDestination) (channeldelivery.ConsumerRunner, error) {
 			return channeldelivery.Consumer{Queue: replyQueue, Deliverer: deliveryService, Destination: destination,
-				ConsumerID: "webui-local-delivery", ReclaimInterval: 5 * time.Second, ReclaimLimit: 100}, nil
+				ConsumerID: "webui-local-delivery", ReclaimInterval: 5 * time.Second, ReclaimLimit: 100,
+				Telemetry: telemetryProvider}, nil
 		}, OnError: func(supervisorErr error) { logger.Printf("webui delivery degraded: %v", supervisorErr) }}
 
 	mux := http.NewServeMux()
@@ -349,7 +373,9 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 			return webUILocalBootstrap{}, err
 		}
 		policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow,
-			AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
+			AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: 1}},
+			Tools:         []governance.ToolRule{{ToolID: localnote.ID, Version: localnote.Version, Dangerous: true, ConfirmationSupported: true}},
+			InputDLP:      governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
 		policyDigest, _, digestErr := governance.PolicyDigest(policy)
 		if digestErr != nil {
 			return webUILocalBootstrap{}, digestErr
@@ -367,8 +393,9 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		}
 		draft, draftErr := apps.CreateDraft(ctx, agentapp.CreateDraftInput{TenantID: webUILocalTenantID,
 			AgentAppID: webUILocalAppID, ExpectedAppVersion: app.Version,
-			Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: "You are a concise and helpful assistant.",
-				ModelProfileID: webUILocalModelID, ModelProfileVersion: 1}, ChangeMetadata: appMetadata})
+			Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: webUILocalInstruction,
+				ModelProfileID: webUILocalModelID, ModelProfileVersion: 1,
+				ToolRefs: []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}}}, ChangeMetadata: appMetadata})
 		if draftErr != nil {
 			return webUILocalBootstrap{}, draftErr
 		}
@@ -391,6 +418,10 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 	snapshot, err := configs.GetCurrent(ctx, webUILocalTenantID)
+	if err != nil {
+		return webUILocalBootstrap{}, err
+	}
+	root, snapshot, err = ensureWebUILocalToolControlPlane(ctx, tenants, apps, configs, governanceStore, root, snapshot)
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
@@ -444,6 +475,163 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	}
 	return webUILocalBootstrap{Tenant: root, Config: snapshot, Route: route, SecretRoot: configValue.SecretRoot,
 		PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
+}
+
+type webUILocalPolicyStore interface {
+	GetPolicy(context.Context, string, int64) (governance.PolicySnapshot, error)
+	PublishPolicy(context.Context, governance.PolicySnapshot) error
+}
+
+func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Repository, apps agentapp.Repository,
+	configs configdomain.Repository, policies webUILocalPolicyStore, root tenant.Tenant, snapshot configdomain.Snapshot,
+) (tenant.Tenant, configdomain.Snapshot, error) {
+	if ctx == nil || tenants == nil || apps == nil || configs == nil || policies == nil || root.TenantID != webUILocalTenantID ||
+		snapshot.TenantID != webUILocalTenantID || snapshot.Payload.PolicyVersion < 1 {
+		return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("invalid WebUI local control plane")
+	}
+	app, err := apps.Get(ctx, webUILocalTenantID, webUILocalAppID)
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	revision, err := apps.GetRevision(ctx, webUILocalTenantID, webUILocalAppID, app.CurrentRevision)
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	policy, err := policies.GetPolicy(ctx, webUILocalTenantID, snapshot.Payload.PolicyVersion)
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	appMetadata := agentapp.ChangeMetadata{ActorType: "system", ActorID: "webui-local", Reason: "local_graph_upgrade",
+		CorrelationID: "webui-local-graph", TraceID: "webui-local-graph"}
+	childRevision, err := ensureWebUILocalGraphChild(ctx, apps, appMetadata)
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	if !webUILocalGraphRevisionReady(revision, childRevision) {
+		revision = agentapp.Revision{AgentKind: agentapp.AgentKindGraph, AgentSpec: agentapp.AgentSpecV1{
+			Nodes: []agentapp.AgentNodeSpecV1{{Key: "assistant", FailurePolicy: agentapp.FailurePolicyFailFast,
+				AgentRef: agentapp.PublishedAgentRef{AgentAppID: webUILocalChildAppID, Revision: childRevision.Revision,
+					ContentDigest: childRevision.ContentDigest}}},
+			EntryNode: "assistant", MaxConcurrency: 1,
+			Checkpoint: agentapp.CheckpointPolicyV1{Required: true, Namespace: "webui-local"},
+		}}
+		draft, createErr := apps.CreateDraft(ctx, agentapp.CreateDraftInput{TenantID: webUILocalTenantID,
+			AgentAppID: webUILocalAppID, ExpectedAppVersion: app.Version, Revision: revision, ChangeMetadata: appMetadata})
+		if createErr != nil {
+			return tenant.Tenant{}, configdomain.Snapshot{}, createErr
+		}
+		if _, publishErr := apps.Publish(ctx, agentapp.PublishInput{TenantID: webUILocalTenantID, AgentAppID: webUILocalAppID,
+			Revision: draft.Revision, ExpectedAppVersion: app.Version + 1, ExpectedDraftVersion: draft.DraftVersion,
+			ChangeMetadata: appMetadata}); publishErr != nil {
+			return tenant.Tenant{}, configdomain.Snapshot{}, publishErr
+		}
+	}
+	if webUILocalPolicyReady(policy.Policy) {
+		return root, snapshot, nil
+	}
+	if policy.Version == int64(^uint64(0)>>1) {
+		return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("WebUI local policy version exhausted")
+	}
+	policy.Policy.Tools = upsertWebUILocalToolRule(policy.Policy.Tools)
+	policy.Version++
+	policy.PublishedAt = time.Now().UTC()
+	policy.ContentDigest, _, err = governance.PolicyDigest(policy.Policy)
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	if err = policies.PublishPolicy(ctx, policy); err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	payload := snapshot.Payload
+	payload.PolicyVersion = policy.Version
+	metadata := tenant.ChangeMetadata{ActorType: "system", ActorID: "webui-local", ReasonCode: "local_tool_upgrade",
+		CorrelationID: "webui-local-tool", TraceID: "webui-local-tool"}
+	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID,
+		ExpectedTenantVersion: root.Version, Payload: payload, Metadata: metadata})
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	return published.Tenant, published.Snapshot, nil
+}
+
+func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, metadata agentapp.ChangeMetadata) (agentapp.Revision, error) {
+	app, err := apps.Get(ctx, webUILocalTenantID, webUILocalChildAppID)
+	if errors.Is(err, agentapp.ErrNotFound) {
+		app, err = apps.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: webUILocalTenantID,
+			AgentAppID: webUILocalChildAppID, AgentAppKey: "assistant-llm", DisplayName: "WebUI Assistant LLM"}, ChangeMetadata: metadata})
+	}
+	if err != nil {
+		return agentapp.Revision{}, err
+	}
+	if app.CurrentRevision > 0 {
+		current, currentErr := apps.GetRevision(ctx, webUILocalTenantID, webUILocalChildAppID, app.CurrentRevision)
+		if currentErr != nil {
+			return agentapp.Revision{}, currentErr
+		}
+		if webUILocalLLMRevisionReady(current) {
+			return current, nil
+		}
+	}
+	draft, err := apps.CreateDraft(ctx, agentapp.CreateDraftInput{TenantID: webUILocalTenantID,
+		AgentAppID: webUILocalChildAppID, ExpectedAppVersion: app.Version,
+		Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: webUILocalInstruction,
+			ModelProfileID: webUILocalModelID, ModelProfileVersion: 1,
+			ToolRefs: []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}}}, ChangeMetadata: metadata})
+	if err != nil {
+		return agentapp.Revision{}, err
+	}
+	published, err := apps.Publish(ctx, agentapp.PublishInput{TenantID: webUILocalTenantID, AgentAppID: webUILocalChildAppID,
+		Revision: draft.Revision, ExpectedAppVersion: app.Version + 1, ExpectedDraftVersion: draft.DraftVersion,
+		ChangeMetadata: metadata})
+	if err != nil {
+		return agentapp.Revision{}, err
+	}
+	return published.Revision, nil
+}
+
+func webUILocalLLMRevisionReady(value agentapp.Revision) bool {
+	if value.AgentKind != agentapp.AgentKindLLM || value.Instruction != webUILocalInstruction ||
+		value.ModelProfileID != webUILocalModelID || value.ModelProfileVersion != 1 {
+		return false
+	}
+	for _, ref := range value.ToolRefs {
+		if ref.ID == localnote.ID {
+			return ref.Version == localnote.Version && ref.Required
+		}
+	}
+	return false
+}
+
+func webUILocalGraphRevisionReady(value, child agentapp.Revision) bool {
+	if value.AgentKind != agentapp.AgentKindGraph || len(value.AgentSpec.Nodes) != 1 ||
+		value.AgentSpec.EntryNode != "assistant" || value.AgentSpec.MaxConcurrency != 1 ||
+		!value.AgentSpec.Checkpoint.Required || value.AgentSpec.Checkpoint.Namespace != "webui-local" {
+		return false
+	}
+	node := value.AgentSpec.Nodes[0]
+	return node.Key == "assistant" && node.FailurePolicy == agentapp.FailurePolicyFailFast &&
+		node.AgentRef.AgentAppID == webUILocalChildAppID && node.AgentRef.Revision == child.Revision &&
+		node.AgentRef.ContentDigest == child.ContentDigest
+}
+
+func webUILocalPolicyReady(value governance.PolicyV1) bool {
+	for _, rule := range value.Tools {
+		if rule.ToolID == localnote.ID {
+			return rule.Version == localnote.Version && rule.Dangerous && rule.ConfirmationSupported
+		}
+	}
+	return false
+}
+
+func upsertWebUILocalToolRule(values []governance.ToolRule) []governance.ToolRule {
+	result := append([]governance.ToolRule(nil), values...)
+	for index := range result {
+		if result[index].ToolID == localnote.ID {
+			result[index] = governance.ToolRule{ToolID: localnote.ID, Version: localnote.Version, Dangerous: true, ConfirmationSupported: true}
+			return result
+		}
+	}
+	return append(result, governance.ToolRule{ToolID: localnote.ID, Version: localnote.Version, Dangerous: true, ConfirmationSupported: true})
 }
 
 func deriveLocalSecret(kind, token string) []byte {

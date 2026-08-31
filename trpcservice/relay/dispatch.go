@@ -8,6 +8,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 // DispatchRelay is the only component that publishes dispatch outbox rows.
@@ -24,6 +25,7 @@ type DispatchRelay struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (r DispatchRelay) Run(ctx context.Context) error {
@@ -61,7 +63,7 @@ func (r DispatchRelay) publish(ctx context.Context, record messaging.OutboxRecor
 func (r DispatchRelay) base() Base {
 	return Base{Outbox: r.Outbox, Kind: "dispatch", Owner: r.Owner, BatchSize: r.BatchSize,
 		ClaimTTL: r.ClaimTTL, ClaimRenewInterval: r.ClaimRenewInterval,
-		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval}
+		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval, Telemetry: r.Telemetry}
 }
 
 func (r DispatchRelay) validate() error {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type TenantControlEvent struct {
@@ -53,6 +54,7 @@ type ExecutionControlRelay struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (r ExecutionControlRelay) Run(ctx context.Context) error {
@@ -76,14 +78,14 @@ func (r ExecutionControlRelay) publish(ctx context.Context, record messaging.Out
 	return r.Controls.PublishExecutionControl(ctx, ExecutionControlEvent{
 		TenantID: record.TenantID, Kind: "execution-control", AggregateID: record.AggregateID,
 		IdempotencyKey: record.IdempotencyKey, PayloadRef: record.PayloadRef,
-		TraceParent: record.TraceParent, Version: record.EventSeq,
+		TraceParent: telemetry.EffectiveTraceParent(ctx, record.TraceParent), Version: record.EventSeq,
 	})
 }
 
 func (r ExecutionControlRelay) base() Base {
 	return Base{Outbox: r.Outbox, Kind: "execution-control", Owner: r.Owner,
 		BatchSize: r.BatchSize, ClaimTTL: r.ClaimTTL, ClaimRenewInterval: r.ClaimRenewInterval,
-		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval}
+		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval, Telemetry: r.Telemetry}
 }
 
 func (r ExecutionControlRelay) validate() error {
@@ -108,6 +110,7 @@ type TenantControlRelay struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (r TenantControlRelay) Run(ctx context.Context) error {
@@ -130,14 +133,14 @@ func (r TenantControlRelay) publish(ctx context.Context, record messaging.Outbox
 	}
 	event := TenantControlEvent{TenantID: record.TenantID, Kind: r.Kind,
 		AggregateID: record.AggregateID, IdempotencyKey: record.IdempotencyKey,
-		PayloadRef: record.PayloadRef, TraceParent: record.TraceParent, Version: record.EventSeq}
+		PayloadRef: record.PayloadRef, TraceParent: telemetry.EffectiveTraceParent(ctx, record.TraceParent), Version: record.EventSeq}
 	return r.Controls.PublishTenantControl(ctx, event)
 }
 
 func (r TenantControlRelay) base() Base {
 	return Base{Outbox: r.Outbox, Kind: r.Kind, Owner: r.Owner, BatchSize: r.BatchSize,
 		ClaimTTL: r.ClaimTTL, ClaimRenewInterval: r.ClaimRenewInterval,
-		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval}
+		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval, Telemetry: r.Telemetry}
 }
 
 func (r TenantControlRelay) validate() error {

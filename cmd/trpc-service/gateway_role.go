@@ -41,6 +41,11 @@ func runGatewayRole(parent context.Context, getenv func(string) string, logger *
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "gateway", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -85,7 +90,8 @@ func runGatewayRole(parent context.Context, getenv func(string) string, logger *
 	tasks := gatewaypostgres.NewTaskStore(db)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	submitter := gateway.RunSubmitter{Inbox: payloads, Payloads: payloads,
-		Dispatcher: gateway.BrokerDispatcher{Tasks: tasks, Bindings: configRepo}, PayloadKeyVersion: configValue.PayloadKeyVersion}
+		Dispatcher: gateway.BrokerDispatcher{Tasks: tasks, Bindings: configRepo}, PayloadKeyVersion: configValue.PayloadKeyVersion,
+		Telemetry: telemetryProvider}
 	events := gateway.TerminalEventStore{Tasks: tasks, Results: payloads}
 	routes := gatewaypostgres.HTTPRouteResolver{Tenants: tenantRepo, Configs: configRepo}
 	bridge := gateway.NewGatewayRunnerBridge(submitter, events)

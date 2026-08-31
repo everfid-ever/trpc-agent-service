@@ -8,6 +8,7 @@ import (
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 // ReplyRelay publishes committed reply facts to the durable account queue. It
@@ -24,6 +25,7 @@ type ReplyRelay struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (r ReplyRelay) Run(ctx context.Context) error {
@@ -68,14 +70,14 @@ func (r ReplyRelay) publish(ctx context.Context, record messaging.OutboxRecord) 
 		EventSeq: record.EventSeq, Kind: "message.completed", ContentRef: result.ResultRef,
 		Target: channel.DeliveryTarget{Channel: route.Channel, ExternalAccountID: route.ExternalAccountID,
 			ExternalMessageID: route.ExternalMessageID, ExternalChatID: route.ExternalChatID, ExternalUserID: route.ExternalUserID},
-		Final: true, TraceParent: record.TraceParent}
+		Final: true, TraceParent: telemetry.EffectiveTraceParent(ctx, record.TraceParent)}
 	return r.Replies.PublishReply(ctx, destination, event)
 }
 
 func (r ReplyRelay) base() Base {
 	return Base{Outbox: r.Outbox, Kind: "reply", Owner: r.Owner, BatchSize: r.BatchSize,
 		ClaimTTL: r.ClaimTTL, ClaimRenewInterval: r.ClaimRenewInterval,
-		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval}
+		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval, Telemetry: r.Telemetry}
 }
 
 func (r ReplyRelay) validate() error {

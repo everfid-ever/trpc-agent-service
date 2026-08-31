@@ -31,6 +31,7 @@ import (
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
@@ -45,6 +46,11 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "channel", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -68,12 +74,12 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	identityMapper := identity.Mapper{Secrets: secretProvider}
 
 	feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}}
-	feishuEndpoint, err := newChannelEndpoint(feishuAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody)
+	feishuEndpoint, err := newChannelEndpoint(feishuAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody, telemetryProvider)
 	if err != nil {
 		return errors.New("Feishu callback configuration rejected")
 	}
 	wecomAdapter := &wecom.Adapter{Protocol: wecomprotocol.Verifier{}}
-	wecomEndpoint, err := newChannelEndpoint(wecomAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody)
+	wecomEndpoint, err := newChannelEndpoint(wecomAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody, telemetryProvider)
 	if err != nil {
 		return errors.New("WeCom callback configuration rejected")
 	}
@@ -85,7 +91,7 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	if configValue.WebUIEnabled {
 		webuiMailbox := webuipostgres.New(db)
 		webuiAdapter := &webui.Adapter{Protocol: webui.Verifier{}, Mailbox: webuiMailbox}
-		webuiEndpoint, endpointErr := newChannelEndpoint(webuiAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody)
+		webuiEndpoint, endpointErr := newChannelEndpoint(webuiAdapter, bindingResolver, identityMapper, intake, payloads, configValue.PayloadKeyVersion, configValue.ChannelCallbackMaxBody, telemetryProvider)
 		if endpointErr != nil {
 			return errors.New("WebUI callback configuration rejected")
 		}
@@ -261,12 +267,12 @@ func (g readinessGate) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 	g.Handler.ServeHTTP(writer, request)
 }
 
-func newChannelEndpoint(adapter channel.HTTPAdapter, resolver ingress.Resolver, identityMapper identity.Mapper, intake *preprocesspostgres.Store, payloads *messagingpostgres.Store, keyVersion int64, maxBody int64) (*httpcallback.Endpoint, error) {
+func newChannelEndpoint(adapter channel.HTTPAdapter, resolver ingress.Resolver, identityMapper identity.Mapper, intake *preprocesspostgres.Store, payloads *messagingpostgres.Store, keyVersion int64, maxBody int64, provider telemetry.Provider) (*httpcallback.Endpoint, error) {
 	if adapter == nil || resolver.Store == nil || resolver.Secrets == nil || identityMapper.Secrets == nil || intake == nil || payloads == nil || keyVersion < 1 || maxBody < 1 {
 		return nil, runtime.ErrInvariantViolation
 	}
-	verification := ingress.Service{Adapter: adapter, Bindings: resolver}
-	pipeline := ingress.Pipeline{Verification: verification, Identity: identityMapper, Intake: intake, Payloads: payloads, KeyVersion: keyVersion}
+	verification := ingress.Service{Adapter: adapter, Bindings: resolver, Telemetry: provider}
+	pipeline := ingress.Pipeline{Verification: verification, Identity: identityMapper, Intake: intake, Payloads: payloads, KeyVersion: keyVersion, Telemetry: provider}
 	challenge := ingress.ChallengeService{Adapter: adapter, Bindings: resolver}
 	endpoint, err := httpcallback.NewEndpoint(adapter, pipeline, challenge)
 	if err != nil {

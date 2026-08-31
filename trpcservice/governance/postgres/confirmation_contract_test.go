@@ -146,4 +146,11 @@ VALUES($1,$2,'request',repeat('d',64),$3,'session',1,'user','binding','danger',1
 	if _, err := coordinator.GetGrantByConfirmation(ctx, tenantID, cancelledConfirmation); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("cancelled grant=%v", err)
 	}
+	var confirmationAudit int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM outbox WHERE tenant_id=$1 AND kind='audit' AND idempotency_key LIKE 'confirmation-audit:%'`, tenantID).Scan(&confirmationAudit); err != nil {
+		t.Fatal(err)
+	}
+	if confirmationAudit != 4 {
+		t.Fatalf("confirmation audit intents=%d", confirmationAudit)
+	}
 }

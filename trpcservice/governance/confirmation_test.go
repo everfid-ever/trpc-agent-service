@@ -30,6 +30,40 @@ type expiryCoordinator struct {
 	limit int
 }
 
+type actionCoordinator struct {
+	ConfirmationCoordinator
+	value    Confirmation
+	decision ConfirmationDecision
+}
+
+func (c *actionCoordinator) GetConfirmation(context.Context, string, string) (Confirmation, error) {
+	return c.value, nil
+}
+func (c *actionCoordinator) Decide(_ context.Context, in ConfirmationDecision) (Confirmation, error) {
+	c.decision = in
+	c.value.State = ConfirmationApproved
+	return c.value, nil
+}
+
+func TestConfirmationActionServiceBindsVerifiedActorAndSession(t *testing.T) {
+	now := time.Now().UTC()
+	coordinator := &actionCoordinator{value: Confirmation{SuspensionRequest: SuspensionRequest{ConfirmationID: "confirmation", TenantID: "tenant",
+		SubjectID: "subject", ChannelBindingID: "binding", SessionID: "session"}, State: ConfirmationPending, Version: 1}}
+	service := ConfirmationActionService{Coordinator: coordinator}
+	action := ConfirmationAction{TenantID: "tenant", ConfirmationID: "confirmation", SubjectID: "subject", ChannelBindingID: "binding",
+		SessionID: "session", Approve: true, ExpectedVersion: 1, DecidedAt: now}
+	if _, err := service.DecideAction(context.Background(), action); err != nil {
+		t.Fatal(err)
+	}
+	if !coordinator.decision.Approve || coordinator.decision.SubjectID != "subject" {
+		t.Fatalf("decision=%#v", coordinator.decision)
+	}
+	action.SessionID = "forged"
+	if _, err := service.DecideAction(context.Background(), action); !errors.Is(err, runtime.ErrTenantScope) {
+		t.Fatalf("forged session=%v", err)
+	}
+}
+
 func (c *expiryCoordinator) ExpireDue(_ context.Context, now time.Time, limit int) ([]Confirmation, error) {
 	c.now, c.limit = now, limit
 	return []Confirmation{{State: ConfirmationExpired}}, nil

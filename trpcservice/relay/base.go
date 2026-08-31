@@ -8,6 +8,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type RecordProcessor interface {
@@ -30,6 +31,7 @@ type Base struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (b Base) Run(ctx context.Context, processor RecordProcessor) error {
@@ -95,7 +97,12 @@ func (b Base) RunOnce(ctx context.Context, processor RecordProcessor) (int, erro
 					return processCtx.Err()
 				case <-gates[index]:
 				}
-				return processor.Process(processCtx, value)
+				operation, component := relayTelemetry(b.Kind)
+				processCtx, finish := telemetry.StartOperation(processCtx, b.Telemetry, value.TraceParent, operation,
+					telemetry.ComponentAttribute(component))
+				processErr := processor.Process(processCtx, value)
+				finish(processErr)
+				return processErr
 			})
 			version, processErr, claimLost := b.processClaim(ctx, ordered, current, claimTTL)
 			results[index] <- claimResult{version: version, err: processErr, claimLost: claimLost}
@@ -120,6 +127,21 @@ func (b Base) RunOnce(ctx context.Context, processor RecordProcessor) (int, erro
 		published++
 	}
 	return published, relayErr
+}
+
+func relayTelemetry(kind string) (telemetry.Operation, telemetry.Component) {
+	switch kind {
+	case "dispatch":
+		return telemetry.OperationRelayDispatch, telemetry.ComponentBusinessRelay
+	case "reply":
+		return telemetry.OperationRelayReply, telemetry.ComponentBusinessRelay
+	case "wakeup":
+		return telemetry.OperationRelayWakeup, telemetry.ComponentBusinessRelay
+	case "audit":
+		return telemetry.OperationAuditExport, telemetry.ComponentAuditRelay
+	default:
+		return telemetry.OperationRelayControl, telemetry.ComponentBusinessRelay
+	}
 }
 
 func (b Base) processClaim(ctx context.Context, processor RecordProcessor, record messaging.OutboxRecord, claimTTL time.Duration) (uint64, error, bool) {

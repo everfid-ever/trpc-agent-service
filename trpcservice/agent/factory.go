@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
@@ -60,32 +61,38 @@ type Factory struct {
 	Policies      governance.Repository
 	Confirmations governance.ConfirmationCoordinator
 	ToolResults   messaging.ToolResultStore
+	Telemetry     telemetry.Provider
 }
 
 func (f Factory) Build(ctx context.Context, snapshot profile.ExecutionProfileSnapshot) (agentcore.Agent, error) {
 	if f.Profiles == nil || f.Models == nil {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	return f.build(ctx, snapshot, snapshot.Key.AgentAppID, 0, make(map[profile.ExecutionProfileKey]bool))
+	value, _, err := f.build(ctx, snapshot, snapshot.Key.AgentAppID, 0, false, make(map[profile.ExecutionProfileKey]bool))
+	return value, err
 }
 
-func (f Factory) build(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, depth int, path map[profile.ExecutionProfileKey]bool) (agentcore.Agent, error) {
+func (f Factory) build(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, depth int,
+	insideGraph bool, path map[profile.ExecutionProfileKey]bool,
+) (agentcore.Agent, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if depth > maxCompositionDepth || path[snapshot.Key] {
-		return nil, runtime.ErrInvariantViolation
+		return nil, false, runtime.ErrInvariantViolation
 	}
 	path[snapshot.Key] = true
 	defer delete(path, snapshot.Key)
 
 	if snapshot.AgentKind == agentapp.AgentKindLLM {
-		return f.buildLLM(ctx, snapshot, name)
+		value, ask, err := f.buildLLM(ctx, snapshot, name, insideGraph)
+		return value, ask, err
 	}
 	subAgents := make([]agentcore.Agent, 0, len(snapshot.AgentSpec.Nodes))
+	requiresConfirmation := false
 	for _, node := range snapshot.AgentSpec.Nodes {
 		if node.FailurePolicy != agentapp.FailurePolicyFailFast {
-			return nil, runtime.ErrCapabilityUnsupported
+			return nil, false, runtime.ErrCapabilityUnsupported
 		}
 		key := profile.ExecutionProfileKey{
 			TenantID:         snapshot.Key.TenantID,
@@ -104,36 +111,46 @@ func (f Factory) build(ctx context.Context, snapshot profile.ExecutionProfileSna
 			child, err = f.Profiles.Resolve(ctx, key)
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		built, err := f.build(ctx, child, node.Key, depth+1, path)
+		built, childRequiresConfirmation, err := f.build(ctx, child, node.Key, depth+1,
+			insideGraph || snapshot.AgentKind == agentapp.AgentKindGraph, path)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		subAgents = append(subAgents, built)
+		requiresConfirmation = requiresConfirmation || childRequiresConfirmation
 	}
 
 	switch snapshot.AgentKind {
 	case agentapp.AgentKindChain:
-		return chainagent.New(name, chainagent.WithSubAgents(subAgents), chainagent.WithAgentCallbacks(f.Callbacks.Agent)), nil
+		return chainagent.New(name, chainagent.WithSubAgents(subAgents), chainagent.WithAgentCallbacks(f.Callbacks.Agent)), requiresConfirmation, nil
 	case agentapp.AgentKindParallel:
 		if snapshot.AgentSpec.MaxConcurrency < len(subAgents) {
-			return nil, runtime.ErrCapabilityUnsupported
+			return nil, false, runtime.ErrCapabilityUnsupported
 		}
-		return parallelagent.New(name, parallelagent.WithSubAgents(subAgents), parallelagent.WithAgentCallbacks(f.Callbacks.Agent)), nil
+		return parallelagent.New(name, parallelagent.WithSubAgents(subAgents), parallelagent.WithAgentCallbacks(f.Callbacks.Agent)), requiresConfirmation, nil
 	case agentapp.AgentKindCycle:
-		return cycleagent.New(name, cycleagent.WithSubAgents(subAgents), cycleagent.WithMaxIterations(snapshot.AgentSpec.MaxIterations), cycleagent.WithAgentCallbacks(f.Callbacks.Agent)), nil
+		return cycleagent.New(name, cycleagent.WithSubAgents(subAgents), cycleagent.WithMaxIterations(snapshot.AgentSpec.MaxIterations), cycleagent.WithAgentCallbacks(f.Callbacks.Agent)), requiresConfirmation, nil
 	case agentapp.AgentKindGraph:
-		return f.buildGraph(ctx, snapshot, name, subAgents)
+		value, err := f.buildGraph(ctx, snapshot, name, subAgents, requiresConfirmation)
+		return value, requiresConfirmation, err
 	default:
-		return nil, runtime.ErrCapabilityUnsupported
+		return nil, false, runtime.ErrCapabilityUnsupported
 	}
 }
 
-func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string) (agentcore.Agent, error) {
+func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, insideGraph bool) (agentcore.Agent, bool, error) {
 	resolvedModel, err := f.Models.ResolveModel(ctx, snapshot.Key.TenantID, snapshot.ModelProfileRef)
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+	resolvedModel = instrumentModel(f.Telemetry, resolvedModel)
+	modelCallbacks := f.Callbacks.Model
+	toolCallbacks := f.Callbacks.Tool
+	if telemetry.Enabled(f.Telemetry) {
+		modelCallbacks = withTelemetryModelCallbacks(modelCallbacks, f.Telemetry)
+		toolCallbacks = withTelemetryToolCallbacks(toolCallbacks, f.Telemetry)
 	}
 	options := []llmagent.Option{
 		llmagent.WithDescription(snapshot.Description),
@@ -141,23 +158,23 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		llmagent.WithGlobalInstruction(snapshot.GlobalInstruction),
 		llmagent.WithModel(resolvedModel),
 		llmagent.WithAgentCallbacks(f.Callbacks.Agent),
-		llmagent.WithModelCallbacks(f.Callbacks.Model),
-		llmagent.WithToolCallbacks(f.Callbacks.Tool),
+		llmagent.WithModelCallbacks(modelCallbacks),
+		llmagent.WithToolCallbacks(toolCallbacks),
 	}
 	if len(snapshot.GenerationConfig) != 0 {
 		config, err := decodeGenerationConfig(snapshot.GenerationConfig)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		options = append(options, llmagent.WithGenerationConfig(config))
 	}
 	if len(snapshot.ToolRefs) != 0 {
 		if f.Tools == nil {
-			return nil, runtime.ErrCapabilityUnsupported
+			return nil, false, runtime.ErrCapabilityUnsupported
 		}
 		tools, err := f.Tools.ResolveTools(ctx, snapshot.Key.TenantID, snapshot.ToolRefs)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		refs := make([]governance.VersionedRef, len(snapshot.ToolRefs))
 		for index, ref := range snapshot.ToolRefs {
@@ -165,21 +182,53 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		}
 		guarded, err := servicetool.GuardCallablesWithConfirmation(f.Policies, f.Confirmations, f.ToolResults, refs, tools)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		options = append(options, llmagent.WithTools(guarded))
+		options = append(options, llmagent.WithTools(instrumentCallables(f.Telemetry, guarded)))
 	}
 	if len(snapshot.SkillRefs) != 0 {
 		if f.Skills == nil {
-			return nil, runtime.ErrCapabilityUnsupported
+			return nil, false, runtime.ErrCapabilityUnsupported
 		}
 		provider, err := f.Skills.RepositoryProvider(ctx, snapshot.Key.TenantID, snapshot.SkillRefs)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		options = append(options, llmagent.WithSkillRepositoryProvider(provider), llmagent.WithSkillScopeMode(skill.SkillScopeApp))
 	}
-	return llmagent.New(name, options...), nil
+	value := agentcore.Agent(llmagent.New(name, options...))
+	askTools, err := f.graphAskTools(ctx, snapshot)
+	if err != nil {
+		return nil, false, err
+	}
+	if insideGraph && len(askTools) != 0 {
+		value, err = newGraphConfirmationAgent(value, askTools)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return value, len(askTools) != 0, nil
+}
+
+func (f Factory) graphAskTools(ctx context.Context, snapshot profile.ExecutionProfileSnapshot) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	if len(snapshot.ToolRefs) == 0 {
+		return result, nil
+	}
+	if f.Policies == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	policy, err := f.Policies.GetPolicy(ctx, snapshot.Key.TenantID, snapshot.Key.PolicyVersion)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range snapshot.ToolRefs {
+		value := governance.VersionedRef{ID: ref.ID, Version: ref.Version}
+		if governance.ToolDecision(policy, value).Action == governance.ActionAsk {
+			result[ref.ID] = struct{}{}
+		}
+	}
+	return result, nil
 }
 
 // ResolveConfirmedTool returns one exact-version callable behind the same
@@ -200,10 +249,15 @@ func (f Factory) ResolveConfirmedTool(ctx context.Context, tenantID string, ref 
 	if !ok {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
+	if telemetry.Enabled(f.Telemetry) {
+		return instrumentedCallable{inner: callable, provider: f.Telemetry}, nil
+	}
 	return callable, nil
 }
 
-func (f Factory) buildGraph(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, subAgents []agentcore.Agent) (agentcore.Agent, error) {
+func (f Factory) buildGraph(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, subAgents []agentcore.Agent,
+	requiresConfirmation bool,
+) (agentcore.Agent, error) {
 	for _, edge := range snapshot.AgentSpec.Edges {
 		if edge.ConditionRef != nil {
 			return nil, runtime.ErrCapabilityUnsupported
@@ -233,6 +287,9 @@ func (f Factory) buildGraph(ctx context.Context, snapshot profile.ExecutionProfi
 		graphagent.WithSubAgents(subAgents),
 		graphagent.WithMaxConcurrency(snapshot.AgentSpec.MaxConcurrency),
 		graphagent.WithAgentCallbacks(f.Callbacks.Agent),
+	}
+	if requiresConfirmation && !snapshot.AgentSpec.Checkpoint.Required {
+		return nil, runtime.ErrCapabilityUnsupported
 	}
 	if snapshot.AgentSpec.Checkpoint.Required {
 		if f.Checkpoints == nil {

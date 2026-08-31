@@ -63,11 +63,71 @@ type productionConfig struct {
 	WorkerLeaseTTL, WorkerLeaseRenew, WorkerRetryWait            time.Duration
 	WorkerReclaimInterval, WorkerCancelPoll, WorkerDrainTimeout  time.Duration
 	WorkerBundleFailureBackoff, WorkerBundleCloseTimeout         time.Duration
+	WorkerGraphCheckpointTTL                                     time.Duration
 
 	GatewayProbeTenant, GatewayAuthSecretRef, GatewayPublicURL           string
 	GatewayAuthSecretVersion, GatewayMaxBody, GatewaySSEReplayLimit      int64
 	GatewayAuthClockSkew, GatewaySSEPollInterval, GatewayProtocolTimeout time.Duration
 	GatewaySSEMaxSubscribers                                             int64
+
+	AuditOwner                             string
+	AuditCompliancePostgresDSN             string
+	AuditBatchSize                         int
+	AuditLagAlertCount                     int64
+	AuditClaimTTL, AuditClaimRenew         time.Duration
+	AuditRetryDelay, AuditPollInterval     time.Duration
+	AuditLagPollInterval, AuditLagAlertAge time.Duration
+}
+
+func loadAuditRelayConfig(getenv func(string) string) (productionConfig, error) {
+	if getenv == nil {
+		return productionConfig{}, errors.New("environment reader is required")
+	}
+	config := productionConfig{ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
+		PostgresDSN:                strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")),
+		AuditCompliancePostgresDSN: strings.TrimSpace(getenv("TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN")),
+		AuditOwner:                 strings.TrimSpace(getenv("TRPC_AUDIT_RELAY_OWNER")),
+		ProbeTimeout:               5 * time.Second, ProbeInterval: 15 * time.Second, ShutdownTimeout: 30 * time.Second,
+		AuditBatchSize: 100, AuditClaimTTL: 30 * time.Second, AuditClaimRenew: 10 * time.Second,
+		AuditRetryDelay: time.Second, AuditPollInterval: 100 * time.Millisecond,
+		AuditLagPollInterval: 5 * time.Second, AuditLagAlertAge: 5 * time.Minute, AuditLagAlertCount: 10000}
+	var err error
+	if config.AuditBatchSize, err = envInt(getenv, "TRPC_AUDIT_BATCH_SIZE", config.AuditBatchSize); err != nil || config.AuditBatchSize < 1 || config.AuditBatchSize > 1000 {
+		return productionConfig{}, errors.New("invalid TRPC_AUDIT_BATCH_SIZE")
+	}
+	if config.AuditLagAlertCount, err = envInt64(getenv, "TRPC_AUDIT_LAG_ALERT_COUNT", config.AuditLagAlertCount); err != nil || config.AuditLagAlertCount < 1 {
+		return productionConfig{}, errors.New("invalid TRPC_AUDIT_LAG_ALERT_COUNT")
+	}
+	for _, item := range []struct {
+		name    string
+		target  *time.Duration
+		minimum time.Duration
+	}{
+		{"TRPC_PROBE_TIMEOUT", &config.ProbeTimeout, time.Millisecond}, {"TRPC_PROBE_INTERVAL", &config.ProbeInterval, time.Millisecond},
+		{"TRPC_SHUTDOWN_TIMEOUT", &config.ShutdownTimeout, time.Second}, {"TRPC_AUDIT_CLAIM_TTL", &config.AuditClaimTTL, time.Second},
+		{"TRPC_AUDIT_CLAIM_RENEW", &config.AuditClaimRenew, time.Millisecond}, {"TRPC_AUDIT_RETRY_DELAY", &config.AuditRetryDelay, time.Millisecond},
+		{"TRPC_AUDIT_POLL_INTERVAL", &config.AuditPollInterval, time.Millisecond},
+		{"TRPC_AUDIT_LAG_POLL_INTERVAL", &config.AuditLagPollInterval, time.Millisecond},
+		{"TRPC_AUDIT_LAG_ALERT_AGE", &config.AuditLagAlertAge, time.Second},
+	} {
+		if *item.target, err = envDuration(getenv, item.name, *item.target); err != nil || *item.target < item.minimum {
+			return productionConfig{}, errors.New("invalid " + item.name)
+		}
+	}
+	if config.ListenAddress == "" || config.PostgresDSN == "" || config.AuditCompliancePostgresDSN == "" ||
+		config.AuditCompliancePostgresDSN == config.PostgresDSN {
+		return productionConfig{}, errors.New("required audit relay dependency configuration is missing")
+	}
+	if len(config.AuditOwner) > 128 || strings.ContainsAny(config.AuditOwner, "\x00\r\n") {
+		return productionConfig{}, errors.New("invalid TRPC_AUDIT_RELAY_OWNER")
+	}
+	if config.AuditClaimRenew >= config.AuditClaimTTL || config.ShutdownTimeout <= config.AuditClaimRenew {
+		return productionConfig{}, errors.New("invalid audit relay lifecycle timing")
+	}
+	if config.AuditLagPollInterval >= config.AuditLagAlertAge || config.AuditLagAlertAge > 7*24*time.Hour {
+		return productionConfig{}, errors.New("invalid audit lag timing")
+	}
+	return config, nil
 }
 
 func loadGatewayConfig(getenv func(string) string) (productionConfig, error) {
@@ -151,6 +211,7 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		WorkerLeaseTTL: 30 * time.Second, WorkerLeaseRenew: 10 * time.Second, WorkerRetryWait: 100 * time.Millisecond,
 		WorkerReclaimInterval: 5 * time.Second, WorkerCancelPoll: 100 * time.Millisecond, WorkerDrainTimeout: 30 * time.Second,
 		WorkerBundleFailureBackoff: 250 * time.Millisecond, WorkerBundleCloseTimeout: 5 * time.Second,
+		WorkerGraphCheckpointTTL: 7 * 24 * time.Hour,
 	}
 	config.DLPEndpoint = strings.TrimSpace(getenv("TRPC_DLP_ENDPOINT"))
 	config.DLPProbeTenant = strings.TrimSpace(getenv("TRPC_DLP_PROBE_TENANT_ID"))
@@ -212,6 +273,7 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		{"TRPC_WORKER_RECLAIM_INTERVAL", &config.WorkerReclaimInterval, time.Millisecond}, {"TRPC_WORKER_CANCEL_POLL", &config.WorkerCancelPoll, time.Millisecond},
 		{"TRPC_WORKER_DRAIN_TIMEOUT", &config.WorkerDrainTimeout, time.Second}, {"TRPC_WORKER_BUNDLE_FAILURE_BACKOFF", &config.WorkerBundleFailureBackoff, time.Millisecond},
 		{"TRPC_WORKER_BUNDLE_CLOSE_TIMEOUT", &config.WorkerBundleCloseTimeout, time.Millisecond},
+		{"TRPC_WORKER_GRAPH_CHECKPOINT_TTL", &config.WorkerGraphCheckpointTTL, time.Hour},
 	} {
 		if *item.target, err = envDuration(getenv, item.name, *item.target); err != nil || *item.target < item.minimum {
 			return productionConfig{}, errors.New("invalid " + item.name)

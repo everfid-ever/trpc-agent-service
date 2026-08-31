@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 25 {
+	if len(all) != 26 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,22 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestAuditRelayMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[25]
+	if migration.Version != "000026" || migration.Name != "audit_relay" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.audit_event", "event_digest", "resource_refs jsonb", "audit_event_tenant_time_idx", "reject_audit_event_change", "audit_event_immutable"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

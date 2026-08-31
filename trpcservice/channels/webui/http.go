@@ -1,34 +1,64 @@
 package webui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
 type BrowserHandler struct {
-	Callback http.Handler
-	Routes   ingress.Store
-	Secrets  secrets.Provider
-	Messages MessageReader
-	Results  messaging.ResultStore
-	Now      func() time.Time
-	MaxSkew  time.Duration
+	Callback      http.Handler
+	Routes        ingress.Store
+	Secrets       secrets.Provider
+	Messages      MessageReader
+	Results       messaging.ResultStore
+	ReplyRoutes   messaging.ReplyRouteStore
+	Confirmations interface {
+		GetConfirmation(context.Context, string, string) (governance.Confirmation, error)
+	}
+	Actions governance.ConfirmationActionDecider
+	Now     func() time.Time
+	MaxSkew time.Duration
 }
 
 type browserReply struct {
-	RequestID         string    `json:"request_id"`
-	ProviderMessageID string    `json:"provider_message_id"`
-	Text              string    `json:"text"`
-	CreatedAt         time.Time `json:"created_at"`
+	RequestID         string               `json:"request_id"`
+	ProviderMessageID string               `json:"provider_message_id"`
+	Text              string               `json:"text"`
+	CreatedAt         time.Time            `json:"created_at"`
+	ContentRef        string               `json:"content_ref"`
+	Confirmation      *browserConfirmation `json:"confirmation,omitempty"`
+}
+
+type browserConfirmation struct {
+	ConfirmationID string                       `json:"confirmation_id"`
+	ToolID         string                       `json:"tool_id"`
+	ToolVersion    int64                        `json:"tool_version"`
+	State          governance.ConfirmationState `json:"state"`
+	Version        int64                        `json:"version"`
+	ExpiresAt      time.Time                    `json:"expires_at"`
+}
+
+type confirmationActionRequest struct {
+	SchemaVersion   uint16 `json:"schema_version"`
+	ConfirmationID  string `json:"confirmation_id"`
+	ExpectedVersion int64  `json:"expected_version"`
+	Decision        string `json:"decision"`
+	ExternalUserID  string `json:"external_user_id"`
+	ExternalChatID  string `json:"external_chat_id"`
 }
 
 func (h BrowserHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -69,6 +99,12 @@ func (h BrowserHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		h.replies(writer, request)
+	case "/webui/api/confirmations/actions":
+		if request.Method != http.MethodPost {
+			methodNotAllowed(writer, "POST")
+			return
+		}
+		h.confirmationAction(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}
@@ -97,7 +133,7 @@ func (h BrowserHandler) replies(writer http.ResponseWriter, request *http.Reques
 	}
 	replies := make([]browserReply, 0, len(messages))
 	for _, message := range messages {
-		result, resultErr := h.Results.GetResult(request.Context(), route.TenantID, message.RequestID)
+		result, resultErr := messaging.ResolveReplyContent(request.Context(), h.Results, route.TenantID, message.RequestID, message.ContentRef)
 		if resultErr != nil {
 			writeBrowserError(writer, resultErr)
 			return
@@ -106,8 +142,18 @@ func (h BrowserHandler) replies(writer http.ResponseWriter, request *http.Reques
 			writeBrowserError(writer, runtime.ErrVersionMismatch)
 			return
 		}
-		replies = append(replies, browserReply{RequestID: message.RequestID, ProviderMessageID: message.ProviderMessageID,
-			Text: string(result.Content), CreatedAt: message.CreatedAt})
+		reply := browserReply{RequestID: message.RequestID, ProviderMessageID: message.ProviderMessageID,
+			Text: string(result.Content), ContentRef: message.ContentRef, CreatedAt: message.CreatedAt}
+		if strings.HasPrefix(message.ContentRef, "confirmation://") {
+			confirmation, confirmationErr := h.browserConfirmation(request.Context(), route, message, result.Content)
+			if confirmationErr != nil {
+				writeBrowserError(writer, confirmationErr)
+				return
+			}
+			reply.Confirmation = &confirmation
+			reply.Text = "危险工具确认：" + confirmation.ToolID
+		}
+		replies = append(replies, reply)
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.Header().Set("Cache-Control", "no-store")
@@ -115,7 +161,123 @@ func (h BrowserHandler) replies(writer http.ResponseWriter, request *http.Reques
 	_ = json.NewEncoder(writer).Encode(map[string]any{"messages": replies})
 }
 
+func (h BrowserHandler) browserConfirmation(ctx context.Context, route ingress.BindingRoute, message Message, content []byte) (browserConfirmation, error) {
+	if h.Confirmations == nil {
+		return browserConfirmation{}, runtime.ErrCapabilityUnsupported
+	}
+	var prompt struct {
+		SchemaVersion  uint16    `json:"schema_version"`
+		Kind           string    `json:"kind"`
+		ConfirmationID string    `json:"confirmation_id"`
+		ToolID         string    `json:"tool_id"`
+		ToolVersion    int64     `json:"tool_version"`
+		ExpiresAt      time.Time `json:"expires_at"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&prompt); err != nil {
+		return browserConfirmation{}, runtime.ErrInvalidEnvelope
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return browserConfirmation{}, runtime.ErrInvalidEnvelope
+	}
+	if prompt.SchemaVersion != 1 || prompt.Kind != "tool_confirmation" || prompt.ConfirmationID == "" || prompt.ToolID == "" || prompt.ToolVersion < 1 || prompt.ExpiresAt.IsZero() ||
+		message.ContentRef != "confirmation://"+route.TenantID+"/"+prompt.ConfirmationID {
+		return browserConfirmation{}, runtime.ErrVersionMismatch
+	}
+	value, err := h.Confirmations.GetConfirmation(ctx, route.TenantID, prompt.ConfirmationID)
+	if err != nil {
+		return browserConfirmation{}, err
+	}
+	if value.RequestID != message.RequestID || value.ChannelBindingID != route.ChannelBindingID || value.Tool.ID != prompt.ToolID || value.Tool.Version != prompt.ToolVersion || !value.ExpiresAt.Equal(prompt.ExpiresAt) {
+		return browserConfirmation{}, runtime.ErrTenantScope
+	}
+	return browserConfirmation{ConfirmationID: value.ConfirmationID, ToolID: value.Tool.ID, ToolVersion: value.Tool.Version,
+		State: value.State, Version: value.Version, ExpiresAt: value.ExpiresAt}, nil
+}
+
+func (h BrowserHandler) confirmationAction(writer http.ResponseWriter, request *http.Request) {
+	if h.Actions == nil || h.Confirmations == nil || h.ReplyRoutes == nil {
+		http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, 16<<10))
+	if err != nil || len(body) == 0 {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	var input confirmationActionRequest
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	input.ConfirmationID, input.Decision = strings.TrimSpace(input.ConfirmationID), strings.TrimSpace(input.Decision)
+	input.ExternalUserID, input.ExternalChatID = strings.TrimSpace(input.ExternalUserID), strings.TrimSpace(input.ExternalChatID)
+	if input.SchemaVersion != 1 || input.ConfirmationID == "" || input.ExpectedVersion < 1 ||
+		(input.Decision != "approve" && input.Decision != "deny") || input.ExternalUserID == "" || input.ExternalChatID == "" {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	routeKey := strings.TrimSpace(request.URL.Query().Get("route_key"))
+	if routeKey == "" {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	signedPayload := append([]byte(request.Method+"\n"+request.URL.RequestURI()+"\n"), body...)
+	route, err := h.authorizePayload(request.Context(), request, routeKey, signedPayload)
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	confirmation, err := h.Confirmations.GetConfirmation(request.Context(), route.TenantID, input.ConfirmationID)
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	replyRoute, err := h.ReplyRoutes.ResolveReplyRoute(request.Context(), route.TenantID, confirmation.RequestID)
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	if replyRoute.Channel != "webui" || replyRoute.ChannelBindingID != route.ChannelBindingID || replyRoute.ExternalAccountID != route.ExternalAccountID ||
+		replyRoute.ExternalUserID != input.ExternalUserID || replyRoute.ExternalChatID != input.ExternalChatID {
+		writeBrowserError(writer, runtime.ErrTenantScope)
+		return
+	}
+	binding := channel.VerifiedBinding{TenantID: route.TenantID, AgentAppID: route.AgentAppID, ChannelBindingID: route.ChannelBindingID,
+		Channel: route.Channel, ExternalAccountID: route.ExternalAccountID, TenantVersion: route.TenantVersion, BindingVersion: route.BindingVersion,
+		IdentitySecretRef: route.IdentitySecretRef, SessionSecretRef: route.SessionSecretRef}
+	actor, err := (identity.Mapper{Secrets: h.Secrets}).Map(request.Context(), binding, channel.ProviderEvent{Channel: "webui", ExternalAccountID: route.ExternalAccountID,
+		ExternalUserID: input.ExternalUserID, ExternalChatID: input.ExternalChatID, ConversationType: "p2p"})
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	decided, err := h.Actions.DecideAction(request.Context(), governance.ConfirmationAction{TenantID: route.TenantID, ConfirmationID: input.ConfirmationID,
+		SubjectID: actor.UserID, ChannelBindingID: route.ChannelBindingID, SessionID: actor.SessionID, Approve: input.Decision == "approve",
+		ExpectedVersion: input.ExpectedVersion, DecidedAt: h.now()})
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(writer).Encode(map[string]any{"confirmation_id": decided.ConfirmationID, "state": decided.State, "version": decided.Version})
+}
+
 func (h BrowserHandler) authorize(ctx context.Context, request *http.Request, routeKey string) (ingress.BindingRoute, error) {
+	return h.authorizePayload(ctx, request, routeKey, []byte(request.Method+"\n"+request.URL.RequestURI()))
+}
+
+func (h BrowserHandler) authorizePayload(ctx context.Context, request *http.Request, routeKey string, payload []byte) (ingress.BindingRoute, error) {
 	route, err := h.Routes.ResolveBindingRoute(ctx, "webui", RouteKeyDigest(routeKey))
 	if err != nil {
 		return ingress.BindingRoute{}, err
@@ -144,12 +306,18 @@ func (h BrowserHandler) authorize(ctx context.Context, request *http.Request, ro
 	if maxSkew <= 0 {
 		maxSkew = 5 * time.Minute
 	}
-	payload := []byte(request.Method + "\n" + request.URL.RequestURI())
 	if err := verifySignature(material.Token, request.Header.Get(headerTimestamp), request.Header.Get(headerNonce),
 		request.Header.Get(headerSignature), payload, now, maxSkew); err != nil {
 		return ingress.BindingRoute{}, err
 	}
 	return route, nil
+}
+
+func (h BrowserHandler) now() time.Time {
+	if h.Now != nil {
+		return h.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func writeAsset(writer http.ResponseWriter, contentType, content string) {
@@ -173,6 +341,8 @@ func writeBrowserError(writer http.ResponseWriter, err error) {
 		status = http.StatusUnauthorized
 	case errors.Is(err, runtime.ErrBackendUnavailable):
 		status = http.StatusServiceUnavailable
+	case errors.Is(err, runtime.ErrVersionConflict), errors.Is(err, runtime.ErrAlreadyTerminal), errors.Is(err, runtime.ErrCancelRequested):
+		status = http.StatusConflict
 	}
 	http.Error(writer, http.StatusText(status), status)
 }

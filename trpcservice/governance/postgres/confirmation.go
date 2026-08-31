@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
@@ -71,19 +72,41 @@ func (s *Store) Decide(ctx context.Context, in governance.ConfirmationDecision) 
 	}
 	var id, state string
 	var version int64
-	err := s.db.QueryRowContext(ctx, `SELECT confirmation_id,state,version FROM decide_confirmation($1,$2,$3,$4,$5,$6)`, in.TenantID,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return governance.Confirmation{}, err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `SELECT confirmation_id,state,version FROM decide_confirmation($1,$2,$3,$4,$5,$6)`, in.TenantID,
 		in.ConfirmationID, in.SubjectID, in.Approve, in.ExpectedVersion, in.DecidedAt.UTC()).Scan(&id, &state, &version)
 	if err != nil {
 		return governance.Confirmation{}, translate(err)
 	}
-	return s.GetConfirmation(ctx, in.TenantID, id)
+	if state == string(governance.ConfirmationApproved) || state == string(governance.ConfirmationDenied) || state == string(governance.ConfirmationExpired) {
+		if err := insertConfirmationAudit(ctx, tx, in.TenantID, id, state, version, in.DecidedAt.UTC()); err != nil {
+			return governance.Confirmation{}, err
+		}
+	}
+	value, err := getConfirmation(ctx, tx, in.TenantID, "confirmation_id", id)
+	if err != nil {
+		return governance.Confirmation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return governance.Confirmation{}, err
+	}
+	return value, nil
 }
 
 func (s *Store) ExpireDue(ctx context.Context, now time.Time, limit int) ([]governance.Confirmation, error) {
 	if now.IsZero() || limit < 1 || limit > 1000 {
 		return nil, runtime.ErrInvariantViolation
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT tenant_id,confirmation_id FROM expire_confirmations($1,$2)`, now.UTC(), limit)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT tenant_id,confirmation_id FROM expire_confirmations($1,$2)`, now.UTC(), limit)
 	if err != nil {
 		return nil, translate(err)
 	}
@@ -100,13 +123,22 @@ func (s *Store) ExpireDue(ctx context.Context, now time.Time, limit int) ([]gove
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
 	result := make([]governance.Confirmation, 0, len(keys))
 	for _, value := range keys {
-		confirmation, getErr := s.GetConfirmation(ctx, value.tenantID, value.confirmationID)
+		confirmation, getErr := getConfirmation(ctx, tx, value.tenantID, "confirmation_id", value.confirmationID)
 		if getErr != nil {
 			return nil, getErr
 		}
+		if insertErr := insertConfirmationAudit(ctx, tx, value.tenantID, value.confirmationID, string(governance.ConfirmationExpired), confirmation.Version, now.UTC()); insertErr != nil {
+			return nil, insertErr
+		}
 		result = append(result, confirmation)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -119,7 +151,11 @@ func (s *Store) GetConfirmationByRequest(ctx context.Context, tenantID, requestI
 	return getConfirmation(ctx, s.db, tenantID, "request_id", requestID)
 }
 
-func getConfirmation(ctx context.Context, db *sql.DB, tenantID, field, valueID string) (governance.Confirmation, error) {
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func getConfirmation(ctx context.Context, db queryRower, tenantID, field, valueID string) (governance.Confirmation, error) {
 	var value governance.Confirmation
 	value.TenantID = tenantID
 	var decision sql.NullTime
@@ -197,12 +233,14 @@ func (s *Store) ConsumeGrant(ctx context.Context, in governance.GrantClaim) (gov
 	if err != nil {
 		return governance.Grant{}, translate(err)
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE confirmation SET state='consumed',version=version+1,updated_at=now() WHERE tenant_id=$1 AND confirmation_id=$2 AND state='approved'`, in.TenantID, value.ConfirmationID)
+	var confirmationVersion int64
+	err = tx.QueryRowContext(ctx, `UPDATE confirmation SET state='consumed',version=version+1,updated_at=now()
+WHERE tenant_id=$1 AND confirmation_id=$2 AND state='approved' RETURNING version`, in.TenantID, value.ConfirmationID).Scan(&confirmationVersion)
 	if err != nil {
 		return governance.Grant{}, translate(err)
 	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		return governance.Grant{}, runtime.ErrVersionConflict
+	if err := insertConfirmationAudit(ctx, tx, in.TenantID, value.ConfirmationID, string(governance.ConfirmationConsumed), confirmationVersion, now); err != nil {
+		return governance.Grant{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return governance.Grant{}, err
@@ -210,6 +248,26 @@ func (s *Store) ConsumeGrant(ctx context.Context, in governance.GrantClaim) (gov
 	value.Version++
 	value.ConsumedAt = now
 	return value, nil
+}
+
+func insertConfirmationAudit(ctx context.Context, tx *sql.Tx, tenantID, confirmationID, decision string, version int64, occurredAt time.Time) error {
+	if tenantID == "" || confirmationID == "" || decision == "" || version < 1 || occurredAt.IsZero() {
+		return runtime.ErrInvariantViolation
+	}
+	idempotencyKey := "confirmation-audit:" + confirmationID + ":" + decision + ":" + fmt.Sprint(version)
+	prefix := "confirmation-decision://"
+	if decision == string(governance.ConfirmationConsumed) {
+		prefix = "confirmation-consumed://"
+	}
+	payloadRef := prefix + tenantID + "/" + confirmationID + "/" + decision + "/" + fmt.Sprint(version)
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+SELECT $1,$2,'audit',request_id,$3,$4,$5 FROM confirmation WHERE tenant_id=$1 AND confirmation_id=$6
+ON CONFLICT (tenant_id,kind,idempotency_key) DO NOTHING`, tenantID, "confirmation-audit:"+confirmationID+":"+fmt.Sprint(version), version,
+		idempotencyKey, payloadRef, confirmationID)
+	if err != nil {
+		return translate(err)
+	}
+	return nil
 }
 
 func (s *Store) FinishToolAttempt(ctx context.Context, in governance.FinishToolAttemptRequest) (governance.ToolAttempt, error) {

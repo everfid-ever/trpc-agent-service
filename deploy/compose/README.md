@@ -41,6 +41,11 @@ TLS reverse proxy in front of port 58080 or use an already deployed HTTPS
 Gateway. DeepSeek API keys must be mounted as scoped files and are never placed
 in `.env.m2`.
 
+Graph continuations use the same authenticated Worker Redis deployment. Their
+keys are isolated by tenant, immutable ConfigSnapshot version, and declared
+checkpoint namespace, and expire after `TRPC_WORKER_GRAPH_CHECKPOINT_TTL`
+(default `168h`). Keep that TTL longer than the maximum confirmation window.
+
 After the Gateway is healthy, run the semantic vertical smoke from the host:
 
 ```bash
@@ -55,6 +60,52 @@ The Compose file deliberately does not auto-run migrations or seed control
 plane data. This keeps the production rule—migrations are applied by a
 controlled deployment step—and prevents a sample stack from fabricating
 tenants, credentials, or a Gateway authentication authority.
+
+The `gateway-worker` profile also starts the independent `audit-relay` role.
+It claims only `kind=audit` Outbox rows, resolves tenant-scoped durable facts,
+and idempotently exports them to a physically separate compliance PostgreSQL
+database. Apply its deliberately small schema as an explicit deployment step:
+
+```bash
+docker compose -f deploy/compose/docker-compose.m2.yml --profile audit-migration run --rm audit-compliance-migrate
+```
+
+The normal application migrations still apply only to the source database.
+The compliance database contains immutable `audit_event` facts and durable
+`quarantine_alert` rows; the Relay refuses to start if its DSN equals the
+source DSN, if runtime database identities are equal, or if its schema checksum is absent.
+Its health endpoints use port `58082` by default. To run it independently
+after applying migrations:
+
+```bash
+docker compose -f deploy/compose/docker-compose.m2.yml --profile audit up --build postgres compliance-postgres audit-relay
+curl -fsS http://localhost:58082/readyz
+curl -fsS http://localhost:58082/metrics
+```
+
+The Audit Relay polls a PostgreSQL aggregate that contains no tenant, user,
+session, request, payload, or secret labels. Its defaults alert when the oldest
+active Audit Outbox row reaches 5 minutes, active rows reach 10,000, or any row
+is dead-lettered. Override these with `M2_AUDIT_LAG_POLL_INTERVAL`,
+`M2_AUDIT_LAG_ALERT_AGE`, and `M2_AUDIT_LAG_ALERT_COUNT`; the poll interval must
+remain below the age threshold. Prometheus-compatible rules live in
+`deploy/alerts/audit-relay.rules.yml`, with recovery steps in
+`deploy/runbooks/audit-relay.md`. A stale or missing backlog snapshot is an
+alert condition, not permission to discard or manually publish Outbox rows.
+
+The `gateway-worker`, `audit`, and `webui` profiles also include an optional
+OTLP/HTTP Collector and Jaeger trace UI. Applications use the internal
+`http://otel-collector:4318` endpoint with bounded SDK queues; Collector or
+Jaeger downtime does not block a request, relay claim, Worker commit, or Reply
+delivery. Jaeger is exposed at `http://localhost:${M2_JAEGER_PORT:-56686}` and
+the Collector Prometheus endpoint at `http://localhost:${M2_OTEL_PROMETHEUS_PORT:-59464}`.
+Set `TRPC_OTEL_ENDPOINT` only when an external deployment supplies its own
+Collector; leave it empty to use the no-op provider.
+
+The operation-level SLO recording and alert rules are in
+`deploy/alerts/operations.rules.yml`. Import them into Prometheus alongside
+`audit-relay.rules.yml`; the response procedure is in
+`deploy/runbooks/operations-slo.md`.
 
 ## Local WebUI channel
 
@@ -78,14 +129,32 @@ Open <http://localhost:58081/webui/> and enter the defaults from `.env.m2`:
 | Chat ID | `local-chat` |
 | Channel Token | `local-webui-token-change-me` |
 
+After connecting, send the following deterministic acceptance request:
+
+```text
+创建一条标题为验收、内容为 WebUI durable confirmation 的笔记
+```
+
+The assistant must request `webui_create_note@1` instead of claiming success.
+The timeline then presents a durable confirmation card. Choose **批准一次** to
+resume the suspended execution and receive the created note result, or choose
+**拒绝** to reach a terminal denial without calling the tool. Reconnecting or
+refreshing the page must not execute an approved call a second time; the same
+durable reply/confirmation state is read from PostgreSQL-backed authorities.
+
 The `webui-local` command is an explicitly local composition root. It applies
 the embedded migrations and idempotently publishes one isolated tenant,
-DeepSeek profile, Agent App, WebUI ChannelBinding, public route, and scoped
-secret projections. It then runs the existing Preprocess Worker,
+DeepSeek profile, checkpointed Graph root with a frozen LLM child, WebUI
+ChannelBinding, public route, and scoped
+secret projections. It also registers the code-owned, tenant-bound,
+exact-version `webui_create_note@1` local acceptance tool and upgrades older
+disposable WebUI control-plane state idempotently. Approval resumes the Graph
+from its Redis checkpoint; it does not restart the root workflow. It then runs the existing Preprocess Worker,
 Dispatch/Reply relays, Redis Worker, Reply Queue, Delivery Ledger and
 `webui.Adapter` in one container. PostgreSQL and Redis remain the durable
 authorities; no alternate IM state machine is used. Media is intentionally not
-enabled in this text-only acceptance profile.
+enabled in this text-only acceptance profile. The note tool has no external
+provider side effect and is not registered by the production `worker` role.
 
 Changing the DeepSeek key or the local token changes immutable local secret
 material. Reset the disposable environment before restarting with new values:

@@ -1,0 +1,42 @@
+groups:
+  - name: trpc-agent-service-audit-relay
+    rules:
+      - alert: AuditBacklogSnapshotMissing
+        expr: absent(trpc_audit_backlog_snapshot_ready) or trpc_audit_backlog_snapshot_ready == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Audit Relay has no valid PostgreSQL backlog snapshot
+          runbook: deploy/runbooks/audit-relay.md
+      - alert: AuditBacklogSnapshotStale
+        expr: time() - trpc_audit_backlog_snapshot_timestamp_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Audit Relay backlog monitoring is stale
+          runbook: deploy/runbooks/audit-relay.md
+      - alert: AuditOutboxLag
+        expr: trpc_audit_alerting == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Audit outbox age, count, or dead-letter threshold is exceeded
+          runbook: deploy/runbooks/audit-relay.md
+      - alert: AuditExportErrors
+        expr: increase(trpc_audit_export_total{outcome="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Audit Relay export attempts are failing
+          runbook: deploy/runbooks/audit-relay.md
+      - alert: ArtifactQuarantined
+        expr: increase(trpc_quarantine_alert_export_total[5m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: An Artifact upload or retention record entered quarantine
+          runbook: docs/runbook/artifact-lifecycle.md

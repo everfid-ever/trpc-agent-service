@@ -32,7 +32,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|webui-local]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-compliance-migrate|webui-local]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -65,6 +65,10 @@ func runRole(parent context.Context, getenv func(string) string, logger *log.Log
 		return runGatewayRole(parent, getenv, logger)
 	case "worker":
 		return runWorkerRole(parent, getenv, logger)
+	case "audit-relay":
+		return runAuditRelayRole(parent, getenv, logger)
+	case "audit-compliance-migrate":
+		return runAuditComplianceMigrate(parent, getenv, logger)
 	case "webui-local":
 		return runWebUILocalRole(parent, getenv, logger)
 	default:

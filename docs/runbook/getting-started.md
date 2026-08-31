@@ -269,6 +269,8 @@ trpc-service webui-local
 | `channel-delivery` | `TRPC_POSTGRES_DSN`、`TRPC_REDIS_ADDRESS`、`TRPC_SECRET_ROOT`、`TRPC_REDIS_ENVIRONMENT`、`TRPC_CHANNEL_DELIVERY_GROUP`、`TRPC_CHANNEL_PROBE_TENANT_ID`、`TRPC_PAYLOAD_KEY_REF`、`TRPC_PAYLOAD_KEY_VERSION` |
 | `gateway` | `TRPC_POSTGRES_DSN`、`TRPC_SECRET_ROOT`、`TRPC_GATEWAY_PROBE_TENANT_ID`、`TRPC_GATEWAY_AUTH_SECRET_REF`、`TRPC_GATEWAY_AUTH_SECRET_VERSION`、`TRPC_GATEWAY_PUBLIC_BASE_URL`、`TRPC_PAYLOAD_KEY_REF`、`TRPC_PAYLOAD_KEY_VERSION` |
 | `worker` | `TRPC_POSTGRES_DSN`、`TRPC_REDIS_ADDRESS`、`TRPC_SECRET_ROOT`、`TRPC_REDIS_ENVIRONMENT`、`TRPC_WORKER_GROUP`、`TRPC_WORKER_CONTROL_GROUP`、`TRPC_WORKER_PROBE_TENANT_ID`、`TRPC_S3_REGION`、`TRPC_S3_BUCKET`、`TRPC_PAYLOAD_KEY_REF`、`TRPC_PAYLOAD_KEY_VERSION` |
+| `audit-relay` | `TRPC_POSTGRES_DSN`（源业务库）、`TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN`（独立合规库；不得与源 DSN 相同） |
+| `audit-compliance-migrate` | `TRPC_AUDIT_COMPLIANCE_POSTGRES_DSN`；仅用于受控部署步骤，完成后退出 |
 
 空字符串等同于未配置。版本和 generation 必须是大于等于 1 的十进制整数。
 
@@ -287,6 +289,10 @@ trpc-service webui-local
 | `TRPC_ARTIFACT_MAX_BYTES` | `16777216` | Artifact 和媒体最大字节数，必须大于 0 |
 
 S3 lifecycle 依赖精确 VersionID，bucket 未开启 versioning 时 readiness 保持失败。
+
+Audit Relay 的两个 PostgreSQL DSN 必须使用不同数据库和最小权限账号。先以
+`audit-compliance-migrate` 对目标库应用独立 schema，再启动 Relay；Relay readiness
+同时检查源业务 schema 和目标 compliance schema checksum。
 
 ### 7.2 Artifact lifecycle
 

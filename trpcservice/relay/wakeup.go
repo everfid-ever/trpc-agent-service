@@ -6,6 +6,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type WakeupEvent struct {
@@ -26,6 +27,7 @@ type WakeupRelay struct {
 	ClaimRenewInterval time.Duration
 	RetryDelay         time.Duration
 	PollInterval       time.Duration
+	Telemetry          telemetry.Provider
 }
 
 func (r WakeupRelay) Run(ctx context.Context) error {
@@ -48,13 +50,13 @@ func (r WakeupRelay) publish(ctx context.Context, record messaging.OutboxRecord)
 	}
 	return r.Wakeups.PublishWakeup(ctx, WakeupEvent{TenantID: record.TenantID,
 		AggregateID: record.AggregateID, IdempotencyKey: record.IdempotencyKey,
-		PayloadRef: record.PayloadRef, TraceParent: record.TraceParent, EventSeq: record.EventSeq})
+		PayloadRef: record.PayloadRef, TraceParent: telemetry.EffectiveTraceParent(ctx, record.TraceParent), EventSeq: record.EventSeq})
 }
 
 func (r WakeupRelay) base() Base {
 	return Base{Outbox: r.Outbox, Kind: "wakeup", Owner: r.Owner, BatchSize: r.BatchSize,
 		ClaimTTL: r.ClaimTTL, ClaimRenewInterval: r.ClaimRenewInterval,
-		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval}
+		RetryDelay: r.RetryDelay, PollInterval: r.PollInterval, Telemetry: r.Telemetry}
 }
 
 func (r WakeupRelay) validate() error {

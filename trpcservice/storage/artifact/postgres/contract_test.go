@@ -179,6 +179,16 @@ FROM artifact_object_upload WHERE tenant_id=$1 AND object_key=$2`, tenantID, fir
 		errorClass != artifact.CleanupErrorVersionMismatch || quarantinedAt.IsZero() {
 		t.Fatalf("state=%q attempt=%d class=%q quarantined_at=%v", state, attempt, errorClass, quarantinedAt)
 	}
+	var auditKind, auditState, auditRef string
+	if err := db.QueryRowContext(ctx, `SELECT kind,state,payload_ref FROM outbox
+WHERE tenant_id=$1 AND aggregate_id=$2 AND idempotency_key LIKE 'artifact-quarantine-upload:%'`, tenantID, first.ArtifactID).
+		Scan(&auditKind, &auditState, &auditRef); err != nil {
+		t.Fatal(err)
+	}
+	if auditKind != "audit" || auditState != "pending" ||
+		!strings.HasPrefix(auditRef, "artifact-quarantine://"+tenantID+"/upload/"+first.ArtifactID+"/") {
+		t.Fatalf("quarantine audit kind=%q state=%q ref=%q", auditKind, auditState, auditRef)
+	}
 	if handled, err := reconciler.RunOnce(ctx); err != nil || handled != 0 {
 		t.Fatalf("quarantined row reclaimed handled=%d err=%v", handled, err)
 	}

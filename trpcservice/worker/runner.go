@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
@@ -21,8 +24,10 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -58,13 +63,17 @@ type RunnerExecutor struct {
 	ContinuationTools ConfirmedToolResolver
 	ConfirmationTTL   time.Duration
 	EventDrainTimeout time.Duration
+	Telemetry         telemetry.Provider
 }
 
 func (w RunnerExecutor) Execute(ctx context.Context, envelope runtime.ExecutionEnvelope) error {
 	return w.ExecuteWithLease(ctx, envelope, 1, nil)
 }
 
-func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
+func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) (resultErr error) {
+	ctx, finish := telemetry.StartOperation(ctx, w.Telemetry, envelope.TraceParent, telemetry.OperationWorkerExecute,
+		telemetry.ComponentAttribute(telemetry.ComponentWorker))
+	defer func() { finish(resultErr) }()
 	if w.Tasks == nil || w.Profiles == nil || w.Bundles == nil || w.Sessions == nil ||
 		w.Payloads == nil || w.Inputs == nil || w.EncodeEvent == nil {
 		return runtime.ErrCapabilityUnsupported
@@ -98,6 +107,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	if snapshot.TenantVersion != envelope.TenantVersion || snapshot.AgentAppVersion != envelope.AgentAppVersion {
 		return runtime.ErrVersionMismatch
+	}
+	modelRef, err := executionModelRef(ctx, w.Profiles, snapshot)
+	if err != nil {
+		return err
 	}
 	appName := snapshot.AppName
 	if appName == "" {
@@ -135,7 +148,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				return nil
 			case governance.ConfirmationDenied, governance.ConfirmationExpired:
 				if w.Governance != nil {
-					if err := w.Governance.Abort(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, string(confirmation.State)); err != nil {
+					if err := w.Governance.Abort(ctx, envelope, modelRef, string(confirmation.State)); err != nil {
 						return err
 					}
 				}
@@ -185,7 +198,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	var permit governance.RunPermit
 	if w.Governance != nil {
-		permit, err = w.Governance.Begin(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, payload.Content)
+		permit, err = w.Governance.Begin(ctx, envelope, modelRef, payload.Content)
 		if err != nil {
 			return err
 		}
@@ -239,8 +252,9 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			agentcore.WithToolExecutionFilter(func(_ context.Context, value agenttool.Tool) bool {
 				return toolRule(value).Action == governance.ActionAllow
 			}),
-			agentcore.WithToolPermissionPolicyFunc(func(_ context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
+			agentcore.WithToolPermissionPolicyFunc(func(permissionCtx context.Context, request *agenttool.PermissionRequest) (agenttool.PermissionDecision, error) {
 				if request == nil || toolRule(request.Tool).Action != governance.ActionAllow {
+					serviceagent.FinishToolOperation(permissionCtx, runtime.ErrCapabilityUnsupported)
 					return agenttool.DenyPermission(governance.ReasonToolDenied), nil
 				}
 				return agenttool.AllowPermission(), nil
@@ -248,6 +262,14 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	usageOffset := governance.Usage{}
 	if continuation != nil {
+		var graphResume *graphContinuationCoordinate
+		if snapshot.AgentKind == agentapp.AgentKindGraph {
+			coordinate, coordinateErr := decodeGraphContinuationRef(continuation.CheckpointRef)
+			if coordinateErr != nil {
+				return coordinateErr
+			}
+			graphResume = &coordinate
+		}
 		call, callErr := confirmedToolCall(ctx, w.Sessions, sessionKey, *continuation)
 		if callErr != nil {
 			return callErr
@@ -279,7 +301,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			if callErr != nil {
 				attempt, attemptErr := w.Confirmations.GetToolAttempt(ctx, envelope.TenantID, grant.GrantID)
 				if attemptErr == nil && attempt.State == governance.ToolAttemptFailed {
-					return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolAttemptFailed)
+					return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, modelRef, governance.ReasonToolAttemptFailed)
 				}
 				// A storage/response failure after the external effect is not proof
 				// that the tool failed. Leave the request retryable; the consumed
@@ -296,11 +318,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				return attemptErr
 			}
 			if attempt.State == governance.ToolAttemptFailed {
-				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolAttemptFailed)
+				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, modelRef, governance.ReasonToolAttemptFailed)
 			}
 			stored, storedErr := toolResults.GetToolResult(ctx, envelope.TenantID, grant.GrantID)
 			if storedErr != nil {
-				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolEffectUnknown)
+				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, modelRef, governance.ReasonToolEffectUnknown)
 			}
 			if stored.RequestID != envelope.RequestID || stored.ResultRef != attempt.ResultRef && attempt.State == governance.ToolAttemptSucceeded {
 				return runtime.ErrVersionMismatch
@@ -313,7 +335,23 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			}
 			encoded = stored.Content
 		}
-		message = model.NewToolMessage(call.ID, call.Function.Name, string(encoded))
+		if graphResume != nil {
+			if graphResume.ToolCallID != call.ID || graphResume.ToolName != call.Function.Name {
+				return runtime.ErrVersionMismatch
+			}
+			message = model.NewUserMessage("resume")
+			resumeValue := map[string]any{"schema_version": 1, "kind": "tool_result", "tool_call_id": call.ID,
+				"tool_name": call.Function.Name, "result": string(encoded)}
+			runOptions = append(runOptions, agentcore.WithRuntimeState(map[string]any{
+				graph.CfgKeyLineageID:    graphResume.LineageID,
+				graph.CfgKeyCheckpointID: graphResume.CheckpointID,
+				graph.CfgKeyCheckpointNS: graphResume.Namespace,
+				graph.StateKeyCommand: graph.NewResumeCommand().AddResumeValue(
+					graphResume.TaskID, resumeValue),
+			}))
+		} else {
+			message = model.NewToolMessage(call.ID, call.Function.Name, string(encoded))
+		}
 		usageOffset = continuation.Usage
 	}
 	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message, runOptions...)
@@ -336,7 +374,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			return runtime.ErrCapabilityUnsupported
 		}
 		call := runResult.ToolCalls[0]
-		toolRef, ok := confirmationToolRef(snapshot, permit.Policy, call.Function.Name)
+		toolRef, ok := confirmationToolRef(ctx, w.Profiles, snapshot, permit.Policy, call.Function.Name)
 		if !ok || call.ID == "" {
 			return runtime.ErrCapabilityUnsupported
 		}
@@ -377,13 +415,24 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				return err
 			}
 		}
+		checkpointRef := "continuation://" + envelope.TenantID + "/" + envelope.RequestID + "/" + call.ID
+		if snapshot.AgentKind == agentapp.AgentKindGraph {
+			if runResult.GraphInterrupt == nil || runResult.GraphInterrupt.ToolCallID != call.ID ||
+				runResult.GraphInterrupt.ToolName != call.Function.Name {
+				return runtime.ErrCapabilityUnsupported
+			}
+			checkpointRef, err = encodeGraphContinuationRef(*runResult.GraphInterrupt)
+			if err != nil {
+				return err
+			}
+		}
 		commit := sessionstore.CommitTurnRequest{SessionKey: sessionKey, RequestID: envelope.RequestID,
 			CommitID: envelope.RequestID + ":waiting:" + call.ID, Stage: "waiting", InputSeq: envelope.InputSeq, Fence: fence,
 			ExpectedVersion: head.Version, Outcome: runtime.OutcomeWaitingConfirmation, Events: turn.Events(), StateDelta: turn.StateDelta(),
-			ResultRef: "continuation://" + envelope.TenantID + "/" + envelope.RequestID + "/" + call.ID,
+			ResultRef: checkpointRef,
 			Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "confirmation:" + confirmationID,
-				PayloadRef: promptRef, EventSeq: 1, TraceParent: envelope.TraceParent}, {Kind: "reply", IdempotencyKey: "confirmation-reply:" + confirmationID,
-				PayloadRef: promptRef, EventSeq: 1, TraceParent: envelope.TraceParent}}}
+				PayloadRef: promptRef, EventSeq: 1, TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}, {Kind: "reply", IdempotencyKey: "confirmation-reply:" + confirmationID,
+				PayloadRef: promptRef, EventSeq: 1, TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}}
 		_, err = w.Confirmations.Suspend(ctx, commit, governance.SuspensionRequest{ConfirmationID: confirmationID, TenantID: envelope.TenantID,
 			RequestID: envelope.RequestID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID, InputSeq: envelope.InputSeq, Fence: fence,
 			SubjectID: envelope.UserID, ChannelBindingID: bindingID, Tool: toolRef, ToolCallID: call.ID, ArgsDigest: argsDigest,
@@ -447,7 +496,8 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal",
 		InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version,
 		Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1",
-		Outbox: []sessionstore.OutboxEvent{{Kind: "reply", IdempotencyKey: replyID, PayloadRef: resultRef, EventSeq: 1}},
+		Outbox: []sessionstore.OutboxEvent{{Kind: "reply", IdempotencyKey: replyID, PayloadRef: resultRef, EventSeq: 1,
+			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}},
 	})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
@@ -461,7 +511,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 // CancelWithLease turns a durable cancellation intent into the only
 // authoritative cancelled terminal: a fenced CommitTurn that advances the
 // session input gate and emits an audit fact.
-func (w RunnerExecutor) CancelWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) error {
+func (w RunnerExecutor) CancelWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) (resultErr error) {
+	ctx, finish := telemetry.StartOperation(ctx, w.Telemetry, envelope.TraceParent, telemetry.OperationWorkerExecute,
+		telemetry.ComponentAttribute(telemetry.ComponentWorker))
+	defer func() { finish(resultErr) }()
 	if w.Tasks == nil || w.Sessions == nil {
 		return runtime.ErrCapabilityUnsupported
 	}
@@ -518,7 +571,8 @@ func (w RunnerExecutor) CancelWithLease(ctx context.Context, envelope runtime.Ex
 		InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version,
 		Outcome: runtime.OutcomeCancelled,
 		Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "cancel-terminal:" + envelope.RequestID,
-			PayloadRef: "execution://" + envelope.TenantID + "/" + envelope.RequestID, EventSeq: uint64(status.CancelVersion), TraceParent: envelope.TraceParent}},
+			PayloadRef: "execution://" + envelope.TenantID + "/" + envelope.RequestID, EventSeq: uint64(status.CancelVersion),
+			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}},
 	})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
@@ -557,7 +611,8 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 	_, err := w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: head.SessionKey, RequestID: envelope.RequestID,
 		CommitID: envelope.RequestID + ":" + string(outcome) + ":governance", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
 		ExpectedVersion: head.Version, Outcome: outcome, Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "governance:" + decision.DecisionID,
-			PayloadRef: "governance://" + envelope.TenantID + "/" + decision.DecisionID, EventSeq: 1, TraceParent: envelope.TraceParent}}})
+			PayloadRef: "governance://" + envelope.TenantID + "/" + decision.DecisionID, EventSeq: 1,
+			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
 	}
@@ -565,15 +620,30 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 }
 
 type runnerResult struct {
-	Content   string
-	Usage     governance.Usage
-	ToolCalls []model.ToolCall
+	Content        string
+	Usage          governance.Usage
+	ToolCalls      []model.ToolCall
+	GraphInterrupt *graphContinuationCoordinate
 }
+
+type graphContinuationCoordinate struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	LineageID     string `json:"lineage_id"`
+	CheckpointID  string `json:"checkpoint_id"`
+	Namespace     string `json:"checkpoint_namespace"`
+	TaskID        string `json:"task_id"`
+	ToolCallID    string `json:"tool_call_id"`
+	ToolName      string `json:"tool_name"`
+}
+
+const graphContinuationRefPrefix = "graph-continuation:v1:"
 
 func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runnerResult, error) {
 	var content strings.Builder
 	var resultUsage governance.Usage
 	var toolCalls []model.ToolCall
+	var graphInterrupt *graphContinuationCoordinate
 	usageEvents := make(map[string]struct{})
 	completed := false
 	for {
@@ -582,16 +652,19 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 			return runnerResult{}, ctx.Err()
 		case value, ok := <-events:
 			if !ok {
-				if !completed {
+				if !completed && graphInterrupt == nil {
 					return runnerResult{}, runtime.ErrBackendUnavailable
 				}
-				return runnerResult{Content: content.String(), Usage: resultUsage, ToolCalls: toolCalls}, nil
+				return runnerResult{Content: content.String(), Usage: resultUsage, ToolCalls: toolCalls, GraphInterrupt: graphInterrupt}, nil
 			}
 			if value == nil {
 				continue
 			}
 			if value.IsTerminalError() {
 				return runnerResult{}, runtime.ErrBackendUnavailable
+			}
+			if coordinate, ok := graphContinuationFromEvent(value); ok {
+				graphInterrupt = &coordinate
 			}
 			if value.Response != nil {
 				if value.Usage != nil && value.ID != "" {
@@ -621,19 +694,160 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 	}
 }
 
-func confirmationToolRef(snapshot profile.ExecutionProfileSnapshot, policy governance.PolicySnapshot, name string) (governance.VersionedRef, bool) {
-	var ref governance.VersionedRef
-	count := 0
-	for _, value := range snapshot.ToolRefs {
-		if value.ID == name {
-			ref = governance.VersionedRef{ID: value.ID, Version: value.Version}
-			count++
-		}
+func graphContinuationFromEvent(value *event.Event) (graphContinuationCoordinate, bool) {
+	if value == nil || value.Object != graph.ObjectTypeGraphPregelStep || value.StateDelta == nil {
+		return graphContinuationCoordinate{}, false
 	}
-	if count != 1 || governance.ToolDecision(policy, ref).Action != governance.ActionAsk {
+	var metadata graph.PregelStepMetadata
+	if err := json.Unmarshal(value.StateDelta[graph.MetadataKeyPregel], &metadata); err != nil || metadata.InterruptValue == nil ||
+		metadata.LineageID == "" || metadata.CheckpointID == "" || metadata.CheckpointNS == "" || metadata.InterruptKey == "" {
+		return graphContinuationCoordinate{}, false
+	}
+	encoded, err := json.Marshal(metadata.InterruptValue)
+	if err != nil {
+		return graphContinuationCoordinate{}, false
+	}
+	var interrupt struct {
+		SchemaVersion int    `json:"schema_version"`
+		Kind          string `json:"kind"`
+		ToolCallID    string `json:"tool_call_id"`
+		ToolName      string `json:"tool_name"`
+	}
+	if err := json.Unmarshal(encoded, &interrupt); err != nil || interrupt.SchemaVersion != 1 || interrupt.Kind != "tool_confirmation" ||
+		interrupt.ToolCallID == "" || interrupt.ToolName == "" {
+		return graphContinuationCoordinate{}, false
+	}
+	return graphContinuationCoordinate{SchemaVersion: 1, Kind: "graph_tool_confirmation", LineageID: metadata.LineageID,
+		CheckpointID: metadata.CheckpointID, Namespace: metadata.CheckpointNS, TaskID: metadata.InterruptKey,
+		ToolCallID: interrupt.ToolCallID, ToolName: interrupt.ToolName}, true
+}
+
+func encodeGraphContinuationRef(value graphContinuationCoordinate) (string, error) {
+	if err := validateGraphContinuationCoordinate(value); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", runtime.ErrInvariantViolation
+	}
+	return graphContinuationRefPrefix + base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func decodeGraphContinuationRef(value string) (graphContinuationCoordinate, error) {
+	if !strings.HasPrefix(value, graphContinuationRefPrefix) {
+		return graphContinuationCoordinate{}, runtime.ErrVersionMismatch
+	}
+	encoded, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, graphContinuationRefPrefix))
+	if err != nil || len(encoded) == 0 || len(encoded) > 8<<10 {
+		return graphContinuationCoordinate{}, runtime.ErrInvalidEnvelope
+	}
+	var coordinate graphContinuationCoordinate
+	decoder := json.NewDecoder(strings.NewReader(string(encoded)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&coordinate); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return graphContinuationCoordinate{}, runtime.ErrInvalidEnvelope
+	}
+	if err := validateGraphContinuationCoordinate(coordinate); err != nil {
+		return graphContinuationCoordinate{}, err
+	}
+	return coordinate, nil
+}
+
+func validateGraphContinuationCoordinate(value graphContinuationCoordinate) error {
+	if value.SchemaVersion != 1 || value.Kind != "graph_tool_confirmation" || value.LineageID == "" || value.CheckpointID == "" ||
+		value.Namespace == "" || value.TaskID == "" || value.ToolCallID == "" || value.ToolName == "" || value.TaskID != value.ToolCallID {
+		return runtime.ErrInvariantViolation
+	}
+	return nil
+}
+
+func confirmationToolRef(ctx context.Context, resolver profile.ExecutionProfileResolver, snapshot profile.ExecutionProfileSnapshot,
+	policy governance.PolicySnapshot, name string,
+) (governance.VersionedRef, bool) {
+	refs := make(map[governance.VersionedRef]struct{})
+	if err := walkExecutionProfiles(ctx, resolver, snapshot, 0, make(map[profile.ExecutionProfileKey]bool),
+		func(value profile.ExecutionProfileSnapshot) error {
+			for _, candidate := range value.ToolRefs {
+				if candidate.ID == name {
+					refs[governance.VersionedRef{ID: candidate.ID, Version: candidate.Version}] = struct{}{}
+				}
+			}
+			return nil
+		}); err != nil || len(refs) != 1 {
 		return governance.VersionedRef{}, false
 	}
-	return ref, true
+	for ref := range refs {
+		if governance.ToolDecision(policy, ref).Action == governance.ActionAsk {
+			return ref, true
+		}
+	}
+	return governance.VersionedRef{}, false
+}
+
+func executionModelRef(ctx context.Context, resolver profile.ExecutionProfileResolver,
+	snapshot profile.ExecutionProfileSnapshot,
+) (governance.VersionedRef, error) {
+	refs := make(map[governance.VersionedRef]struct{})
+	err := walkExecutionProfiles(ctx, resolver, snapshot, 0, make(map[profile.ExecutionProfileKey]bool),
+		func(value profile.ExecutionProfileSnapshot) error {
+			if value.AgentKind != agentapp.AgentKindLLM {
+				return nil
+			}
+			ref := governance.VersionedRef{ID: value.ModelProfileRef.ID, Version: value.ModelProfileRef.Version}
+			if ref.ID == "" || ref.Version < 1 {
+				return runtime.ErrVersionMismatch
+			}
+			refs[ref] = struct{}{}
+			return nil
+		})
+	if err != nil {
+		return governance.VersionedRef{}, err
+	}
+	if len(refs) != 1 {
+		return governance.VersionedRef{}, runtime.ErrCapabilityUnsupported
+	}
+	for ref := range refs {
+		return ref, nil
+	}
+	return governance.VersionedRef{}, runtime.ErrCapabilityUnsupported
+}
+
+func walkExecutionProfiles(ctx context.Context, resolver profile.ExecutionProfileResolver, snapshot profile.ExecutionProfileSnapshot,
+	depth int, path map[profile.ExecutionProfileKey]bool, visit func(profile.ExecutionProfileSnapshot) error,
+) error {
+	if resolver == nil || visit == nil || depth > 32 || path[snapshot.Key] {
+		return runtime.ErrInvariantViolation
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path[snapshot.Key] = true
+	defer delete(path, snapshot.Key)
+	if err := visit(snapshot); err != nil {
+		return err
+	}
+	for _, node := range snapshot.AgentSpec.Nodes {
+		child, err := resolveChildExecutionProfile(ctx, resolver, snapshot, node)
+		if err != nil {
+			return err
+		}
+		if err := walkExecutionProfiles(ctx, resolver, child, depth+1, path, visit); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveChildExecutionProfile(ctx context.Context, resolver profile.ExecutionProfileResolver,
+	parent profile.ExecutionProfileSnapshot, node agentapp.AgentNodeSpecV1,
+) (profile.ExecutionProfileSnapshot, error) {
+	if childResolver, ok := resolver.(profile.ChildExecutionProfileResolver); ok {
+		return childResolver.ResolveChild(ctx, parent, node)
+	}
+	return resolver.Resolve(ctx, profile.ExecutionProfileKey{TenantID: parent.Key.TenantID,
+		TenantVersion: parent.Key.TenantVersion, AgentAppID: node.AgentRef.AgentAppID,
+		AgentAppRevision: node.AgentRef.Revision, ContentDigest: node.AgentRef.ContentDigest,
+		ConfigVersion: parent.Key.ConfigVersion, PolicyVersion: parent.Key.PolicyVersion})
 }
 
 func confirmationBindingID(payload []byte) (string, error) {
@@ -699,9 +913,9 @@ func addUsage(target *governance.Usage, prior governance.Usage) error {
 }
 
 func (w RunnerExecutor) commitContinuationFailure(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope,
-	head sessionstore.SessionHead, fence uint64, beforeCommit func(context.Context) error, snapshot profile.ExecutionProfileSnapshot, reason string) error {
+	head sessionstore.SessionHead, fence uint64, beforeCommit func(context.Context) error, modelRef governance.VersionedRef, reason string) error {
 	if w.Governance != nil {
-		if err := w.Governance.Abort(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, reason); err != nil {
+		if err := w.Governance.Abort(ctx, envelope, modelRef, reason); err != nil {
 			return err
 		}
 	}

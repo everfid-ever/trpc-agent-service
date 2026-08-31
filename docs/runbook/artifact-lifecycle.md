@@ -113,6 +113,8 @@ DLP bearer 不再接受明文环境变量。部署生成器必须调用 `trpcser
 
 ## 隔离处置
 
-对象 digest/version 不一致会立即进入 `quarantined`，临时删除失败达到最大次数后也会隔离。组合根记录 tenant/artifact 标识供外部日志和告警系统采集；服务不提供自动解隔离。处置前不得手工删除对象或修改 digest；先核对 Artifact 权威元数据、upload intent 和对象精确 VersionID。
+对象 digest/version 不一致会立即进入 `quarantined`，临时删除失败达到最大次数后也会隔离。状态转换与 `kind=audit` Outbox 在源 PostgreSQL 同一事务提交；Audit Relay 成功写入独立合规库后，`compliance.quarantine_alert` 留下不可变 open 告警事实，并递增 `trpc_quarantine_alert_export_total` 触发 `ArtifactQuarantined`。跨库不可用时 Outbox 保持可重试，不以日志代替告警。
+
+处置时先按 tenant、audit ID 和时间窗查询合规告警，再核对源库 Artifact 权威元数据、upload intent、对象 digest 与精确 VersionID。服务不提供自动解隔离；不得手工删除对象、修改 digest、删除 Audit Outbox，或编辑/删除合规告警行。处置结论应写入独立 incident/审批系统，而不是覆写不可变事实。
 
 `retention_managed=false` 的 Artifact 不会自动回收。只有在能够重建明确引用和保留期限时，才允许通过受控任务将其纳入 retention 管理。

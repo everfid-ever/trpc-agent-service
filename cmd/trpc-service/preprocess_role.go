@@ -52,6 +52,11 @@ func runPreprocessRole(parent context.Context, getenv func(string) string, logge
 	if err != nil {
 		return fmt.Errorf("configuration rejected: %w", err)
 	}
+	telemetryProvider, err := newRoleTelemetry(parent, getenv, "preprocess", logger)
+	if err != nil {
+		return fmt.Errorf("telemetry configuration rejected: %w", err)
+	}
+	defer shutdownRoleTelemetry(telemetryProvider, logger)
 	db, err := sql.Open("pgx", configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("postgres client initialization failed")
@@ -109,7 +114,7 @@ func runPreprocessRole(parent context.Context, getenv func(string) string, logge
 	owner = fmt.Sprintf("%s-%d-preprocess", valueOr(owner, "trpc-service"), os.Getpid())
 	preprocessWorker := preprocess.Worker{Store: preprocessStore, Payloads: payloads, Dispatcher: dispatcher, Owner: owner,
 		LeaseTTL: configValue.PreprocessLeaseTTL, RetryDelay: configValue.PreprocessRetryDelay,
-		MaxAttempts: configValue.PreprocessMaxAttempts, Media: &media, ArtifactRetention: configValue.ArtifactRetention}
+		MaxAttempts: configValue.PreprocessMaxAttempts, Media: &media, ArtifactRetention: configValue.ArtifactRetention, Telemetry: telemetryProvider}
 
 	lifecycle := worker.NewLifecycle()
 	migrationReadiness := migrations.NewRunner(db)
