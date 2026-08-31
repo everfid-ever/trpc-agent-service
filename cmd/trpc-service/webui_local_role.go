@@ -151,7 +151,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
 	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Subject: "worker-model"}
 	governanceStore := governancepostgres.New(db)
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
@@ -167,7 +167,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
 		Sessions: sessionpostgres.New(db), Payloads: payloads, Artifacts: artifactpostgres.New(db),
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
-		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}}
+		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
+		ContinuationTools: agentFactory}
 	workerConsumer := worker.Consumer{WorkerID: "webui-local-worker", Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
 		Leases: leases, Sessions: sessionpostgres.New(db), Parker: tasks, Statuses: tasks, Executor: executor,
 		LeaseTTL: 30 * time.Second, RenewInterval: 10 * time.Second, RetryWait: 250 * time.Millisecond,
@@ -243,6 +244,21 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	}
 	start("preprocess", func(ctx context.Context) error {
 		return runPreprocessLoop(ctx, preprocessor.RunOnce, 100*time.Millisecond, 100, logger)
+	})
+	start("confirmation expiry reconciler", func(ctx context.Context) error {
+		reconciler := governance.ConfirmationExpiryReconciler{Coordinator: governanceStore, BatchSize: 100}
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				if _, expiryErr := reconciler.RunOnce(ctx); expiryErr != nil {
+					logger.Printf("webui confirmation expiry degraded: %v", expiryErr)
+				}
+			}
+		}
 	})
 	start("dispatch relay", dispatchRelay.Run)
 	start("worker", workerConsumer.Run)

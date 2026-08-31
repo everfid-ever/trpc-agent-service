@@ -132,6 +132,55 @@ type ResultStore interface {
 	GetResult(context.Context, string, string) (ResultRecord, error)
 }
 
+// ToolResultRecord is the encrypted, immutable output of one confirmed tool
+// attempt. GrantID is its idempotency key; RequestID keeps the result bound to
+// the execution which received the grant.
+type ToolResultRecord struct {
+	TenantID, GrantID, RequestID, ResultRef, ContentDigest string
+	Content                                                []byte
+	KeyVersion                                             int64
+	CreatedAt                                              time.Time
+}
+
+// ToolResultStore makes a successful confirmed tool call resumable after the
+// process dies. Implementations must encrypt Content and reject collisions.
+type ToolResultStore interface {
+	PutToolResult(context.Context, ToolResultRecord) error
+	GetToolResult(context.Context, string, string) (ToolResultRecord, error)
+}
+
+// InteractionRecord stores a non-terminal reply such as a confirmation
+// prompt. Unlike ResultRecord, multiple immutable interactions may belong to
+// one request before its terminal result exists.
+type InteractionRecord struct {
+	TenantID, RequestID, ContentRef, ContentDigest string
+	Content                                        []byte
+	KeyVersion                                     int64
+	CreatedAt                                      time.Time
+}
+
+type InteractionStore interface {
+	PutInteraction(context.Context, InteractionRecord) error
+	GetReplyContent(context.Context, string, string, string) (ResultRecord, error)
+}
+
+func ResolveReplyContent(ctx context.Context, store ResultStore, tenantID, requestID, contentRef string) (ResultRecord, error) {
+	if store == nil || tenantID == "" || requestID == "" || contentRef == "" {
+		return ResultRecord{}, runtime.ErrInvariantViolation
+	}
+	if interactions, ok := store.(InteractionStore); ok {
+		return interactions.GetReplyContent(ctx, tenantID, requestID, contentRef)
+	}
+	result, err := store.GetResult(ctx, tenantID, requestID)
+	if err != nil {
+		return ResultRecord{}, err
+	}
+	if result.ResultRef != contentRef {
+		return ResultRecord{}, runtime.ErrVersionMismatch
+	}
+	return result, nil
+}
+
 // ReplyCoordinate is the storage-owned logical identity of one reply event.
 // Retries of the same committed stage and ordinal must resolve to the same ID.
 type ReplyCoordinate struct {

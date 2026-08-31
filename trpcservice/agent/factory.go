@@ -12,6 +12,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
@@ -50,13 +51,15 @@ type Callbacks struct {
 }
 
 type Factory struct {
-	Profiles    profile.ExecutionProfileResolver
-	Models      ModelResolver
-	Tools       ToolResolver
-	Skills      SkillResolver
-	Checkpoints CheckpointResolver
-	Callbacks   Callbacks
-	Policies    governance.Repository
+	Profiles      profile.ExecutionProfileResolver
+	Models        ModelResolver
+	Tools         ToolResolver
+	Skills        SkillResolver
+	Checkpoints   CheckpointResolver
+	Callbacks     Callbacks
+	Policies      governance.Repository
+	Confirmations governance.ConfirmationCoordinator
+	ToolResults   messaging.ToolResultStore
 }
 
 func (f Factory) Build(ctx context.Context, snapshot profile.ExecutionProfileSnapshot) (agentcore.Agent, error) {
@@ -160,7 +163,7 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		for index, ref := range snapshot.ToolRefs {
 			refs[index] = governance.VersionedRef{ID: ref.ID, Version: ref.Version}
 		}
-		guarded, err := servicetool.GuardCallables(f.Policies, refs, tools)
+		guarded, err := servicetool.GuardCallablesWithConfirmation(f.Policies, f.Confirmations, f.ToolResults, refs, tools)
 		if err != nil {
 			return nil, err
 		}
@@ -177,6 +180,27 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		options = append(options, llmagent.WithSkillRepositoryProvider(provider), llmagent.WithSkillScopeMode(skill.SkillScopeApp))
 	}
 	return llmagent.New(name, options...), nil
+}
+
+// ResolveConfirmedTool returns one exact-version callable behind the same
+// non-bypassable policy/grant wrapper used by normal agent construction.
+func (f Factory) ResolveConfirmedTool(ctx context.Context, tenantID string, ref governance.VersionedRef) (tool.CallableTool, error) {
+	if f.Tools == nil || f.Policies == nil || f.Confirmations == nil || f.ToolResults == nil || tenantID == "" || ref.ID == "" || ref.Version < 1 {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	values, err := f.Tools.ResolveTools(ctx, tenantID, []profile.VersionedRef{{ID: ref.ID, Version: ref.Version}})
+	if err != nil {
+		return nil, err
+	}
+	guarded, err := servicetool.GuardCallablesWithConfirmation(f.Policies, f.Confirmations, f.ToolResults, []governance.VersionedRef{ref}, values)
+	if err != nil {
+		return nil, err
+	}
+	callable, ok := guarded[0].(tool.CallableTool)
+	if !ok {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return callable, nil
 }
 
 func (f Factory) buildGraph(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, subAgents []agentcore.Agent) (agentcore.Agent, error) {

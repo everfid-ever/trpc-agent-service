@@ -30,17 +30,22 @@ const (
 )
 
 const (
-	ReasonAllowed             = "allowed"
-	ReasonSubjectDenied       = "subject_denied"
-	ReasonInputRejected       = "input_rejected"
-	ReasonOutputRejected      = "output_rejected"
-	ReasonModelDenied         = "model_denied"
-	ReasonToolDenied          = "tool_denied"
-	ReasonConfirmationMissing = "confirmation_unavailable"
-	ReasonBudgetExceeded      = "budget_exceeded"
-	ReasonPricingUnavailable  = "pricing_unavailable"
-	ReasonUsageUnavailable    = "usage_unavailable"
-	ReasonReservationClosed   = "reservation_closed"
+	ReasonAllowed              = "allowed"
+	ReasonSubjectDenied        = "subject_denied"
+	ReasonInputRejected        = "input_rejected"
+	ReasonOutputRejected       = "output_rejected"
+	ReasonModelDenied          = "model_denied"
+	ReasonToolDenied           = "tool_denied"
+	ReasonConfirmationMissing  = "confirmation_unavailable"
+	ReasonBudgetExceeded       = "budget_exceeded"
+	ReasonPricingUnavailable   = "pricing_unavailable"
+	ReasonUsageUnavailable     = "usage_unavailable"
+	ReasonReservationClosed    = "reservation_closed"
+	ReasonConfirmationRequired = "confirmation_required"
+	ReasonConfirmationDenied   = "confirmation_denied"
+	ReasonConfirmationExpired  = "confirmation_expired"
+	ReasonToolAttemptFailed    = "tool_attempt_failed"
+	ReasonToolEffectUnknown    = "tool_effect_unknown"
 )
 
 type DLPMode string

@@ -23,6 +23,7 @@ type RunGuard interface {
 	Begin(context.Context, runtime.ExecutionEnvelope, VersionedRef, []byte) (RunPermit, error)
 	Finish(context.Context, RunPermit, Usage, []byte) (Decision, error)
 	Refund(context.Context, RunPermit, string) error
+	Abort(context.Context, runtime.ExecutionEnvelope, VersionedRef, string) error
 	Record(context.Context, Decision) error
 }
 
@@ -140,6 +141,25 @@ func (s Service) Refund(ctx context.Context, permit RunPermit, reason string) er
 		return nil
 	}
 	_, err := s.Ledger.Refund(ctx, permit.Policy.TenantID, permit.Reservation.ReservationID, permit.Reservation.Version, reason)
+	return err
+}
+
+func (s Service) Abort(ctx context.Context, envelope runtime.ExecutionEnvelope, model VersionedRef, reason string) error {
+	if s.Ledger == nil {
+		return runtime.ErrCapabilityUnsupported
+	}
+	id, err := StableReservationID(ReserveRequest{TenantID: envelope.TenantID, RequestID: envelope.RequestID, ResourceID: model.ID, AttemptClass: "model"})
+	if err != nil {
+		return err
+	}
+	reservation, err := s.Ledger.GetReservation(ctx, envelope.TenantID, id)
+	if err != nil {
+		return err
+	}
+	if reservation.State != ReservationReserved {
+		return nil
+	}
+	_, err = s.Ledger.Refund(ctx, envelope.TenantID, id, reservation.Version, reason)
 	return err
 }
 

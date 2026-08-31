@@ -67,7 +67,7 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 		event.Target.Channel == "" || event.Target.ExternalAccountID == "" {
 		return runtime.ErrInvariantViolation
 	}
-	result, err := s.Results.GetResult(ctx, event.TenantID, event.RequestID)
+	result, err := messaging.ResolveReplyContent(ctx, s.Results, event.TenantID, event.RequestID, event.ContentRef)
 	if err != nil {
 		return err
 	}

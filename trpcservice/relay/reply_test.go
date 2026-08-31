@@ -57,3 +57,20 @@ func TestReplyRelayDoesNotPublishMismatchedResultReference(t *testing.T) {
 		t.Fatalf("count=%d err=%v retried=%t events=%d", count, err, outbox.retried, len(publisher.events))
 	}
 }
+
+func TestReplyRelayPublishesEncryptedInteractionBeforeTerminalResult(t *testing.T) {
+	store := memory.New()
+	interaction := messaging.InteractionRecord{TenantID: "tenant", RequestID: "request", ContentRef: "confirmation://tenant/conf_1",
+		ContentDigest: "interaction-digest", Content: []byte(`{"kind":"tool_confirmation"}`), KeyVersion: 1}
+	if err := store.PutInteraction(context.Background(), interaction); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.PutReplyRoute(messaging.ReplyRoute{TenantID: "tenant", RequestID: "request", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account", ConfigVersion: 1})
+	outbox := &outboxStub{records: []messaging.OutboxRecord{{TenantID: "tenant", OutboxID: "confirmation-outbox", Kind: "reply", AggregateID: "request",
+		IdempotencyKey: "confirmation-reply", PayloadRef: interaction.ContentRef, EventSeq: 1, Version: 1}}}
+	publisher := &replyPublisherStub{}
+	count, err := (ReplyRelay{Outbox: outbox, Results: store, Routes: store, Replies: publisher, Owner: "reply-relay"}).RunOnce(context.Background())
+	if err != nil || count != 1 || len(publisher.events) != 1 || publisher.events[0].ContentRef != interaction.ContentRef {
+		t.Fatalf("count=%d events=%#v err=%v", count, publisher.events, err)
+	}
+}

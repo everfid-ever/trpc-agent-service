@@ -125,7 +125,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	inbox := messagingpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
 	model := &delayedModel{inner: mockmodel.New(), delay: 150 * time.Millisecond}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}, Policies: governanceStore}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: model}, Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, err := profiles.Resolve(ctx, key)
 		if err != nil {
@@ -150,7 +150,7 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 			inner: worker.RunnerExecutor{
 				Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 				Payloads: payloads, Inputs: worker.JSONTextInputDecoder{},
-				Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore},
+				Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
 				EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
 					return "runner", "event://" + value.ID, nil
 				},

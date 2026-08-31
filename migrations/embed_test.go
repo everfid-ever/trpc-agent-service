@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 24 {
+	if len(all) != 25 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -37,6 +37,30 @@ func TestGovernanceFoundationMigrationContract(t *testing.T) {
 	for _, clause := range []string{"CREATE TABLE public.policy_snapshot", "CREATE TABLE public.pricing_snapshot", "CREATE TABLE public.budget_reservation", "CREATE TABLE public.usage_ledger", "CREATE TABLE public.governance_decision", "deny-by-default", "config_snapshot_policy_fk", "reject_governance_snapshot_change"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestDurableConfirmationMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[24]
+	if migration.Version != "000025" || migration.Name != "durable_confirmation" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.confirmation", "request_digest", "CREATE TABLE public.confirmation_grant",
+		"CREATE TABLE public.tool_attempt", "effect_unknown", "CREATE TABLE public.tool_result_payload", "result_ciphertext bytea",
+		"CREATE TABLE public.interaction_payload", "content_ciphertext bytea",
+		"CREATE FUNCTION public.suspend_turn", "public.commit_turn", "CREATE FUNCTION public.decide_confirmation", "CREATE FUNCTION public.expire_confirmations", "FOR UPDATE", "REVOKE ALL ON FUNCTION public.suspend_turn"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	for _, clause := range []string{"DROP TABLE IF EXISTS public.tool_result_payload", "DROP TABLE IF EXISTS public.confirmation"} {
+		if !strings.Contains(migration.Down, clause) {
+			t.Errorf("down missing %q", clause)
 		}
 	}
 }

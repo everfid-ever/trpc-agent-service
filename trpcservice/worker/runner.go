@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -38,6 +39,10 @@ func (f InputDecoderFunc) DecodeInput(ctx context.Context, envelope runtime.Exec
 
 type ResultRefEncoder func(context.Context, runtime.ExecutionEnvelope, string) (string, error)
 
+type ConfirmedToolResolver interface {
+	ResolveConfirmedTool(context.Context, string, governance.VersionedRef) (agenttool.CallableTool, error)
+}
+
 type RunnerExecutor struct {
 	Tasks             gateway.TaskStore
 	Profiles          profile.ExecutionProfileResolver
@@ -49,6 +54,9 @@ type RunnerExecutor struct {
 	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
 	Governance        governance.RunGuard
+	Confirmations     governance.ConfirmationCoordinator
+	ContinuationTools ConfirmedToolResolver
+	ConfirmationTTL   time.Duration
 	EventDrainTimeout time.Duration
 }
 
@@ -118,6 +126,45 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			_ = turn.Rollback(context.Background())
 		}
 	}()
+	var continuation *governance.Confirmation
+	if w.Confirmations != nil {
+		confirmation, confirmationErr := w.Confirmations.GetConfirmationByRequest(ctx, envelope.TenantID, envelope.RequestID)
+		if confirmationErr == nil {
+			switch confirmation.State {
+			case governance.ConfirmationPending:
+				return nil
+			case governance.ConfirmationDenied, governance.ConfirmationExpired:
+				if w.Governance != nil {
+					if err := w.Governance.Abort(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, string(confirmation.State)); err != nil {
+						return err
+					}
+				}
+				outcome := runtime.OutcomeConfirmationDenied
+				if confirmation.State == governance.ConfirmationExpired {
+					outcome = runtime.OutcomeConfirmationTimeout
+				}
+				reason := governance.ReasonConfirmationDenied
+				if confirmation.State == governance.ConfirmationExpired {
+					reason = governance.ReasonConfirmationExpired
+				}
+				decision := governance.Decision{DecisionID: governance.StableDecisionID(envelope.TenantID, envelope.RequestID, string(confirmation.State), envelope.PolicyVersion),
+					TenantID: envelope.TenantID, RequestID: envelope.RequestID, Stage: string(confirmation.State), Action: governance.ActionDeny,
+					ReasonCode: reason, PolicyVersion: envelope.PolicyVersion}
+				if w.Governance != nil {
+					if err := w.Governance.Record(ctx, decision); err != nil {
+						return err
+					}
+				}
+				return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, outcome, decision)
+			case governance.ConfirmationApproved, governance.ConfirmationConsumed:
+				continuation = &confirmation
+			default:
+				return runtime.ErrInvariantViolation
+			}
+		} else if !errors.Is(confirmationErr, runtime.ErrNotFound) {
+			return confirmationErr
+		}
+	}
 
 	payload, err := w.executionPayload(ctx, envelope)
 	if err != nil {
@@ -170,7 +217,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 	}()
 
-	runCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion})
+	runCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, PayloadKeyVersion: payload.KeyVersion})
 	runOptions := []agentcore.RunOption{agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID)}
 	if w.Governance != nil {
 		toolRule := func(value agenttool.Tool) governance.Decision {
@@ -186,7 +233,8 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 		runOptions = append(runOptions,
 			agentcore.WithToolFilter(func(_ context.Context, value agenttool.Tool) bool {
-				return toolRule(value).Action == governance.ActionAllow
+				action := toolRule(value).Action
+				return action == governance.ActionAllow || action == governance.ActionAsk
 			}),
 			agentcore.WithToolExecutionFilter(func(_ context.Context, value agenttool.Tool) bool {
 				return toolRule(value).Action == governance.ActionAllow
@@ -198,6 +246,76 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				return agenttool.AllowPermission(), nil
 			}))
 	}
+	usageOffset := governance.Usage{}
+	if continuation != nil {
+		call, callErr := confirmedToolCall(ctx, w.Sessions, sessionKey, *continuation)
+		if callErr != nil {
+			return callErr
+		}
+		grant, grantErr := w.Confirmations.GetGrantByConfirmation(ctx, envelope.TenantID, continuation.ConfirmationID)
+		if grantErr != nil {
+			return grantErr
+		}
+		if grant.RequestID != envelope.RequestID || grant.SubjectID != envelope.UserID || grant.Tool != continuation.Tool || grant.ToolCallID != call.ID || grant.ArgsDigest != continuation.ArgsDigest || grant.PolicyVersion != envelope.PolicyVersion {
+			return runtime.ErrTenantScope
+		}
+		toolResults, ok := w.Payloads.(messaging.ToolResultStore)
+		if !ok {
+			return runtime.ErrCapabilityUnsupported
+		}
+		var encoded []byte
+		if continuation.State == governance.ConfirmationApproved {
+			if w.ContinuationTools == nil {
+				return runtime.ErrCapabilityUnsupported
+			}
+			callable, resolveErr := w.ContinuationTools.ResolveConfirmedTool(ctx, envelope.TenantID, continuation.Tool)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			confirmedCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+				SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, GrantID: grant.GrantID, GrantVersion: grant.Version,
+				ToolCallID: call.ID, ArgsDigest: continuation.ArgsDigest, PayloadKeyVersion: payload.KeyVersion})
+			result, callErr := callable.Call(confirmedCtx, call.Function.Arguments)
+			if callErr != nil {
+				attempt, attemptErr := w.Confirmations.GetToolAttempt(ctx, envelope.TenantID, grant.GrantID)
+				if attemptErr == nil && attempt.State == governance.ToolAttemptFailed {
+					return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolAttemptFailed)
+				}
+				// A storage/response failure after the external effect is not proof
+				// that the tool failed. Leave the request retryable; the consumed
+				// path will recover a durable result or terminalize effect_unknown.
+				return callErr
+			}
+			encoded, err = json.Marshal(result)
+			if err != nil {
+				return runtime.ErrInvariantViolation
+			}
+		} else {
+			attempt, attemptErr := w.Confirmations.GetToolAttempt(ctx, envelope.TenantID, grant.GrantID)
+			if attemptErr != nil {
+				return attemptErr
+			}
+			if attempt.State == governance.ToolAttemptFailed {
+				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolAttemptFailed)
+			}
+			stored, storedErr := toolResults.GetToolResult(ctx, envelope.TenantID, grant.GrantID)
+			if storedErr != nil {
+				return w.commitContinuationFailure(ctx, turn, envelope, head, fence, beforeCommit, snapshot, governance.ReasonToolEffectUnknown)
+			}
+			if stored.RequestID != envelope.RequestID || stored.ResultRef != attempt.ResultRef && attempt.State == governance.ToolAttemptSucceeded {
+				return runtime.ErrVersionMismatch
+			}
+			if attempt.State == governance.ToolAttemptEffectUnknown {
+				if _, finishErr := w.Confirmations.FinishToolAttempt(ctx, governance.FinishToolAttemptRequest{TenantID: envelope.TenantID, GrantID: grant.GrantID,
+					State: governance.ToolAttemptSucceeded, ResultRef: stored.ResultRef}); finishErr != nil {
+					return finishErr
+				}
+			}
+			encoded = stored.Content
+		}
+		message = model.NewToolMessage(call.ID, call.Function.Name, string(encoded))
+		usageOffset = continuation.Usage
+	}
 	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message, runOptions...)
 	if err != nil {
 		return err
@@ -206,6 +324,73 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if err != nil {
 		closeRunner(run, events, w.EventDrainTimeout)
 		runnerClosed = true
+		return err
+	}
+	if continuation != nil {
+		if err := addUsage(&runResult.Usage, usageOffset); err != nil {
+			return err
+		}
+	}
+	if len(runResult.ToolCalls) != 0 {
+		if w.Governance == nil || w.Confirmations == nil || len(runResult.ToolCalls) != 1 {
+			return runtime.ErrCapabilityUnsupported
+		}
+		call := runResult.ToolCalls[0]
+		toolRef, ok := confirmationToolRef(snapshot, permit.Policy, call.Function.Name)
+		if !ok || call.ID == "" {
+			return runtime.ErrCapabilityUnsupported
+		}
+		_, argsDigest, canonicalErr := governance.CanonicalArguments(call.Function.Arguments)
+		if canonicalErr != nil {
+			return canonicalErr
+		}
+		bindingID, bindingErr := confirmationBindingID(payload.Content)
+		if bindingErr != nil {
+			return bindingErr
+		}
+		confirmationID, idErr := governance.StableConfirmationID(envelope.TenantID, envelope.RequestID, call.ID)
+		if idErr != nil {
+			return idErr
+		}
+		ttl := w.ConfirmationTTL
+		if ttl <= 0 {
+			ttl = 15 * time.Minute
+		}
+		expiresAt := envelope.CreatedAt.UTC().Add(ttl)
+		promptRef := "confirmation://" + envelope.TenantID + "/" + confirmationID
+		prompt, promptErr := json.Marshal(map[string]any{"schema_version": 1, "kind": "tool_confirmation", "confirmation_id": confirmationID,
+			"tool_id": toolRef.ID, "tool_version": toolRef.Version, "expires_at": expiresAt.Format(time.RFC3339Nano)})
+		if promptErr != nil {
+			return promptErr
+		}
+		interactions, ok := w.Payloads.(messaging.InteractionStore)
+		if !ok {
+			return runtime.ErrCapabilityUnsupported
+		}
+		promptDigest := sha256.Sum256(prompt)
+		if err := interactions.PutInteraction(ctx, messaging.InteractionRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+			ContentRef: promptRef, ContentDigest: hex.EncodeToString(promptDigest[:]), Content: prompt, KeyVersion: payload.KeyVersion}); err != nil {
+			return err
+		}
+		if beforeCommit != nil {
+			if err := beforeCommit(ctx); err != nil {
+				return err
+			}
+		}
+		commit := sessionstore.CommitTurnRequest{SessionKey: sessionKey, RequestID: envelope.RequestID,
+			CommitID: envelope.RequestID + ":waiting:" + call.ID, Stage: "waiting", InputSeq: envelope.InputSeq, Fence: fence,
+			ExpectedVersion: head.Version, Outcome: runtime.OutcomeWaitingConfirmation, Events: turn.Events(), StateDelta: turn.StateDelta(),
+			ResultRef: "continuation://" + envelope.TenantID + "/" + envelope.RequestID + "/" + call.ID,
+			Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "confirmation:" + confirmationID,
+				PayloadRef: promptRef, EventSeq: 1, TraceParent: envelope.TraceParent}, {Kind: "reply", IdempotencyKey: "confirmation-reply:" + confirmationID,
+				PayloadRef: promptRef, EventSeq: 1, TraceParent: envelope.TraceParent}}}
+		_, err = w.Confirmations.Suspend(ctx, commit, governance.SuspensionRequest{ConfirmationID: confirmationID, TenantID: envelope.TenantID,
+			RequestID: envelope.RequestID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID, InputSeq: envelope.InputSeq, Fence: fence,
+			SubjectID: envelope.UserID, ChannelBindingID: bindingID, Tool: toolRef, ToolCallID: call.ID, ArgsDigest: argsDigest,
+			CheckpointRef: commit.ResultRef, PolicyVersion: envelope.PolicyVersion, Usage: runResult.Usage, ExpiresAt: expiresAt})
+		if err == nil {
+			committed = true
+		}
 		return err
 	}
 	content := runResult.Content
@@ -299,6 +484,19 @@ func (w RunnerExecutor) CancelWithLease(ctx context.Context, envelope runtime.Ex
 	if !status.CancelRequested || status.CancelVersion < 1 {
 		return runtime.ErrInvariantViolation
 	}
+	if w.Governance != nil && w.Profiles != nil {
+		key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion,
+			AgentAppID: envelope.AgentAppID, AgentAppVersion: envelope.AgentAppVersion, AgentAppRevision: envelope.AgentAppRevision,
+			ContentDigest: envelope.AgentContentDigest, ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
+		snapshot, resolveErr := w.Profiles.Resolve(ctx, key)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		abortErr := w.Governance.Abort(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, "cancelled")
+		if abortErr != nil && !errors.Is(abortErr, runtime.ErrNotFound) {
+			return abortErr
+		}
+	}
 	sessionKey := sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}
 	head, err := w.Sessions.OpenForRun(ctx, sessionstore.OpenForRunRequest{
 		SessionKey: sessionKey, RequestID: envelope.RequestID, InputSeq: envelope.InputSeq, Fence: fence,
@@ -367,13 +565,15 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 }
 
 type runnerResult struct {
-	Content string
-	Usage   governance.Usage
+	Content   string
+	Usage     governance.Usage
+	ToolCalls []model.ToolCall
 }
 
 func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runnerResult, error) {
 	var content strings.Builder
 	var resultUsage governance.Usage
+	var toolCalls []model.ToolCall
 	usageEvents := make(map[string]struct{})
 	completed := false
 	for {
@@ -385,7 +585,7 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 				if !completed {
 					return runnerResult{}, runtime.ErrBackendUnavailable
 				}
-				return runnerResult{Content: content.String(), Usage: resultUsage}, nil
+				return runnerResult{Content: content.String(), Usage: resultUsage, ToolCalls: toolCalls}, nil
 			}
 			if value == nil {
 				continue
@@ -403,6 +603,9 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 					}
 				}
 				for _, choice := range value.Choices {
+					if len(choice.Message.ToolCalls) != 0 {
+						toolCalls = append([]model.ToolCall(nil), choice.Message.ToolCalls...)
+					}
 					if choice.Delta.Content != "" {
 						content.WriteString(choice.Delta.Content)
 					} else if choice.Message.Content != "" && !value.IsRunnerCompletion() {
@@ -416,6 +619,101 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 			}
 		}
 	}
+}
+
+func confirmationToolRef(snapshot profile.ExecutionProfileSnapshot, policy governance.PolicySnapshot, name string) (governance.VersionedRef, bool) {
+	var ref governance.VersionedRef
+	count := 0
+	for _, value := range snapshot.ToolRefs {
+		if value.ID == name {
+			ref = governance.VersionedRef{ID: value.ID, Version: value.Version}
+			count++
+		}
+	}
+	if count != 1 || governance.ToolDecision(policy, ref).Action != governance.ActionAsk {
+		return governance.VersionedRef{}, false
+	}
+	return ref, true
+}
+
+func confirmationBindingID(payload []byte) (string, error) {
+	var value map[string]json.RawMessage
+	canonical, _, err := governance.CanonicalArguments(payload)
+	if err != nil {
+		return "", runtime.ErrInvalidEnvelope
+	}
+	if err := json.Unmarshal(canonical, &value); err != nil {
+		return "", runtime.ErrInvalidEnvelope
+	}
+	var bindingID string
+	if err := json.Unmarshal(value["channel_binding_id"], &bindingID); err != nil || strings.TrimSpace(bindingID) == "" {
+		return "", runtime.ErrCapabilityUnsupported
+	}
+	return bindingID, nil
+}
+
+func confirmedToolCall(ctx context.Context, sessions sessionstore.AtomicSessionStore, key sessionstore.SessionKey, confirmation governance.Confirmation) (model.ToolCall, error) {
+	snapshot, err := sessions.LoadSession(ctx, key)
+	if err != nil {
+		return model.ToolCall{}, err
+	}
+	for eventIndex := len(snapshot.Events) - 1; eventIndex >= 0; eventIndex-- {
+		var value event.Event
+		if err := json.Unmarshal(snapshot.Events[eventIndex], &value); err != nil {
+			return model.ToolCall{}, runtime.ErrInvariantViolation
+		}
+		if value.Response == nil {
+			continue
+		}
+		for _, choice := range value.Choices {
+			for _, call := range choice.Message.ToolCalls {
+				if call.ID != confirmation.ToolCallID {
+					continue
+				}
+				if call.Function.Name != confirmation.Tool.ID {
+					return model.ToolCall{}, runtime.ErrVersionMismatch
+				}
+				_, digest, digestErr := governance.CanonicalArguments(call.Function.Arguments)
+				if digestErr != nil || digest != confirmation.ArgsDigest {
+					return model.ToolCall{}, runtime.ErrVersionMismatch
+				}
+				return call, nil
+			}
+		}
+	}
+	return model.ToolCall{}, runtime.ErrNotFound
+}
+
+func addUsage(target *governance.Usage, prior governance.Usage) error {
+	if target == nil || prior.InputTokens < 0 || prior.OutputTokens < 0 || prior.CachedInputTokens < 0 ||
+		target.InputTokens > math.MaxInt64-prior.InputTokens || target.OutputTokens > math.MaxInt64-prior.OutputTokens || target.CachedInputTokens > math.MaxInt64-prior.CachedInputTokens {
+		return runtime.ErrInvariantViolation
+	}
+	target.InputTokens += prior.InputTokens
+	target.OutputTokens += prior.OutputTokens
+	target.CachedInputTokens += prior.CachedInputTokens
+	if target.CachedInputTokens > target.InputTokens {
+		return runtime.ErrInvariantViolation
+	}
+	return nil
+}
+
+func (w RunnerExecutor) commitContinuationFailure(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope,
+	head sessionstore.SessionHead, fence uint64, beforeCommit func(context.Context) error, snapshot profile.ExecutionProfileSnapshot, reason string) error {
+	if w.Governance != nil {
+		if err := w.Governance.Abort(ctx, envelope, governance.VersionedRef{ID: snapshot.ModelProfileRef.ID, Version: snapshot.ModelProfileRef.Version}, reason); err != nil {
+			return err
+		}
+	}
+	decision := governance.Decision{DecisionID: governance.StableDecisionID(envelope.TenantID, envelope.RequestID, reason, envelope.PolicyVersion),
+		TenantID: envelope.TenantID, RequestID: envelope.RequestID, Stage: "tool_continuation", Action: governance.ActionDeny,
+		ReasonCode: reason, PolicyVersion: envelope.PolicyVersion}
+	if w.Governance != nil {
+		if err := w.Governance.Record(ctx, decision); err != nil {
+			return err
+		}
+	}
+	return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeFailed, decision)
 }
 
 type closableRunner interface{ Close() error }

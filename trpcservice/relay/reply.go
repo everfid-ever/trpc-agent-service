@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
@@ -43,8 +44,11 @@ func (r ReplyRelay) publish(ctx context.Context, record messaging.OutboxRecord) 
 	if record.Kind != "" && record.Kind != "reply" {
 		return runtime.ErrInvariantViolation
 	}
-	result, err := r.Results.GetResult(ctx, record.TenantID, record.AggregateID)
+	result, err := messaging.ResolveReplyContent(ctx, r.Results, record.TenantID, record.AggregateID, record.PayloadRef)
 	if err != nil {
+		if errors.Is(err, runtime.ErrVersionMismatch) {
+			return runtime.ErrTenantScope
+		}
 		return err
 	}
 	if result.TenantID != record.TenantID || result.RequestID != record.AggregateID || result.ResultRef != record.PayloadRef {

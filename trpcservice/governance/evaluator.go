@@ -64,6 +64,10 @@ func ToolDecision(policy PolicySnapshot, tool VersionedRef) Decision {
 			continue
 		}
 		if rule.Dangerous {
+			if rule.ConfirmationSupported {
+				decision.Action, decision.ReasonCode = ActionAsk, ReasonConfirmationRequired
+				return decision
+			}
 			decision.ReasonCode = ReasonConfirmationMissing
 			return decision
 		}

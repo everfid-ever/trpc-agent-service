@@ -123,10 +123,12 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	}
 	sessions := sessionpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
+	agentFactory.Confirmations, agentFactory.ToolResults = governanceStore, payloads
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef,
-		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance}
+		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,
+		ContinuationTools: agentFactory}
 	dispatchBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment, Group: configValue.WorkerGroup,
 		ShardCount: uint32(configValue.WorkerShardCount), ReadBlock: 250 * time.Millisecond, ReclaimIdle: configValue.WorkerLeaseTTL})
 	if err != nil {
@@ -237,6 +239,21 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 					if ackErr := controlQueue.AckExecutionControl(ctx, delivery); ackErr != nil {
 						logger.Printf("worker execution-control reclaim ACK degraded: %v", ackErr)
 					}
+				}
+			}
+		}
+	})
+	start("confirmation expiry reconciler", func(ctx context.Context) error {
+		reconciler := governance.ConfirmationExpiryReconciler{Coordinator: governanceStore, BatchSize: configValue.WorkerReclaimLimit}
+		ticker := time.NewTicker(configValue.WorkerReclaimInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				if _, expiryErr := reconciler.RunOnce(ctx); expiryErr != nil {
+					logger.Printf("worker confirmation expiry degraded: %v", expiryErr)
 				}
 			}
 		}

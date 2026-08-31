@@ -3,10 +3,15 @@ package runtime
 import "context"
 
 type ExecutionContext struct {
-	TenantID      string
-	RequestID     string
-	SubjectID     string
-	PolicyVersion int64
+	TenantID          string
+	RequestID         string
+	SubjectID         string
+	PolicyVersion     int64
+	GrantID           string
+	GrantVersion      int64
+	ToolCallID        string
+	ArgsDigest        string
+	PayloadKeyVersion int64
 }
 
 type executionContextKey struct{}

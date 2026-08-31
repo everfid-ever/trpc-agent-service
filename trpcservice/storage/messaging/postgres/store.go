@@ -278,6 +278,130 @@ func (s *Store) GetResult(ctx context.Context, tenantID, requestID string) (mess
 	return record, err
 }
 
+func (s *Store) PutToolResult(ctx context.Context, in messaging.ToolResultRecord) error {
+	if in.TenantID == "" || in.GrantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 || in.KeyVersion < 1 {
+		return runtime.ErrCommitConflict
+	}
+	key, err := s.resolvePayloadKey(ctx, in.TenantID, in.KeyVersion)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	aad := toolResultAAD(in)
+	ciphertext, nonce, err := encryptPayload(key, aad, in.Content)
+	if err != nil {
+		return err
+	}
+	var requestID, ref, digest string
+	var encrypted, storedNonce []byte
+	var version int64
+	err = s.db.QueryRowContext(ctx, `INSERT INTO tool_result_payload(tenant_id,grant_id,request_id,result_ref,result_ciphertext,result_nonce,content_digest,key_version)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (tenant_id,grant_id) DO UPDATE SET grant_id=EXCLUDED.grant_id
+RETURNING request_id,result_ref,content_digest,result_ciphertext,result_nonce,key_version`, in.TenantID, in.GrantID, in.RequestID, in.ResultRef, ciphertext, nonce, in.ContentDigest, in.KeyVersion).
+		Scan(&requestID, &ref, &digest, &encrypted, &storedNonce, &version)
+	if err != nil {
+		return translate(err)
+	}
+	if requestID != in.RequestID || ref != in.ResultRef || digest != in.ContentDigest || version != in.KeyVersion {
+		return runtime.ErrIdempotencyCollision
+	}
+	content, err := decryptPayload(key, aad, encrypted, storedNonce)
+	defer clear(content)
+	if err != nil || !bytes.Equal(content, in.Content) {
+		return runtime.ErrIdempotencyCollision
+	}
+	return nil
+}
+
+func (s *Store) GetToolResult(ctx context.Context, tenantID, grantID string) (messaging.ToolResultRecord, error) {
+	record := messaging.ToolResultRecord{TenantID: tenantID, GrantID: grantID}
+	var ciphertext, nonce []byte
+	err := s.db.QueryRowContext(ctx, `SELECT request_id,result_ref,content_digest,result_ciphertext,result_nonce,key_version,created_at
+FROM tool_result_payload WHERE tenant_id=$1 AND grant_id=$2`, tenantID, grantID).
+		Scan(&record.RequestID, &record.ResultRef, &record.ContentDigest, &ciphertext, &nonce, &record.KeyVersion, &record.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return messaging.ToolResultRecord{}, runtime.ErrNotFound
+	}
+	if err != nil {
+		return messaging.ToolResultRecord{}, err
+	}
+	key, err := s.resolvePayloadKey(ctx, tenantID, record.KeyVersion)
+	if err != nil {
+		return messaging.ToolResultRecord{}, err
+	}
+	defer clear(key)
+	record.Content, err = decryptPayload(key, toolResultAAD(record), ciphertext, nonce)
+	return record, err
+}
+
+func (s *Store) PutInteraction(ctx context.Context, in messaging.InteractionRecord) error {
+	if in.TenantID == "" || in.RequestID == "" || in.ContentRef == "" || in.ContentDigest == "" || len(in.Content) == 0 || in.KeyVersion < 1 {
+		return runtime.ErrCommitConflict
+	}
+	key, err := s.resolvePayloadKey(ctx, in.TenantID, in.KeyVersion)
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	aad := interactionAAD(in)
+	ciphertext, nonce, err := encryptPayload(key, aad, in.Content)
+	if err != nil {
+		return err
+	}
+	var digest string
+	var encrypted, storedNonce []byte
+	var version int64
+	err = s.db.QueryRowContext(ctx, `INSERT INTO interaction_payload(tenant_id,request_id,content_ref,content_ciphertext,content_nonce,content_digest,key_version)
+VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (tenant_id,request_id,content_ref) DO UPDATE SET content_ref=EXCLUDED.content_ref
+RETURNING content_digest,content_ciphertext,content_nonce,key_version`, in.TenantID, in.RequestID, in.ContentRef, ciphertext, nonce, in.ContentDigest, in.KeyVersion).
+		Scan(&digest, &encrypted, &storedNonce, &version)
+	if err != nil {
+		return translate(err)
+	}
+	if digest != in.ContentDigest || version != in.KeyVersion {
+		return runtime.ErrIdempotencyCollision
+	}
+	content, err := decryptPayload(key, aad, encrypted, storedNonce)
+	defer clear(content)
+	if err != nil || !bytes.Equal(content, in.Content) {
+		return runtime.ErrIdempotencyCollision
+	}
+	return nil
+}
+
+func (s *Store) GetReplyContent(ctx context.Context, tenantID, requestID, contentRef string) (messaging.ResultRecord, error) {
+	terminal, err := s.GetResult(ctx, tenantID, requestID)
+	terminalExists := err == nil
+	if err == nil && terminal.ResultRef == contentRef {
+		return terminal, nil
+	}
+	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return messaging.ResultRecord{}, err
+	}
+	value := messaging.ResultRecord{TenantID: tenantID, RequestID: requestID, ResultRef: contentRef}
+	var ciphertext, nonce []byte
+	err = s.db.QueryRowContext(ctx, `SELECT content_digest,content_ciphertext,content_nonce,key_version,created_at FROM interaction_payload
+WHERE tenant_id=$1 AND request_id=$2 AND content_ref=$3`, tenantID, requestID, contentRef).
+		Scan(&value.ContentDigest, &ciphertext, &nonce, &value.KeyVersion, &value.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		if terminalExists {
+			return messaging.ResultRecord{}, runtime.ErrVersionMismatch
+		}
+		return messaging.ResultRecord{}, runtime.ErrNotFound
+	}
+	if err != nil {
+		return messaging.ResultRecord{}, err
+	}
+	key, err := s.resolvePayloadKey(ctx, tenantID, value.KeyVersion)
+	if err != nil {
+		return messaging.ResultRecord{}, err
+	}
+	defer clear(key)
+	record := messaging.InteractionRecord{TenantID: tenantID, RequestID: requestID, ContentRef: contentRef, ContentDigest: value.ContentDigest}
+	value.Content, err = decryptPayload(key, interactionAAD(record), ciphertext, nonce)
+	return value, err
+}
+
 func (s *Store) resolvePayloadKey(ctx context.Context, tenantID string, version int64) ([]byte, error) {
 	if s == nil || s.payloadKeys == nil {
 		return nil, runtime.ErrCapabilityUnsupported
@@ -342,6 +466,14 @@ WHERE e.tenant_id=$1 AND e.request_id=$2`, tenantID, requestID).
 
 func resultAAD(record messaging.ResultRecord) []byte {
 	return []byte(record.TenantID + "\x00" + record.RequestID + "\x00" + record.ResultRef + "\x00" + record.ContentDigest)
+}
+
+func toolResultAAD(record messaging.ToolResultRecord) []byte {
+	return []byte(record.TenantID + "\x00" + record.GrantID + "\x00" + record.RequestID + "\x00" + record.ResultRef + "\x00" + record.ContentDigest)
+}
+
+func interactionAAD(record messaging.InteractionRecord) []byte {
+	return []byte(record.TenantID + "\x00" + record.RequestID + "\x00" + record.ContentRef + "\x00" + record.ContentDigest)
 }
 
 func payloadAAD(record messaging.PayloadRecord) []byte {
@@ -716,6 +848,8 @@ var _ messaging.InboxClaimer = (*Store)(nil)
 var _ messaging.PayloadStore = (*Store)(nil)
 var _ messaging.PreparedPayloadStore = (*Store)(nil)
 var _ messaging.ResultStore = (*Store)(nil)
+var _ messaging.ToolResultStore = (*Store)(nil)
+var _ messaging.InteractionStore = (*Store)(nil)
 var _ messaging.ReplyRouteStore = (*Store)(nil)
 var _ messaging.OutboxStore = (*Store)(nil)
 var _ messaging.ReconciliationStore = (*Store)(nil)
