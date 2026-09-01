@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 26 {
+	if len(all) != 27 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,28 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestBackendMigrationAuthorityContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[26]
+	if migration.Version != "000027" || migration.Name != "backend_migration" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.backend_migration (", "CREATE TABLE public.backend_migration_batch (",
+		"backend_binding_migration_coordinate_key", "source_backend_profile_id,source_backend_version",
+		"target_backend_profile_id,target_backend_version", "backend_migration_active_domain_idx",
+		"guard_backend_migration_update", "backend_migration_batch_immutable",
+		"verify_source_count IS NULL OR verify_source_count >= 0", "verify_source_digest ~ '^[0-9a-f]{64}$'",
+		"backfill checkpoint update is invalid", "state transition cannot mutate backfill progress",
+		"backfill must complete before verification", "verification evidence is incomplete", "rollback sync is incomplete"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

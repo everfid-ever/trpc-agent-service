@@ -48,7 +48,7 @@ networkPolicy:
 migration:
   enabled: false
   expectedCurrent: empty
-  target: "000026"
+  target: "000027"
   timeout: 10m
   existingEnvSecret: trpc-agent-schema-migration-env
   serviceAccountAnnotations: {}
