@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 27 {
+	if len(all) != 28 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,28 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestSessionMigrationDriverContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[27]
+	if migration.Version != "000028" || migration.Name != "session_migration_driver" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.session_migration_mutation (",
+		"session_migration_mutation_repair_idx", "capture_session_migration_mutation",
+		"AFTER INSERT ON public.session_commit", "state IN ('planned','snapshot','dual_write','backfill','verify','cutover','observe')",
+		"source_config_version=v_config_version", "session migration mutation identity is immutable",
+		"OLD.state='applying' AND NEW.state='applying'", "session migration mutation claim is invalid",
+		"illegal session migration mutation transition", "session migration mutation result is invalid",
+		"backend_migration_session_repair_gate", "session migration repair backlog is not drained"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

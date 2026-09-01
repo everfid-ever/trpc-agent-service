@@ -1,0 +1,199 @@
+// Package sessiondriver migrates tenant session snapshots between exact backend bindings.
+package sessiondriver
+
+import (
+	"context"
+	"encoding/json"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
+)
+
+const Domain = "session"
+
+type MutationState string
+
+const (
+	MutationPending  MutationState = "pending"
+	MutationApplying MutationState = "applying"
+	MutationApplied  MutationState = "applied"
+)
+
+type Mutation struct {
+	TenantID, MigrationID, MutationID string
+	Epoch                             int64
+	sessionstore.SessionKey
+	SourceVersion  int64
+	MutationDigest string
+	State          MutationState
+	Attempt        int
+	LeaseOwner     string
+	LeaseUntil     time.Time
+	NotBefore      time.Time
+	LastErrorClass string
+	TargetVersion  int64
+	TargetDigest   string
+	CreatedAt      time.Time
+	AppliedAt      time.Time
+	Version        int64
+}
+
+type RecordRequest struct {
+	TenantID, MigrationID, MutationID string
+	Epoch                             int64
+	sessionstore.SessionKey
+	SourceVersion  int64
+	MutationDigest string
+	CreatedAt      time.Time
+}
+
+type ClaimRequest struct {
+	TenantID, MigrationID, WorkerID string
+	Limit                           int
+	Now                             time.Time
+	Lease                           time.Duration
+}
+
+type CompleteRequest struct {
+	TenantID, MigrationID, MutationID, WorkerID string
+	sessionstore.SessionKey
+	ExpectedVersion, TargetVersion int64
+	TargetDigest                   string
+	At                             time.Time
+}
+
+type RetryRequest struct {
+	TenantID, MigrationID, MutationID, WorkerID string
+	sessionstore.SessionKey
+	ExpectedVersion int64
+	ErrorClass      string
+	NotBefore       time.Time
+	At              time.Time
+}
+
+type MutationLedger interface {
+	Claim(context.Context, ClaimRequest) ([]Mutation, error)
+	MarkApplied(context.Context, CompleteRequest) (Mutation, error)
+	MarkRetry(context.Context, RetryRequest) (Mutation, error)
+	Outstanding(context.Context, string, string) (int64, error)
+}
+
+// Recorder is implemented by local fixtures and non-PostgreSQL source adapters.
+// The PostgreSQL source records mutations inside commit_turn through migration 000028.
+type Recorder interface {
+	Record(context.Context, RecordRequest) (Mutation, error)
+}
+
+type SnapshotReader interface {
+	LoadSessionImage(context.Context, sessionstore.SessionKey) (SessionImage, error)
+}
+
+type EventRecord struct {
+	SessionSeq, InputSeq, EventSeq uint64
+	RequestID, EventID, EventType  string
+	PayloadRef                     string
+	Payload                        json.RawMessage
+	CreatedAt                      time.Time
+}
+
+type CommitRecord struct {
+	CommitID, RequestID, RequestDigest, Stage string
+	InputSeq, Fence                           uint64
+	Outcome                                   runtime.Outcome
+	SessionVersion                            int64
+	ReplyCursor, ResultRef                    string
+	CreatedAt                                 time.Time
+}
+
+type SummaryRecord struct {
+	SummaryID      string
+	BaseSessionSeq uint64
+	LastEventID    string
+	CutoffAt       time.Time
+	ContentRef     string
+	CreatedAt      time.Time
+}
+
+// SessionImage contains every durable fact owned by the Session backend.
+// Messaging outbox and execution records remain in their own authorities.
+type SessionImage struct {
+	Head                  sessionstore.SessionHead
+	LastAllocatedInputSeq uint64
+	SummaryID             string
+	Events                []EventRecord
+	Commits               []CommitRecord
+	Summaries             []SummaryRecord
+}
+
+type ApplyRequest struct {
+	TenantID, MigrationID, MutationID string
+	Epoch                             int64
+	Image                             SessionImage
+	SnapshotDigest                    string
+}
+
+type ApplyResult struct {
+	SessionVersion int64
+	SnapshotDigest string
+}
+
+// ReplicaWriter must apply MutationID idempotently, reject the same ID with
+// different epoch, session coordinates, version, or digest, and never replace
+// a newer session image with an older version.
+type ReplicaWriter interface {
+	ApplySessionSnapshot(context.Context, ApplyRequest) (ApplyResult, error)
+}
+
+type PageRequest struct {
+	TenantID, SnapshotWatermark, After string
+	Limit                              int
+}
+
+type Page struct {
+	Sessions       []SessionImage
+	NextCheckpoint string
+	Complete       bool
+}
+
+// BackfillSource returns a stable tenant-scoped order fixed by SnapshotWatermark.
+type BackfillSource interface {
+	PageSessions(context.Context, PageRequest) (Page, error)
+}
+
+type Fingerprint struct {
+	Count, DivergenceCount int64
+	Digest, Watermark      string
+	SampleDigest           string
+}
+
+type Inventory interface {
+	// An empty watermark asks the source to capture one. A non-empty watermark
+	// must bound the same stable session-key range on every backend.
+	Fingerprint(context.Context, string, string) (Fingerprint, error)
+}
+
+type Driver struct {
+	Authority                        migration.Repository
+	Ledger                           MutationLedger
+	Source                           SnapshotReader
+	Backfill                         BackfillSource
+	Target                           ReplicaWriter
+	SourceInventory, TargetInventory Inventory
+}
+
+type RepairRequest struct {
+	TenantID, MigrationID, WorkerID string
+	Limit                           int
+	Now                             time.Time
+	Lease, RetryDelay               time.Duration
+}
+
+type RepairResult struct{ Claimed, Applied, Retried int }
+
+type BackfillRequest struct {
+	TenantID, MigrationID string
+	Limit                 int
+	At                    time.Time
+}
