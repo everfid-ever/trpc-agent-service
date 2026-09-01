@@ -3,6 +3,7 @@ package chart_test
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -78,6 +79,38 @@ func TestAvailabilityAndNetworkContracts(t *testing.T) {
 		"protocol: UDP, port: 53",
 		"$role.networkPolicy.egress",
 	)
+}
+
+func TestMigrationHookContracts(t *testing.T) {
+	job := read(t, filepath.Join("templates", "migration-job.yaml"))
+	requireFragments(t, job,
+		"kind: ServiceAccount",
+		"kind: NetworkPolicy",
+		"kind: Job",
+		"helm.sh/hook: pre-install,pre-upgrade",
+		"args: [\"schema-migrate\"]",
+		"TRPC_MIGRATION_EXPECTED_CURRENT",
+		"TRPC_MIGRATION_TARGET",
+		"restartPolicy: Never",
+		"automountServiceAccountToken:",
+		"enableServiceLinks: false",
+	)
+	if strings.Contains(job, "TRPC_POSTGRES_DSN\n              value:") {
+		t.Fatal("migration DSN must come from an existing role-scoped Secret")
+	}
+}
+
+func TestMigrationTargetTracksLatestEmbeddedMigration(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "..", "migrations", "*.up.sql"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("embedded migrations: files=%v err=%v", files, err)
+	}
+	sort.Strings(files)
+	latest := strings.SplitN(filepath.Base(files[len(files)-1]), "_", 2)[0]
+	values := read(t, "values.yaml")
+	if !strings.Contains(values, "target: \""+latest+"\"") {
+		t.Fatalf("chart migration target does not track latest embedded migration %s", latest)
+	}
 }
 
 func TestProductionMainSubscribesToTerminationSignals(t *testing.T) {

@@ -45,6 +45,22 @@ networkPolicy:
       matchLabels:
         k8s-app: kube-dns
 
+migration:
+  enabled: false
+  expectedCurrent: empty
+  target: "000026"
+  timeout: 10m
+  existingEnvSecret: trpc-agent-schema-migration-env
+  serviceAccountAnnotations: {}
+  activeDeadlineSeconds: 900
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  resources:
+    requests: {cpu: 100m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  networkPolicy:
+    egress: []
+
 roles:
   gateway:
     enabled: true

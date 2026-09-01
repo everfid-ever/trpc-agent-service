@@ -8,8 +8,9 @@ Redis, object storage, scanners, provider credentials, or ingress.
 
 1. Use an immutable image digest and retain the previous N-1 digest.
 2. Apply compatible expand migrations through the controlled migration
-   procedure before enabling a producer that needs the new schema. Normal
-   application Pods must never migrate schemas on startup.
+   hook before enabling a producer that needs the new schema. Set exact
+   `migration.expectedCurrent` and `migration.target`; normal application Pods
+   must never migrate schemas on startup.
 3. Create one least-privilege environment Secret and, where required, one
    SecretProviderClass/workload identity per role. Never render credential
    values into Helm output.
@@ -44,7 +45,9 @@ environment values into a ticket or CI log.
    changes. Select a canary tenant/config through immutable control-plane
    snapshots; do not create a second ad-hoc deployment state machine.
 3. Install or upgrade with `--atomic --wait` and a timeout longer than the
-   Worker termination grace period.
+   Worker termination grace period. The migration pre-hook must first report
+   its exact source, target and step count, then complete before any Deployment
+   changes.
 4. Verify every enabled Deployment has available replicas, readiness is green,
    PDB expected disruptions are nonzero, HPA can read metrics, Audit oldest age
    is within threshold, and no stale-fence/cross-tenant/secret-canary alert is
@@ -73,7 +76,10 @@ schema rendering.
 Rollback is allowed only while the database remains N-1 compatible. Use the
 recorded Helm revision/image digest, then publish a higher immutable
 ConfigSnapshot that points new requests at the previous compatible versions.
-Do not mutate old snapshots or delete Outbox/Broker/Audit rows.
+Keep the expand schema in place: the production command exposes no down path,
+and N-1 readiness deliberately tolerates later migration rows while still
+checking every checksum it understands. Do not mutate old snapshots or delete
+Outbox/Broker/Audit rows.
 
 Stop promotion and rollback when any of these occur: readiness does not
 stabilize, Audit lag or dead-letter rises, stale-fence writes are attempted,
@@ -84,5 +90,6 @@ rollback window closes; it is never part of an emergency rollback.
 ## Known boundary
 
 The chart's initial HPA uses CPU resource metrics. Queue/Outbox/backlog custom
-metrics, migration Jobs, capacity load generation, and real-provider smoke are
-separate release gates and must not be inferred from a successful Helm render.
+metrics, online tenant backend data migration, capacity load generation, and
+real-provider smoke are separate release gates and must not be inferred from a
+successful schema migration or Helm render.

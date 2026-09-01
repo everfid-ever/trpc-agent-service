@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["image", "serviceAccount", "podSecurityContext", "securityContext", "telemetry", "secretProvider", "networkPolicy", "roles"],
+  "required": ["image", "serviceAccount", "podSecurityContext", "securityContext", "telemetry", "secretProvider", "networkPolicy", "migration", "roles"],
   "properties": {
     "nameOverride": {"type": "string"},
     "fullnameOverride": {"type": "string"},
@@ -63,6 +63,30 @@
         }
       },
       "additionalProperties": false
+    },
+    "migration": {
+      "type": "object",
+      "required": ["enabled", "expectedCurrent", "target", "timeout", "existingEnvSecret", "serviceAccountAnnotations", "activeDeadlineSeconds", "backoffLimit", "ttlSecondsAfterFinished", "resources", "networkPolicy"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "expectedCurrent": {"type": "string", "pattern": "^empty$|^[0-9]{6}$"},
+        "target": {"type": "string", "pattern": "^[0-9]{6}$"},
+        "timeout": {"type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$"},
+        "existingEnvSecret": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "serviceAccountAnnotations": {"type": "object", "propertyNames": {"not": {"pattern": "^helm\\.sh/"}}, "additionalProperties": {"type": "string"}},
+        "activeDeadlineSeconds": {"type": "integer", "minimum": 10, "maximum": 7200},
+        "backoffLimit": {"type": "integer", "minimum": 0, "maximum": 3},
+        "ttlSecondsAfterFinished": {"type": "integer", "minimum": 60},
+        "resources": {"type": "object"},
+        "networkPolicy": {
+          "type": "object",
+          "required": ["egress"],
+          "properties": {"egress": {"type": "array", "items": {"type": "object"}}},
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"properties": {"existingEnvSecret": {"minLength": 1}}}}]
     },
     "roles": {
       "type": "object",

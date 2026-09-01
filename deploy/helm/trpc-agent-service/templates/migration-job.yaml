@@ -1,0 +1,101 @@
+{{- if .Values.migration.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "trpc-agent-service.fullname" . }}-schema-migration
+  labels:
+    {{- include "trpc-agent-service.roleLabels" (dict "root" . "roleName" "schema-migration") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    # Retain this prerequisite until the next hook run; deleting it immediately
+    # would race the migration Job that depends on it.
+    helm.sh/hook-delete-policy: before-hook-creation
+    {{- with .Values.migration.serviceAccountAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "trpc-agent-service.fullname" . }}-schema-migration
+  labels:
+    {{- include "trpc-agent-service.roleLabels" (dict "root" . "roleName" "schema-migration") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "trpc-agent-service.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      trpc-agent-service.io/role: schema-migration
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- with .Values.migration.networkPolicy.egress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "trpc-agent-service.fullname" . }}-schema-migration
+  labels:
+    {{- include "trpc-agent-service.roleLabels" (dict "root" . "roleName" "schema-migration") | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.migration.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "trpc-agent-service.roleLabels" (dict "root" . "roleName" "schema-migration") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "trpc-agent-service.fullname" . }}-schema-migration
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: schema-migration
+          image: {{ include "trpc-agent-service.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["schema-migrate"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: TRPC_MIGRATION_EXPECTED_CURRENT
+              value: {{ .Values.migration.expectedCurrent | quote }}
+            - name: TRPC_MIGRATION_TARGET
+              value: {{ .Values.migration.target | quote }}
+            - name: TRPC_MIGRATION_TIMEOUT
+              value: {{ .Values.migration.timeout | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ required "migration.existingEnvSecret is required when migration.enabled=true" .Values.migration.existingEnvSecret }}
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+{{- end }}

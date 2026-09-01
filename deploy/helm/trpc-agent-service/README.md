@@ -29,6 +29,30 @@ The defaults render references to environment Secrets such as
 required variable makes the role fail closed instead of silently falling back
 to an in-memory or mock backend.
 
+## Controlled schema migration
+
+Set `migration.enabled=true` only in a reviewed release values file. The chart
+then runs the target image as a blocking `pre-install,pre-upgrade` hook before
+changing application Deployments. `migration.expectedCurrent` and
+`migration.target` are exact six-digit versions; `latest` is deliberately not
+accepted. The Job takes a PostgreSQL session advisory lock, verifies the full
+applied prefix and immutable checksums, applies forward transactions, and
+verifies the target. A retry at the target succeeds without executing DDL
+again; a source mismatch, gap, unknown row, checksum drift, or downgrade blocks
+the release.
+
+Only `TRPC_POSTGRES_DSN` belongs in the migration role's existing environment
+Secret. Hook values override transition/timeout variables. Migration
+ServiceAccount and NetworkPolicy prerequisites are retained until the next
+hook run because the Job depends on them; after uninstall, remove those two
+hook resources through the environment's reviewed cleanup procedure.
+
+Production rollback never runs migration down SQL. Roll back the image and
+immutable configuration while retaining the expand schema; N-1 readiness
+checks its known checksums and tolerates later expand rows during the bounded
+observation window. Contract cleanup is a separate, explicitly reviewed
+release after rollback support ends.
+
 ## Render and install
 
 Copy `values.production.example.yaml`, replace selectors, CIDRs, image digest,

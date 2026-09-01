@@ -12,6 +12,23 @@ telemetry:
 secretProvider:
   enabled: true
 
+migration:
+  enabled: true
+  # New cluster bootstrap. For upgrades, set the exact deployed source version.
+  expectedCurrent: empty
+  target: "000026"
+  existingEnvSecret: trpc-agent-schema-migration-env
+  serviceAccountAnnotations:
+    example.invalid/workload-identity: replace-migration-identity
+  networkPolicy:
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels: {kubernetes.io/metadata.name: data}
+            podSelector:
+              matchLabels: {app.kubernetes.io/name: postgresql}
+        ports: [{protocol: TCP, port: 5432}]
+
 roles:
   gateway:
     serviceAccountAnnotations:
