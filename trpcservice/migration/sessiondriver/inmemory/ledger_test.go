@@ -25,6 +25,14 @@ func TestLedgerReplayCollisionAndLeaseReclaim(t *testing.T) {
 	if replay, err := store.Record(ctx, record); err != nil || replay.Version != first.Version {
 		t.Fatalf("replay=%+v err=%v", replay, err)
 	}
+	if first.Direction != sessiondriver.DirectionForward {
+		t.Fatalf("default direction=%q", first.Direction)
+	}
+	directionCollision := record
+	directionCollision.Direction = sessiondriver.DirectionReverse
+	if _, err := store.Record(ctx, directionCollision); !errors.Is(err, runtime.ErrIdempotencyCollision) {
+		t.Fatalf("direction collision=%v", err)
+	}
 	collision := record
 	collision.SourceVersion++
 	if _, err := store.Record(ctx, collision); !errors.Is(err, runtime.ErrIdempotencyCollision) {

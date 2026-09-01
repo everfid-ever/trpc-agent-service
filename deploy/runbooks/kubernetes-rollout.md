@@ -89,7 +89,9 @@ rollback window closes; it is never part of an emergency rollback.
 
 ## Known boundary
 
-The chart's initial HPA uses CPU resource metrics. Queue/Outbox/backlog custom
-metrics, online tenant backend data migration, capacity load generation, and
-real-provider smoke are separate release gates and must not be inferred from a
-successful schema migration or Helm render.
+Worker and Audit Relay HPAs include queue/Outbox external metrics, but rollout
+must verify the external-metrics API returns fresh values and the adapter uses
+`max` across replicas. Missing or stale autoscaling gauges intentionally block
+scale-down. Online tenant backend smoke, capacity load execution, and
+real-provider smoke remain separate release gates and must not be inferred from
+a successful schema migration or Helm render.

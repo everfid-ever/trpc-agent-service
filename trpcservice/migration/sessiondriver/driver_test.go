@@ -128,6 +128,31 @@ func TestShadowDivergenceFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDriverRepairsReverseMutationIntoSource(t *testing.T) {
+	ctx := context.Background()
+	clock := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	authority, current := authorityAtBackfill(t, ctx, clock)
+	ledger := ledgermemory.New()
+	snapshot := fixtureSnapshot()
+	if _, err := ledger.Record(ctx, sessiondriver.RecordRequest{TenantID: current.TenantID,
+		MigrationID: current.MigrationID, MutationID: "target-commit", Epoch: current.Epoch,
+		Direction: sessiondriver.DirectionReverse, SessionKey: snapshot.Head.SessionKey,
+		SourceVersion: snapshot.Head.Version, MutationDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CreatedAt: clock.Add(4 * time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	sourceReplica := newFakeTarget()
+	driver := sessiondriver.Driver{Authority: authority, Ledger: ledger,
+		Source: fakeReader{snapshot: snapshot}, Target: newFakeTarget(),
+		ReverseSource: fakeReader{snapshot: snapshot}, ReverseTarget: sourceReplica}
+	result, err := driver.Repair(ctx, sessiondriver.RepairRequest{TenantID: current.TenantID,
+		MigrationID: current.MigrationID, WorkerID: "reverse-repair", Limit: 1,
+		Now: clock.Add(5 * time.Minute), Lease: time.Minute})
+	if err != nil || result.Applied != 1 || sourceReplica.applied["target-commit"].MutationID == "" {
+		t.Fatalf("result=%+v applied=%+v err=%v", result, sourceReplica.applied, err)
+	}
+}
+
 func TestPreparedVersionZeroImageIsMigratable(t *testing.T) {
 	image := sessiondriver.SessionImage{Head: sessionstore.SessionHead{SessionKey: sessionstore.SessionKey{
 		TenantID: "tenant-a", AgentAppID: "app-a", SessionID: "prepared"}, NextInputSeq: 1, State: map[string]any{}}}

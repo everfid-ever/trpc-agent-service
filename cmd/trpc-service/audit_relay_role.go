@@ -65,7 +65,7 @@ func runAuditRelayRole(parent context.Context, getenv func(string) string, logge
 	store := auditpostgres.New(db)
 	complianceSink := compliancepostgres.Sink{DB: complianceDB}
 	outbox := messagingpostgres.New(db)
-	registry := &metrics.AuditRegistry{}
+	registry := &metrics.AuditRegistry{SnapshotTTL: 3 * config.AuditLagPollInterval}
 	auditRelay := audit.Relay{Base: relay.Base{Outbox: outbox, Kind: "audit", Owner: owner, BatchSize: config.AuditBatchSize,
 		ClaimTTL: config.AuditClaimTTL, ClaimRenewInterval: config.AuditClaimRenew, RetryDelay: config.AuditRetryDelay,
 		PollInterval: config.AuditPollInterval, Telemetry: telemetryProvider}, Resolver: store, Sink: complianceSink,

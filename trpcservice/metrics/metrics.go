@@ -21,6 +21,7 @@ type AuditRegistry struct {
 	exportError   uint64
 	exportNanos   uint64
 	quarantine    uint64
+	SnapshotTTL   time.Duration
 }
 
 func (r *AuditRegistry) ObserveQuarantineAlert() {
@@ -80,11 +81,29 @@ func (r *AuditRegistry) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	fmt.Fprint(writer, "trpc_audit_backlog_snapshot_ready 1\n")
 	fmt.Fprint(writer, "# HELP trpc_audit_backlog_snapshot_timestamp_seconds Unix timestamp of the last valid audit backlog snapshot.\n# TYPE trpc_audit_backlog_snapshot_timestamp_seconds gauge\n")
 	fmt.Fprintf(writer, "trpc_audit_backlog_snapshot_timestamp_seconds %d\n", value.ObservedAt.Unix())
+	ttl := r.SnapshotTTL
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	now := time.Now()
+	fresh := !value.ObservedAt.After(now) && now.Sub(value.ObservedAt) <= ttl
+	fmt.Fprint(writer, "# HELP trpc_audit_autoscaling_snapshot_ready Whether audit autoscaling gauges are fresh.\n# TYPE trpc_audit_autoscaling_snapshot_ready gauge\n")
+	if fresh {
+		fmt.Fprint(writer, "trpc_audit_autoscaling_snapshot_ready 1\n")
+	} else {
+		fmt.Fprint(writer, "trpc_audit_autoscaling_snapshot_ready 0\n")
+	}
 	fmt.Fprint(writer, "# HELP trpc_audit_outbox_backlog Audit outbox rows by fixed state.\n# TYPE trpc_audit_outbox_backlog gauge\n")
 	fmt.Fprintf(writer, "trpc_audit_outbox_backlog{state=\"pending\"} %d\ntrpc_audit_outbox_backlog{state=\"claimed\"} %d\ntrpc_audit_outbox_backlog{state=\"retry_wait\"} %d\ntrpc_audit_outbox_backlog{state=\"dead_letter\"} %d\n",
 		value.Pending, value.Claimed, value.RetryWait, value.DeadLetter)
 	fmt.Fprint(writer, "# HELP trpc_audit_outbox_lag_seconds Age of the oldest active audit outbox row.\n# TYPE trpc_audit_outbox_lag_seconds gauge\n")
 	fmt.Fprintf(writer, "trpc_audit_outbox_lag_seconds{destination=\"compliance_postgres\"} %g\n", value.OldestAge.Seconds())
+	if fresh {
+		fmt.Fprint(writer, "# HELP trpc_audit_outbox_active_backlog Active audit outbox rows for autoscaling.\n# TYPE trpc_audit_outbox_active_backlog gauge\n")
+		fmt.Fprintf(writer, "trpc_audit_outbox_active_backlog %d\n", value.Active())
+		fmt.Fprint(writer, "# HELP trpc_audit_outbox_lag_max_seconds Audit outbox age for autoscaling.\n# TYPE trpc_audit_outbox_lag_max_seconds gauge\n")
+		fmt.Fprintf(writer, "trpc_audit_outbox_lag_max_seconds %g\n", value.OldestAge.Seconds())
+	}
 	fmt.Fprint(writer, "# HELP trpc_audit_alerting Whether configured audit backlog thresholds are exceeded.\n# TYPE trpc_audit_alerting gauge\n")
 	if alerting {
 		fmt.Fprint(writer, "trpc_audit_alerting 1\n")

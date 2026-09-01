@@ -28,6 +28,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/httpdlp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
@@ -148,6 +149,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	if err != nil {
 		return errors.New("execution broker configuration rejected")
 	}
+	brokerMetrics := &metrics.BrokerRegistry{SnapshotTTL: 3 * configValue.WorkerBacklogPoll}
+	backlogMonitor := broker.BacklogMonitor{Source: dispatchBroker, Observer: brokerMetrics, PollInterval: configValue.WorkerBacklogPoll}
 	leases, err := coordinationredis.New(redis, configValue.RedisEnvironment)
 	if err != nil {
 		return errors.New("lease manager configuration rejected")
@@ -209,6 +212,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	mux := http.NewServeMux()
 	mux.Handle("/livez", health.Handler{Checker: monitor})
 	mux.Handle("/readyz", health.Handler{Checker: monitor})
+	mux.Handle("/metrics", brokerMetrics)
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second,
 		WriteTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 
@@ -229,6 +233,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 		}()
 	}
 	start("readiness monitor", monitor.Run)
+	start("broker backlog monitor", backlogMonitor.Run)
 	start("execution control consumer", func(ctx context.Context) error {
 		return controlQueue.ConsumeExecutionControl(ctx, relay.ExecutionControlConsumerOptions{ConsumerID: workerID + "-control"}, hints.ConsumeExecutionControl)
 	})

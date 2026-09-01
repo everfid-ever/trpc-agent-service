@@ -94,8 +94,14 @@ placeholders; they are not production authorization.
 
 ## Scaling boundary
 
-The built-in HPA uses CPU as a safe bootstrap signal because it requires no
-custom-metrics API. Production promotion must replace or extend it with the
-frozen role SLI: Gateway callback QPS/latency, Worker queue oldest age/active
-sessions/model concurrency, Relay Outbox lag, and Channel callback or delivery
-backlog. CPU-only autoscaling is not release evidence for those capacity SLOs.
+Worker and Audit Relay HPAs use CPU plus external queue/Outbox metrics. The
+metrics adapter must publish `trpc_broker_backlog_total` and
+`trpc_audit_outbox_active_backlog` with an `AverageValue` query, and the two fresh-only lag
+gauges with a `Value` query. Because every replica observes the same global
+authority, adapter queries must use `max`, never `sum`, across scrape targets.
+Autoscaling gauges disappear when their source snapshot is stale; a missing
+custom metric therefore blocks unsafe scale-down while CPU may still scale up.
+
+Gateway callback QPS/latency, Worker active sessions/model concurrency, and
+Channel callback/delivery metrics are still release gates. A rendered HPA is
+not evidence that the external-metrics API or adapter query is working.

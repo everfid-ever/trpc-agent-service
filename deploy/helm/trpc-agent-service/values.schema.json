@@ -147,9 +147,24 @@
             "minReplicas": {"type": "integer", "minimum": 1},
             "maxReplicas": {"type": "integer", "minimum": 1},
             "targetCPUUtilizationPercentage": {"type": "integer", "minimum": 1, "maximum": 100}
+            ,"customMetrics": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "required": ["name", "targetType", "targetValue", "selector"],
+                "properties": {
+                  "name": {"type": "string", "pattern": "^[a-zA-Z_:][a-zA-Z0-9_:]*$"},
+                  "targetType": {"enum": ["Value", "AverageValue"]},
+                  "targetValue": {"type": "string", "pattern": "^[1-9][0-9]*(m|k|M|G|Ki|Mi|Gi)?$"},
+                  "selector": {"type": "object", "maxProperties": 8, "propertyNames": {"pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"}, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 63}}
+                },
+                "additionalProperties": false
+              }
+            }
           },
           "additionalProperties": false,
-          "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"required": ["minReplicas", "maxReplicas", "targetCPUUtilizationPercentage"]}}]
+          "allOf": [{"if": {"properties": {"enabled": {"const": true}}}, "then": {"required": ["minReplicas", "maxReplicas", "targetCPUUtilizationPercentage", "customMetrics"]}}]
         },
         "resources": {"type": "object"},
         "networkPolicy": {

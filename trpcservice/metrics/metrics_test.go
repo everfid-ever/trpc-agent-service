@@ -28,6 +28,8 @@ func TestAuditRegistryExportsFixedLowCardinalityMetrics(t *testing.T) {
 		`trpc_quarantine_alert_export_total 1`,
 		`trpc_audit_outbox_backlog{state="dead_letter"} 1`,
 		`trpc_audit_outbox_lag_seconds{destination="compliance_postgres"} 5`,
+		`trpc_audit_outbox_active_backlog 9`,
+		`trpc_audit_outbox_lag_max_seconds 5`,
 		`trpc_audit_alerting 1`,
 	} {
 		if !strings.Contains(body, expected) {
@@ -46,5 +48,16 @@ func TestAuditRegistryRejectsMutationMethods(t *testing.T) {
 	(&metrics.AuditRegistry{}).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/metrics", nil))
 	if recorder.Code != http.StatusMethodNotAllowed || recorder.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("status=%d allow=%q", recorder.Code, recorder.Header().Get("Allow"))
+	}
+}
+
+func TestAuditRegistryOmitsAutoscalingGaugesWhenSnapshotIsStale(t *testing.T) {
+	registry := &metrics.AuditRegistry{SnapshotTTL: time.Second}
+	registry.ObserveAuditBacklog(audit.Backlog{Pending: 3, OldestAge: time.Minute, ObservedAt: time.Now().Add(-2 * time.Second)}, true)
+	recorder := httptest.NewRecorder()
+	registry.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, "trpc_audit_autoscaling_snapshot_ready 0") || strings.Contains(body, "trpc_audit_outbox_active_backlog") || strings.Contains(body, "trpc_audit_outbox_lag_max_seconds") {
+		t.Fatalf("body=%s", body)
 	}
 }

@@ -113,3 +113,44 @@ func (b *Broker) Reclaim(ctx context.Context, opts broker.ReclaimOptions) ([]bro
 	}
 	return out, nil
 }
+
+func (b *Broker) BrokerBacklog(ctx context.Context, now time.Time) (broker.Backlog, error) {
+	if err := ctx.Err(); err != nil {
+		return broker.Backlog{}, err
+	}
+	if now.IsZero() {
+		return broker.Backlog{}, runtime.ErrInvariantViolation
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	byShard := make(map[broker.Shard]broker.ShardBacklog)
+	observe := func(delivery broker.Delivery, pending bool) {
+		item := byShard[delivery.Shard]
+		item.Shard = delivery.Shard
+		if pending {
+			item.Pending++
+		} else {
+			item.Undelivered++
+		}
+		age := now.Sub(delivery.Envelope.CreatedAt)
+		if age > item.OldestAge {
+			item.OldestAge = age
+		}
+		byShard[delivery.Shard] = item
+	}
+	for _, delivery := range b.queued {
+		observe(delivery, false)
+	}
+	for _, delivery := range b.pending {
+		observe(delivery, true)
+	}
+	value := broker.Backlog{ObservedAt: now.UTC(), Shards: make([]broker.ShardBacklog, 0, len(byShard))}
+	for _, item := range byShard {
+		value.Shards = append(value.Shards, item)
+	}
+	value = broker.SortedBacklog(value)
+	if err := broker.ValidateBacklog(value); err != nil {
+		return broker.Backlog{}, err
+	}
+	return value, nil
+}

@@ -48,7 +48,7 @@ networkPolicy:
 migration:
   enabled: false
   expectedCurrent: empty
-  target: "000028"
+  target: "000029"
   timeout: 10m
   existingEnvSecret: trpc-agent-schema-migration-env
   serviceAccountAnnotations: {}
@@ -84,6 +84,7 @@ roles:
       minReplicas: 2
       maxReplicas: 10
       targetCPUUtilizationPercentage: 70
+      customMetrics: []
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {memory: 512Mi}
@@ -109,6 +110,15 @@ roles:
       minReplicas: 3
       maxReplicas: 30
       targetCPUUtilizationPercentage: 70
+      customMetrics:
+        - name: trpc_broker_backlog_total
+          targetType: AverageValue
+          targetValue: "20"
+          selector: {}
+        - name: trpc_broker_delivery_lag_max_seconds
+          targetType: Value
+          targetValue: "5"
+          selector: {}
     resources:
       requests: {cpu: 250m, memory: 256Mi}
       limits: {memory: 1Gi}
@@ -211,7 +221,20 @@ roles:
       port: 8080
       annotations: {}
     pdb: {enabled: false}
-    autoscaling: {enabled: false}
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+      customMetrics:
+        - name: trpc_audit_outbox_active_backlog
+          targetType: AverageValue
+          targetValue: "100"
+          selector: {}
+        - name: trpc_audit_outbox_lag_max_seconds
+          targetType: Value
+          targetValue: "30"
+          selector: {}
     resources:
       requests: {cpu: 100m, memory: 128Mi}
       limits: {memory: 512Mi}

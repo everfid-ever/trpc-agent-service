@@ -87,6 +87,15 @@ func TestRedisStreamsReclaimsUnackedDelivery(t *testing.T) {
 	}
 }
 
+func TestStreamIDOrderingUsesNumericSequence(t *testing.T) {
+	if !streamIDBefore("100-2", "100-10") || streamIDBefore("101-0", "100-999") {
+		t.Fatal("stream ID ordering is not numeric")
+	}
+	if _, err := streamIDTime("invalid"); err == nil {
+		t.Fatal("invalid stream ID accepted")
+	}
+}
+
 func redisTestClient(t *testing.T) *redisclient.Client {
 	t.Helper()
 	address := os.Getenv("TRPC_REDIS_TEST_ADDR")

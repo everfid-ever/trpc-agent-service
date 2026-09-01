@@ -60,7 +60,16 @@ func (d Driver) applyMutation(ctx context.Context, current migration.Migration, 
 		item.State != MutationApplying || item.SourceVersion < 1 {
 		return runtime.ErrInvariantViolation
 	}
-	snapshot, err := d.Source.LoadSessionImage(ctx, item.SessionKey)
+	reader, writer := d.Source, d.Target
+	if item.Direction == DirectionReverse {
+		reader, writer = d.ReverseSource, d.ReverseTarget
+	} else if item.Direction != DirectionForward {
+		return runtime.ErrInvariantViolation
+	}
+	if reader == nil || writer == nil {
+		return runtime.ErrBackendUnavailable
+	}
+	snapshot, err := reader.LoadSessionImage(ctx, item.SessionKey)
 	if err != nil {
 		return err
 	}
@@ -71,7 +80,7 @@ func (d Driver) applyMutation(ctx context.Context, current migration.Migration, 
 	if err != nil {
 		return err
 	}
-	applied, err := d.Target.ApplySessionSnapshot(ctx, ApplyRequest{TenantID: item.TenantID,
+	applied, err := writer.ApplySessionSnapshot(ctx, ApplyRequest{TenantID: item.TenantID,
 		MigrationID: item.MigrationID, MutationID: item.MutationID, Epoch: item.Epoch,
 		Image: snapshot, SnapshotDigest: digest})
 	if err != nil {

@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 28 {
+	if len(all) != 29 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,26 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestSessionMigrationCutoverContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[28]
+	if migration.Version != "000029" || migration.Name != "session_migration_cutover" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"ADD COLUMN direction", "backend_migration_config_switch",
+		"cutover_session_backend_migration", "begin_session_backend_observation",
+		"rollback_session_backend_migration", "cleanup_session_backend_migration",
+		"session_backend_migration_drain_status", "direction='reverse'", "migration cleanup drain is incomplete",
+		"'config-invalidation'", "FOR UPDATE"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 

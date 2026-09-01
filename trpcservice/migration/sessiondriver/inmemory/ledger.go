@@ -24,13 +24,17 @@ func (l *Ledger) Record(ctx context.Context, in sessiondriver.RecordRequest) (se
 	if err := ctx.Err(); err != nil {
 		return sessiondriver.Mutation{}, err
 	}
+	if in.Direction == "" {
+		in.Direction = sessiondriver.DirectionForward
+	}
 	if in.TenantID == "" || in.MigrationID == "" || in.MutationID == "" || in.Epoch < 1 ||
+		(in.Direction != sessiondriver.DirectionForward && in.Direction != sessiondriver.DirectionReverse) ||
 		in.SessionKey.TenantID != in.TenantID || in.AgentAppID == "" || in.SessionID == "" || in.SourceVersion < 1 ||
 		!digest(in.MutationDigest) || in.CreatedAt.IsZero() {
 		return sessiondriver.Mutation{}, runtime.ErrInvariantViolation
 	}
 	value := sessiondriver.Mutation{TenantID: in.TenantID, MigrationID: in.MigrationID,
-		MutationID: in.MutationID, Epoch: in.Epoch, SessionKey: in.SessionKey,
+		MutationID: in.MutationID, Epoch: in.Epoch, Direction: in.Direction, SessionKey: in.SessionKey,
 		SourceVersion: in.SourceVersion, MutationDigest: in.MutationDigest,
 		State: sessiondriver.MutationPending, CreatedAt: in.CreatedAt.UTC(), Version: 1}
 	l.mu.Lock()
@@ -165,7 +169,7 @@ func keyOf(tenantID, migrationID, agentAppID, sessionID, mutationID string) stri
 func sameRecord(left, right sessiondriver.Mutation) bool {
 	return left.TenantID == right.TenantID && left.MigrationID == right.MigrationID && left.MutationID == right.MutationID &&
 		left.Epoch == right.Epoch && left.SessionKey == right.SessionKey && left.SourceVersion == right.SourceVersion &&
-		left.MutationDigest == right.MutationDigest && left.CreatedAt.Equal(right.CreatedAt)
+		left.Direction == right.Direction && left.MutationDigest == right.MutationDigest && left.CreatedAt.Equal(right.CreatedAt)
 }
 
 func digest(value string) bool {

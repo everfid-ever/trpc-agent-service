@@ -62,6 +62,7 @@ type productionConfig struct {
 	WorkerShards                                                 []uint32
 	WorkerLeaseTTL, WorkerLeaseRenew, WorkerRetryWait            time.Duration
 	WorkerReclaimInterval, WorkerCancelPoll, WorkerDrainTimeout  time.Duration
+	WorkerBacklogPoll                                            time.Duration
 	WorkerBundleFailureBackoff, WorkerBundleCloseTimeout         time.Duration
 	WorkerGraphCheckpointTTL                                     time.Duration
 
@@ -210,6 +211,7 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		S3MaxBytes: 16 << 20, WorkerShardCount: 1, WorkerReclaimLimit: 100,
 		WorkerLeaseTTL: 30 * time.Second, WorkerLeaseRenew: 10 * time.Second, WorkerRetryWait: 100 * time.Millisecond,
 		WorkerReclaimInterval: 5 * time.Second, WorkerCancelPoll: 100 * time.Millisecond, WorkerDrainTimeout: 30 * time.Second,
+		WorkerBacklogPoll:          5 * time.Second,
 		WorkerBundleFailureBackoff: 250 * time.Millisecond, WorkerBundleCloseTimeout: 5 * time.Second,
 		WorkerGraphCheckpointTTL: 7 * 24 * time.Hour,
 	}
@@ -271,6 +273,7 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		{"TRPC_SHUTDOWN_TIMEOUT", &config.ShutdownTimeout, time.Second}, {"TRPC_WORKER_LEASE_TTL", &config.WorkerLeaseTTL, time.Second},
 		{"TRPC_WORKER_LEASE_RENEW", &config.WorkerLeaseRenew, time.Millisecond}, {"TRPC_WORKER_RETRY_WAIT", &config.WorkerRetryWait, time.Millisecond},
 		{"TRPC_WORKER_RECLAIM_INTERVAL", &config.WorkerReclaimInterval, time.Millisecond}, {"TRPC_WORKER_CANCEL_POLL", &config.WorkerCancelPoll, time.Millisecond},
+		{"TRPC_WORKER_BACKLOG_POLL_INTERVAL", &config.WorkerBacklogPoll, time.Second},
 		{"TRPC_WORKER_DRAIN_TIMEOUT", &config.WorkerDrainTimeout, time.Second}, {"TRPC_WORKER_BUNDLE_FAILURE_BACKOFF", &config.WorkerBundleFailureBackoff, time.Millisecond},
 		{"TRPC_WORKER_BUNDLE_CLOSE_TIMEOUT", &config.WorkerBundleCloseTimeout, time.Millisecond},
 		{"TRPC_WORKER_GRAPH_CHECKPOINT_TTL", &config.WorkerGraphCheckpointTTL, time.Hour},

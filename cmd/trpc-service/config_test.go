@@ -267,7 +267,7 @@ func TestLoadWorkerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if config.WorkerShardCount != 4 || len(config.WorkerShards) != 2 || config.WorkerShards[0] != 0 || config.WorkerShards[1] != 3 ||
-		config.WorkerLeaseRenew >= config.WorkerLeaseTTL || config.WorkerProbeTenant == "" || config.WorkerGraphCheckpointTTL != 7*24*time.Hour {
+		config.WorkerLeaseRenew >= config.WorkerLeaseTTL || config.WorkerProbeTenant == "" || config.WorkerGraphCheckpointTTL != 7*24*time.Hour || config.WorkerBacklogPoll != 5*time.Second {
 		t.Fatalf("config=%#v", config)
 	}
 }
@@ -346,6 +346,11 @@ func TestLoadWorkerConfigRejectsUnsafeTopologyAndTiming(t *testing.T) {
 	environment["TRPC_WORKER_BUNDLE_CLOSE_TIMEOUT"] = "6s"
 	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
 		t.Fatal("expected shutdown budget rejection")
+	}
+	environment = workerEnvironment()
+	environment["TRPC_WORKER_BACKLOG_POLL_INTERVAL"] = "500ms"
+	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
+		t.Fatal("expected backlog poll rejection")
 	}
 	environment = workerEnvironment()
 	environment["TRPC_WORKER_GRAPH_CHECKPOINT_TTL"] = "59m"

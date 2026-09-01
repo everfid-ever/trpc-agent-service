@@ -71,7 +71,10 @@ func TestAvailabilityAndNetworkContracts(t *testing.T) {
 	hpa := read(t, filepath.Join("templates", "hpas.yaml"))
 	network := read(t, filepath.Join("templates", "networkpolicies.yaml"))
 	requireFragments(t, pdb, "apiVersion: policy/v1", "kind: PodDisruptionBudget", "minAvailable:")
-	requireFragments(t, hpa, "apiVersion: autoscaling/v2", "kind: HorizontalPodAutoscaler", "averageUtilization:")
+	requireFragments(t, hpa, "apiVersion: autoscaling/v2", "kind: HorizontalPodAutoscaler", "averageUtilization:",
+		"stabilizationWindowSeconds: 300", "type: External", "customMetrics", "averageValue:")
+	requireFragments(t, values, "trpc_broker_backlog_total", "trpc_broker_delivery_lag_max_seconds",
+		"trpc_audit_outbox_active_backlog", "trpc_audit_outbox_lag_max_seconds")
 	requireFragments(t, network,
 		"kind: NetworkPolicy",
 		"default-deny",

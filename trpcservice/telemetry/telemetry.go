@@ -31,6 +31,10 @@ const (
 	MetricAuditExportTotal    MetricDescriptor = "trpc_audit_export_total"
 	MetricAuditExportDuration MetricDescriptor = "trpc_audit_export_duration_seconds"
 	MetricAuditOutboxLag      MetricDescriptor = "trpc_audit_outbox_lag_seconds"
+	MetricAuditOutboxBacklog  MetricDescriptor = "trpc_audit_outbox_active_backlog"
+	MetricAuditAutoscalingLag MetricDescriptor = "trpc_audit_outbox_lag_max_seconds"
+	MetricBrokerBacklog       MetricDescriptor = "trpc_broker_backlog_total"
+	MetricBrokerDeliveryLag   MetricDescriptor = "trpc_broker_delivery_lag_max_seconds"
 	MetricOperationTotal      MetricDescriptor = "trpc_operation_total"
 	MetricOperationDuration   MetricDescriptor = "trpc_operation_duration_seconds"
 )

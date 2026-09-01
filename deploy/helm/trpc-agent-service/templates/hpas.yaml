@@ -14,6 +14,24 @@ spec:
     name: {{ include "trpc-agent-service.fullname" $ }}-{{ $roleName }}
   minReplicas: {{ $role.autoscaling.minReplicas }}
   maxReplicas: {{ $role.autoscaling.maxReplicas }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+        - type: Pods
+          value: 4
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 25
+          periodSeconds: 60
   metrics:
     - type: Resource
       resource:
@@ -21,5 +39,23 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ $role.autoscaling.targetCPUUtilizationPercentage }}
+    {{ range $metric := $role.autoscaling.customMetrics }}
+    - type: External
+      external:
+        metric:
+          name: {{ $metric.name | quote }}
+          {{ with $metric.selector }}
+          selector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{ end }}
+        target:
+          type: {{ $metric.targetType }}
+          {{ if eq $metric.targetType "AverageValue" }}
+          averageValue: {{ $metric.targetValue | quote }}
+          {{ else }}
+          value: {{ $metric.targetValue | quote }}
+          {{ end }}
+    {{ end }}
 {{- end }}
 {{- end }}

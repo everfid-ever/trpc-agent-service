@@ -14,16 +14,20 @@ import (
 const Domain = "session"
 
 type MutationState string
+type MutationDirection string
 
 const (
-	MutationPending  MutationState = "pending"
-	MutationApplying MutationState = "applying"
-	MutationApplied  MutationState = "applied"
+	MutationPending  MutationState     = "pending"
+	MutationApplying MutationState     = "applying"
+	MutationApplied  MutationState     = "applied"
+	DirectionForward MutationDirection = "forward"
+	DirectionReverse MutationDirection = "reverse"
 )
 
 type Mutation struct {
 	TenantID, MigrationID, MutationID string
 	Epoch                             int64
+	Direction                         MutationDirection
 	sessionstore.SessionKey
 	SourceVersion  int64
 	MutationDigest string
@@ -43,6 +47,7 @@ type Mutation struct {
 type RecordRequest struct {
 	TenantID, MigrationID, MutationID string
 	Epoch                             int64
+	Direction                         MutationDirection
 	sessionstore.SessionKey
 	SourceVersion  int64
 	MutationDigest string
@@ -80,8 +85,9 @@ type MutationLedger interface {
 	Outstanding(context.Context, string, string) (int64, error)
 }
 
-// Recorder is implemented by local fixtures and non-PostgreSQL source adapters.
-// The PostgreSQL source records mutations inside commit_turn through migration 000028.
+// Recorder is used by adapters that cannot append the ledger in their local
+// commit transaction. PostgreSQL commits are captured by database triggers;
+// its implementation remains available to external target adapters.
 type Recorder interface {
 	Record(context.Context, RecordRequest) (Mutation, error)
 }
@@ -175,11 +181,15 @@ type Inventory interface {
 }
 
 type Driver struct {
-	Authority                        migration.Repository
-	Ledger                           MutationLedger
-	Source                           SnapshotReader
-	Backfill                         BackfillSource
-	Target                           ReplicaWriter
+	Authority migration.Repository
+	Ledger    MutationLedger
+	Source    SnapshotReader
+	Backfill  BackfillSource
+	Target    ReplicaWriter
+	// ReverseSource and ReverseTarget are required only for reverse mutations
+	// captured after cutover. They read the target authority and repair source.
+	ReverseSource                    SnapshotReader
+	ReverseTarget                    ReplicaWriter
 	SourceInventory, TargetInventory Inventory
 }
 

@@ -16,7 +16,7 @@ migration:
   enabled: true
   # New cluster bootstrap. For upgrades, set the exact deployed source version.
   expectedCurrent: empty
-  target: "000028"
+  target: "000029"
   existingEnvSecret: trpc-agent-schema-migration-env
   serviceAccountAnnotations:
     example.invalid/workload-identity: replace-migration-identity
