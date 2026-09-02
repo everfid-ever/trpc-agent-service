@@ -74,6 +74,7 @@
 | Runtime Profile 与 Provider | `trpcservice/profile/`、`trpcservice/provider/`、`trpcservice/agent/` |
 | Secret、治理、审计与健康 | `trpcservice/secrets/`、`trpcservice/governance/`、`trpcservice/audit/`、`trpcservice/health/` |
 | 审计查询与保留销毁 | `trpcservice/audit/query/`、`trpcservice/audit/purge/`、`compliancemigrations/` |
+| 后端迁移与 Knowledge 摄取 | `trpcservice/migration/`、`trpcservice/storage/knowledge/` |
 | 生产组合入口 | `cmd/trpc-service/`、`cmd/audit-purge/`、`cmd/compliance-migration-test/` |
 
 ## 文档维护规则

@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 31 {
+	if len(all) != 32 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,38 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestKnowledgeIngestionMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[31]
+	if migration.Version != "000032" || migration.Name != "knowledge_ingestion" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.knowledge_manifest (", "CREATE TABLE public.knowledge_chunk (",
+		"CREATE TABLE public.knowledge_probe (", "REFERENCES public.tenant(tenant_id)", "knowledge_manifest_guard",
+		"knowledge manifest identity is immutable",
+		"illegal knowledge manifest state transition", "begin_knowledge_manifest", "stage_knowledge_chunk",
+		"begin_knowledge_indexing", "mark_knowledge_chunk_indexed", "begin_knowledge_verifying",
+		"record_knowledge_probe", "publish_knowledge_version", "fail_knowledge_version",
+		"record_knowledge_migration_mutation", "'upsert'", "v_source_config",
+		"knowledge sample verification is incomplete", "knowledge indexing is incomplete",
+		"knowledge verification digest does not match chunk set", "knowledge chunk does not match manifest",
+		"agent_app_revision_knowledge_published_guard", "agent app revision references unpublished knowledge",
+		"state IN ('planned','snapshot','dual_write','backfill','verify','cutover','observe')", "FOR UPDATE"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	for _, clause := range []string{"DROP TABLE IF EXISTS public.knowledge_probe", "DROP TABLE IF EXISTS public.knowledge_chunk",
+		"DROP TABLE IF EXISTS public.knowledge_manifest"} {
+		if !strings.Contains(migration.Down, clause) {
+			t.Errorf("down missing %q", clause)
+		}
 	}
 }
 
