@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 29 {
+	if len(all) != 31 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,48 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestKnowledgeMigrationCutoverContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[30]
+	if migration.Version != "000031" || migration.Name != "knowledge_migration_cutover" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"ADD COLUMN direction", "knowledge_migration_mutation_direction_idx",
+		"record_knowledge_migration_mutation", "p_config_version", "v_direction :=",
+		"cutover_knowledge_backend_migration", "begin_knowledge_backend_observation",
+		"rollback_knowledge_backend_migration", "cleanup_knowledge_backend_migration",
+		"knowledge_backend_migration_drain_status", "direction='reverse'", "knowledge cleanup drain is incomplete",
+		"FOR UPDATE"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+}
+
+func TestKnowledgeMigrationDriverContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[29]
+	if migration.Version != "000030" || migration.Name != "knowledge_migration_driver" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.knowledge_migration_mutation (",
+		"knowledge_migration_mutation_repair_idx", "record_knowledge_migration_mutation",
+		"knowledge migration mutation identity is immutable", "OLD.state='applying' AND NEW.state='applying'",
+		"knowledge migration mutation claim is invalid", "illegal knowledge migration mutation transition",
+		"knowledge migration mutation result is invalid", "backend_migration_knowledge_repair_gate",
+		"knowledge migration repair backlog is not drained"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 
