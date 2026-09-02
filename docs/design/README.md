@@ -61,6 +61,7 @@
 20. 所有协议 façade 都必须进入共享 Inbox、Task、Session 和 Event Store，不得创建本地 Runner 或 InMemory 权威旁路。
 21. Knowledge、Skill、Model、Tool 和 Backend 的运行引用必须固定 tenant、version 和 digest。
 22. Plugin、callback 和 telemetry hook 只能扩展或观测；mandatory Guard、CommitTurn 和 Audit Outbox 位于不可绕过的外层。
+23. 合规审计事实默认不可变；销毁是唯一例外，只能经 `compliance_purger` 角色门禁的受控 purge 函数执行并留下不可变销毁凭证；审计查询逐次落不可变二次审计记录。
 
 ## 代码映射
 
@@ -72,7 +73,8 @@
 | Channel 与投递 | `trpcservice/channels/`、`trpcservice/relay/` |
 | Runtime Profile 与 Provider | `trpcservice/profile/`、`trpcservice/provider/`、`trpcservice/agent/` |
 | Secret、治理、审计与健康 | `trpcservice/secrets/`、`trpcservice/governance/`、`trpcservice/audit/`、`trpcservice/health/` |
-| 生产组合入口 | `cmd/trpc-service/` |
+| 审计查询与保留销毁 | `trpcservice/audit/query/`、`trpcservice/audit/purge/`、`compliancemigrations/` |
+| 生产组合入口 | `cmd/trpc-service/`、`cmd/audit-purge/`、`cmd/compliance-migration-test/` |
 
 ## 文档维护规则
 

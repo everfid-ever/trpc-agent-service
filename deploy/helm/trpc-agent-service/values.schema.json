@@ -90,7 +90,7 @@
     },
     "roles": {
       "type": "object",
-      "required": ["gateway", "worker", "channel", "channel-delivery", "preprocess", "artifact", "audit-relay"],
+      "required": ["gateway", "worker", "channel", "channel-delivery", "preprocess", "artifact", "audit-relay", "audit-query", "audit-purge"],
       "properties": {
         "gateway": {"$ref": "#/$defs/role"},
         "worker": {"$ref": "#/$defs/role"},
@@ -98,7 +98,9 @@
         "channel-delivery": {"$ref": "#/$defs/role"},
         "preprocess": {"$ref": "#/$defs/role"},
         "artifact": {"$ref": "#/$defs/role"},
-        "audit-relay": {"$ref": "#/$defs/role"}
+        "audit-relay": {"$ref": "#/$defs/role"},
+        "audit-query": {"$ref": "#/$defs/role"},
+        "audit-purge": {"$ref": "#/$defs/role"}
       },
       "additionalProperties": false
     }

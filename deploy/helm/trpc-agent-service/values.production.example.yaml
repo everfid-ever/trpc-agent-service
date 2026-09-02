@@ -135,3 +135,44 @@ roles:
               podSelector:
                 matchLabels: {app.kubernetes.io/name: postgresql}
           ports: [{protocol: TCP, port: 5432}]
+        - to:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: data}
+              podSelector:
+                matchLabels: {app.kubernetes.io/name: compliance-postgresql}
+          ports: [{protocol: TCP, port: 5432}]
+
+  audit-query:
+    existingEnvSecret: trpc-agent-audit-query-env
+    secretProviderClass: trpc-agent-audit-query
+    networkPolicy:
+      ingress:
+        - from:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: monitoring}
+          ports: [{protocol: TCP, port: 8080}]
+      egress:
+        - to:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: data}
+              podSelector:
+                matchLabels: {app.kubernetes.io/name: postgresql}
+          ports: [{protocol: TCP, port: 5432}]
+        - to:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: data}
+              podSelector:
+                matchLabels: {app.kubernetes.io/name: compliance-postgresql}
+          ports: [{protocol: TCP, port: 5432}]
+
+  audit-purge:
+    existingEnvSecret: trpc-agent-audit-purge-env
+    secretProviderClass: ""
+    networkPolicy:
+      egress:
+        - to:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: data}
+              podSelector:
+                matchLabels: {app.kubernetes.io/name: compliance-postgresql}
+          ports: [{protocol: TCP, port: 5432}]

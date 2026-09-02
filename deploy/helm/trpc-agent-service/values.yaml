@@ -241,3 +241,47 @@ roles:
     networkPolicy:
       ingress: []
       egress: []
+
+  audit-query:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 2
+    existingEnvSecret: trpc-agent-audit-query-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env: {}
+    service:
+      enabled: true
+      type: ClusterIP
+      port: 8080
+      annotations: {}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  audit-purge:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 1
+    existingEnvSecret: trpc-agent-audit-purge-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env:
+      TRPC_AUDIT_PURGE_DRY_RUN: "true"
+      TRPC_AUDIT_PURGE_REQUIRE_APPROVAL: "true"
+    service: {enabled: false}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []

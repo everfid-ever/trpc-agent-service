@@ -71,6 +71,10 @@ func runRole(parent context.Context, getenv func(string) string, logger *log.Log
 		return runWorkerRole(parent, getenv, logger)
 	case "audit-relay":
 		return runAuditRelayRole(parent, getenv, logger)
+	case "audit-query":
+		return runAuditQueryRole(parent, getenv, logger)
+	case "audit-purge":
+		return runAuditPurgeRole(parent, getenv, logger)
 	case "schema-migrate":
 		return runSchemaMigrate(parent, getenv, logger)
 	case "audit-compliance-migrate":

@@ -29,6 +29,7 @@ const (
 	PurposeBackendConnect Purpose = "backend_connect"
 	PurposePayloadEncrypt Purpose = "payload_encrypt"
 	PurposeGatewayAuth    Purpose = "gateway_auth"
+	PurposeAuditQueryAuth Purpose = "audit_query_auth"
 )
 
 type Scope struct {
@@ -55,7 +56,8 @@ func ValidateRequest(scope Scope, ref SecretRef) error {
 func validPurpose(value Purpose) bool {
 	switch value {
 	case PurposeChannelVerify, PurposeChannelSend, PurposeTenantIdentity, PurposeTenantSession,
-		PurposeModelCall, PurposeToolCall, PurposeBackendConnect, PurposePayloadEncrypt, PurposeGatewayAuth:
+		PurposeModelCall, PurposeToolCall, PurposeBackendConnect, PurposePayloadEncrypt, PurposeGatewayAuth,
+		PurposeAuditQueryAuth:
 		return true
 	default:
 		return false
