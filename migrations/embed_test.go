@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 35 {
+	if len(all) != 36 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,30 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestGraphPublishModelGuardMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[35]
+	if migration.Version != "000036" || migration.Name != "graph_publish_model_guard" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"CREATE OR REPLACE FUNCTION public.guard_agent_model_profile_publish()",
+		"NEW.agent_kind = 'llm'",
+		"published LLM agent requires a fixed model profile",
+		"model profile is missing, inactive, or invalid",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if !strings.Contains(migration.Down, "published agent requires a fixed model profile") {
+		t.Fatal("down does not restore the original guard")
 	}
 }
 

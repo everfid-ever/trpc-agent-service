@@ -34,7 +34,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|prestop]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -91,6 +91,8 @@ func runRole(parent context.Context, getenv func(string) string, logger *roleLog
 		return runPreStop(getenv, syscall.Kill, time.Sleep)
 	case "webui-local":
 		return runWebUILocalRole(parent, getenv, logger)
+	case "webui-local-bootstrap":
+		return runWebUILocalBootstrap(parent, getenv, logger)
 	default:
 		return errors.New("unsupported service role")
 	}

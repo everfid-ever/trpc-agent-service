@@ -27,7 +27,7 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.ListenAddress != ":8080" || value.RouteKey != webUILocalRouteKey || value.Token != webUILocalToken ||
+	if value.ListenAddress != ":8080" || value.RouteKey != webUILocalRouteKey || value.Token != webUILocalToken || value.InstanceID != "standalone" ||
 		value.APIKeyFile != "/run/secrets/deepseek_api_key" {
 		t.Fatalf("unexpected defaults: %+v", value)
 	}
@@ -35,6 +35,7 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 		{"TRPC_WEBUI_LOCAL_TOKEN", "short"},
 		{"TRPC_WEBUI_DEEPSEEK_KEY_FILE", "relative/key"},
 		{"TRPC_WEBUI_LOCAL_SECRET_ROOT", "relative/root"},
+		{"TRPC_WEBUI_LOCAL_INSTANCE_ID", "node_a"},
 	} {
 		candidate := cloneEnvironment(base)
 		candidate[item.name] = item.value

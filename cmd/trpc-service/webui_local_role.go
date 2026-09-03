@@ -81,7 +81,7 @@ const (
 type webUILocalConfig struct {
 	PostgresDSN, RedisAddress, ListenAddress string
 	RedisEnvironment, SecretRoot, APIKeyFile string
-	RouteKey, Token                          string
+	RouteKey, Token, InstanceID              string
 }
 
 type webUILocalBootstrap struct {
@@ -189,7 +189,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
-	workerConsumer := worker.Consumer{WorkerID: "webui-local-worker", Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
+	workerConsumer := worker.Consumer{WorkerID: configValue.instanceName("worker"), Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
 		Leases: leases, Sessions: sessionpostgres.New(db), Parker: tasks, Statuses: tasks, Executor: executor,
 		LeaseTTL: 30 * time.Second, RenewInterval: 10 * time.Second, RetryWait: 250 * time.Millisecond,
 		ReclaimInterval: 5 * time.Second, ReclaimLimit: 100, DrainTimeout: 30 * time.Second,
@@ -199,22 +199,22 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 
 	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configRepo}
 	preprocessor := preprocess.Worker{Store: preprocessStore, Payloads: payloads, Dispatcher: dispatcher,
-		Owner: "webui-local-preprocess", LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8, Telemetry: telemetryProvider}
-	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: "webui-local-dispatch-relay",
+		Owner: configValue.instanceName("preprocess"), LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8, Telemetry: telemetryProvider}
+	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: configValue.instanceName("dispatch-relay"),
 		ShardCount: 4, ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
 		Telemetry: telemetryProvider}
 	replyRelay := relay.ReplyRelay{Outbox: inbox, Results: payloads, Routes: inbox, Replies: publisher,
-		Owner: "webui-local-reply-relay", ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
+		Owner: configValue.instanceName("reply-relay"), ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
 		Telemetry: telemetryProvider}
 	wakeupQueue, err := relayredis.NewWakeupQueue(redis, publisher, relayredis.WakeupQueueConfig{
 		Group: "webui-wakeup", ReadBlock: 250 * time.Millisecond, ReclaimIdle: 30 * time.Second})
 	if err != nil {
 		return errors.New("wakeup queue configuration rejected")
 	}
-	wakeupRelay := relay.WakeupRelay{Outbox: inbox, Wakeups: publisher, Owner: "webui-local-wakeup-relay",
+	wakeupRelay := relay.WakeupRelay{Outbox: inbox, Wakeups: publisher, Owner: configValue.instanceName("wakeup-relay"),
 		ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
 		Telemetry: telemetryProvider}
-	wakeupDispatcher := relay.WakeupDispatcher{ConsumerID: "webui-local-wakeup", Wakeups: wakeupQueue,
+	wakeupDispatcher := relay.WakeupDispatcher{ConsumerID: configValue.instanceName("wakeup"), Wakeups: wakeupQueue,
 		Store: tasks, Dispatch: streamBroker, ShardCount: 4, ReclaimInterval: 5 * time.Second, ReclaimLimit: 100}
 
 	replyQueue, err := relayredis.NewReplyQueue(redis, publisher, relayredis.ReplyQueueConfig{
@@ -227,12 +227,12 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		return errors.New("delivery catalog configuration rejected")
 	}
 	deliveryService := channeldelivery.Service{Results: payloads, Ledger: inbox, Adapters: deliveryCatalog,
-		Owner: "webui-local-delivery", ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second,
+		Owner: configValue.instanceName("delivery"), ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second,
 		DefaultRetryDelay: time.Second, MaxRetryDelay: time.Minute, MaxAttempts: 8, MaxReconcileAttempts: 8}
 	deliverySupervisor := channeldelivery.Supervisor{Catalog: deliveryCatalog, RefreshInterval: time.Second,
 		NewConsumer: func(destination channel.ReplyDestination) (channeldelivery.ConsumerRunner, error) {
 			return channeldelivery.Consumer{Queue: replyQueue, Deliverer: deliveryService, Destination: destination,
-				ConsumerID: "webui-local-delivery", ReclaimInterval: 5 * time.Second, ReclaimLimit: 100,
+				ConsumerID: configValue.instanceName("delivery"), ReclaimInterval: 5 * time.Second, ReclaimLimit: 100,
 				Telemetry: telemetryProvider}, nil
 		}, OnError: func(supervisorErr error) { logger.Printf("webui delivery degraded: %v", supervisorErr) }}
 
@@ -291,8 +291,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	start("wakeup dispatcher", wakeupDispatcher.Run)
 	start("delivery", deliverySupervisor.Run)
 	start("http", func(context.Context) error { return server.ListenAndServe() })
-	logger.Printf("WebUI local ready: http://localhost%s/webui/ route=%q account=%q model=deepseek",
-		configValue.ListenAddress, configValue.RouteKey, webUILocalAccountID)
+	logger.Printf("WebUI local node=%q ready: http://localhost%s/webui/ route=%q account=%q model=deepseek",
+		configValue.InstanceID, configValue.ListenAddress, configValue.RouteKey, webUILocalAccountID)
 
 	var terminalErr error
 	select {
@@ -315,6 +315,36 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	return terminalErr
 }
 
+// runWebUILocalBootstrap establishes only the disposable local control plane.
+// Multi-node Compose starts it once before starting independent local nodes.
+func runWebUILocalBootstrap(parent context.Context, getenv func(string) string, logger *roleLogger) error {
+	if parent == nil || getenv == nil || logger == nil {
+		return errors.New("invalid process dependencies")
+	}
+	configValue, err := loadWebUILocalConfig(getenv)
+	if err != nil {
+		return fmt.Errorf("configuration rejected: %w", err)
+	}
+	db, err := sql.Open("pgx", configValue.PostgresDSN)
+	if err != nil {
+		return errors.New("postgres client initialization failed")
+	}
+	defer db.Close()
+	redis := redisclient.NewClient(&redisclient.Options{Addr: configValue.RedisAddress})
+	defer redis.Close()
+	if err := db.PingContext(parent); err != nil {
+		return errors.New("postgres unavailable")
+	}
+	if err := redis.Ping(parent).Err(); err != nil {
+		return errors.New("redis unavailable")
+	}
+	if _, err := bootstrapWebUILocal(parent, db, configValue); err != nil {
+		return fmt.Errorf("local bootstrap failed: %w", err)
+	}
+	logger.Printf("WebUI local bootstrap complete instance=%q", configValue.InstanceID)
+	return nil
+}
+
 func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) {
 	value := webUILocalConfig{PostgresDSN: strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")),
 		RedisAddress: strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS")), ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
@@ -322,12 +352,32 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		SecretRoot:       valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
 		APIKeyFile:       valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
 		RouteKey:         valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
-		Token:            valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken)}
+		Token:            valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
+		InstanceID:       valueOr(getenv("TRPC_WEBUI_LOCAL_INSTANCE_ID"), "standalone")}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
 		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
 		return webUILocalConfig{}, errors.New("required WebUI local configuration is missing or invalid")
 	}
+	if !validWebUILocalInstanceID(value.InstanceID) {
+		return webUILocalConfig{}, errors.New("WebUI local instance ID is invalid")
+	}
 	return value, nil
+}
+
+func validWebUILocalInstanceID(value string) bool {
+	if len(value) == 0 || len(value) > 48 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func (value webUILocalConfig) instanceName(component string) string {
+	return "webui-local-" + component + "-" + value.InstanceID
 }
 
 func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocalConfig) (webUILocalBootstrap, error) {

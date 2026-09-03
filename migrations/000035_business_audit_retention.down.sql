@@ -20,6 +20,16 @@ BEGIN
 END;
 $$;
 
-DROP ROLE IF EXISTS audit_retention_purger;
+-- Roles are cluster-scoped. A deployment may have granted this NOLOGIN role
+-- to an operator principal, so schema rollback must not fail merely because
+-- that external membership still exists. Keep the inert role in that case;
+-- a privileged operator can remove it after revoking its external grants.
+DO $do$
+BEGIN
+  DROP ROLE IF EXISTS audit_retention_purger;
+EXCEPTION WHEN dependent_objects_still_exist THEN
+  NULL;
+END
+$do$;
 
 COMMIT;

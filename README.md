@@ -137,21 +137,28 @@
     `-- workspace          # 工作目录，包含本地、容器等沙箱环境
 ```
 
-## 快速开始
+## 快速本地验证
 
 ```bash
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
 
-./build.sh
+mkdir -p deploy/compose/secrets
+install -m 600 /absolute/path/to/deepseek-api-key \
+  deploy/compose/secrets/deepseek-api-key
 ./start.sh
 ```
 
-停止服务：
+访问 `http://localhost:58081/webui/`。本机 Jaeger Trace 在 `http://localhost:56686/`。
+
+停止本地 Compose 环境（保留卷）：
 
 ```bash
 ./stop.sh
 ```
+
+完整 Docker Desktop 启动、验证、故障排查和本地重置说明见
+[`docs/runbook/getting-started.md`](./docs/runbook/getting-started.md)。
 
 ## 设计文档
 

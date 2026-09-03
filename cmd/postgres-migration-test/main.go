@@ -89,6 +89,9 @@ func run() error {
 	if err := verifyUp(ctx, runner, db, probes, repoRoot, testDSN); err != nil {
 		return err
 	}
+	if err := cleanupAuditRetentionTestRole(ctx, db); err != nil {
+		return fmt.Errorf("clean audit retention test role: %w", err)
+	}
 	if err := runner.DownAll(ctx); err != nil {
 		return err
 	}
@@ -102,11 +105,59 @@ func run() error {
 	if err := verifyUp(ctx, runner, db, probes, repoRoot, testDSN); err != nil {
 		return fmt.Errorf("up-again: %w", err)
 	}
+	if err := cleanupAuditRetentionTestRole(ctx, db); err != nil {
+		return fmt.Errorf("clean audit retention test role after replay: %w", err)
+	}
 	if err := runner.DownAll(ctx); err != nil {
 		return err
 	}
 	fmt.Printf("PostgreSQL 16 migration matrix passed for %s\n", databaseName)
 	return nil
+}
+
+// cleanupAuditRetentionTestRole removes global-role state created by the
+// PostgreSQL contract suite. Roles are cluster-scoped rather than database-
+// scoped, so dropping the disposable database alone cannot clean a temporary
+// principal's membership in audit_retention_purger. This belongs to the test
+// harness, not to the production migration down path.
+func cleanupAuditRetentionTestRole(ctx context.Context, db *sql.DB) error {
+	const role = "audit_retention_purger"
+	rows, err := db.QueryContext(ctx, `SELECT member_role.rolname
+FROM pg_auth_members membership
+JOIN pg_roles granted_role ON granted_role.oid = membership.roleid
+JOIN pg_roles member_role ON member_role.oid = membership.member
+WHERE granted_role.rolname = $1`, role)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var members []string
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			return err
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, member := range members {
+		if _, err := db.ExecContext(ctx, "REVOKE "+quoteRoleName(role)+" FROM "+quoteRoleName(member)); err != nil {
+			return err
+		}
+	}
+	// Revokes grants made to the migration-created role, which PostgreSQL also
+	// counts as dependencies when the role is removed.
+	if _, err := db.ExecContext(ctx, "DROP OWNED BY "+quoteRoleName(role)); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "DROP ROLE IF EXISTS "+quoteRoleName(role))
+	return err
+}
+
+func quoteRoleName(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }
 
 func verifyLegacyBackendUpgrade(ctx context.Context, runner *migrations.Runner, db *sql.DB) error {

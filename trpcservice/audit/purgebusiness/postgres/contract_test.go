@@ -172,6 +172,7 @@ func TestBusinessAuditRetentionAuthorizationBoundaryPostgreSQL16(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `GRANT audit_retention_purger TO `+principal); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _, _ = db.ExecContext(context.Background(), `REVOKE audit_retention_purger FROM `+principal) })
 	if _, err := conn.ExecContext(ctx, `SET SESSION AUTHORIZATION `+principal); err != nil {
 		t.Fatal(err)
 	}
