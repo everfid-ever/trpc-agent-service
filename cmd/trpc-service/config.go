@@ -11,12 +11,13 @@ import (
 const workerHTTPShutdownBudget = 5 * time.Second
 
 type productionConfig struct {
-	ListenAddress string
-	PostgresDSN   string
-	RedisAddress  string
-	RedisPassword string
-	RedisDB       int
-	SecretRoot    string
+	ListenAddress    string
+	PostgresDSN      string
+	RedisAddress     string
+	RedisPassword    string
+	RedisDB          int
+	SecretRoot       string
+	SkillStagingRoot string
 
 	S3Region, S3Bucket, S3Endpoint string
 	S3PathStyle, S3AllowInsecure   bool
@@ -202,7 +203,7 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 	config := productionConfig{
 		ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
 		PostgresDSN:   strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")), RedisAddress: strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS")),
-		RedisPassword: getenv("TRPC_REDIS_PASSWORD"), SecretRoot: strings.TrimSpace(getenv("TRPC_SECRET_ROOT")),
+		RedisPassword: getenv("TRPC_REDIS_PASSWORD"), SecretRoot: strings.TrimSpace(getenv("TRPC_SECRET_ROOT")), SkillStagingRoot: strings.TrimSpace(getenv("TRPC_SKILL_STAGING_ROOT")),
 		RedisEnvironment: strings.TrimSpace(getenv("TRPC_REDIS_ENVIRONMENT")), PayloadKeyRef: strings.TrimSpace(getenv("TRPC_PAYLOAD_KEY_REF")),
 		S3Region: strings.TrimSpace(getenv("TRPC_S3_REGION")), S3Bucket: strings.TrimSpace(getenv("TRPC_S3_BUCKET")), S3Endpoint: strings.TrimSpace(getenv("TRPC_S3_ENDPOINT")),
 		WorkerID: strings.TrimSpace(getenv("TRPC_WORKER_ID")), WorkerGroup: strings.TrimSpace(getenv("TRPC_WORKER_GROUP")),

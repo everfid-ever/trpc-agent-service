@@ -31,8 +31,11 @@ type TokenSource interface {
 }
 
 type Config struct {
-	Endpoint          string
-	Collection        string
+	Endpoint   string
+	Collection string
+	// Collection must preserve embedding bytes (for example Qdrant Dot
+	// distance). Cosine normalization changes the image digest and is rejected
+	// by read-back verification.
 	VectorSize        int
 	SnapshotWatermark string
 	AllowInsecureHTTP bool

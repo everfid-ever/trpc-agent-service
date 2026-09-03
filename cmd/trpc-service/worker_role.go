@@ -43,6 +43,8 @@ import (
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
+	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
+	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	objectstores3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
@@ -111,7 +113,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: secretProvider}
 	governanceStore := governancepostgres.New(db)
 	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: configValue.WorkerGraphCheckpointTTL}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Checkpoints: graphCheckpoints,
+	skills := serviceskill.Resolver{Catalog: skillpostgres.New(db), StagingRoot: configValue.SkillStagingRoot}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Checkpoints: graphCheckpoints,
 		Policies: governanceStore, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManagerWithPolicy(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)

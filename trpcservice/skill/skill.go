@@ -33,6 +33,35 @@ type Catalog interface {
 	Resolve(context.Context, string, string, int64) (Package, error)
 }
 
+// LifecycleCatalog is the durable authority used by ingestion. Resolve only
+// returns published packages, so callers can never observe an unverified
+// staging directory as a Skill.
+type LifecycleCatalog interface {
+	Catalog
+	Stage(context.Context, Package) (Package, error)
+	Publish(context.Context, string, string, int64) (Package, error)
+}
+
+func ValidatePackage(value Package) (Package, error) {
+	if value.TenantID == "" || !safeComponent(value.SkillID) || value.Version < 1 ||
+		value.ContentDigest == "" || value.RelativePath == "" || filepath.IsAbs(value.RelativePath) {
+		return Package{}, runtime.ErrInvalidEnvelope
+	}
+	if raw, err := hex.DecodeString(value.ContentDigest); err != nil || len(raw) != sha256.Size {
+		return Package{}, runtime.ErrInvalidEnvelope
+	}
+	clean := filepath.Clean(value.RelativePath)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return Package{}, runtime.ErrTenantScope
+	}
+	value.RelativePath = filepath.ToSlash(clean)
+	return value, nil
+}
+
+func safeComponent(value string) bool {
+	return value != "" && value != "." && value != ".." && filepath.Base(value) == value
+}
+
 // Resolver implements agent.SkillResolver without importing the agent
 // package. StagingRoot must contain one directory per tenant.
 type Resolver struct {

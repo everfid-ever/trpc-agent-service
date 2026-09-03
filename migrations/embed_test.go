@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 32 {
+	if len(all) != 34 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
