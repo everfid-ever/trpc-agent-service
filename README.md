@@ -163,3 +163,16 @@ install -m 600 /absolute/path/to/deepseek-api-key \
 ## 设计文档
 
 多租户模型、Gateway/Worker 分布式运行时、数据一致性、WeCom/Feishu、治理安全、可观测与部署方案见 [docs/design/README.md](./docs/design/README.md)。设计目录同时给出跨组件冻结契约、A/B/C/D 模块依赖和分阶段实施路线。
+
+## 交付物索引
+
+| 交付物 | 位置 |
+| --- | --- |
+| 架构设计文档 | [docs/design/0.architecture.md](./docs/design/0.architecture.md)（全套规范见 [docs/design/README.md](./docs/design/README.md)） |
+| 系统架构图 | [docs/design/0.architecture.md](./docs/design/0.architecture.md) §2「架构原则与组件拓扑」（Gateway、Worker、Channel Adapter、Storage、Telemetry、数据库与 IM 平台关系） |
+| 核心时序图 | [docs/design/0.architecture.md](./docs/design/0.architecture.md) §12「端到端交互时序」（IM 用户发消息 → Agent 执行 → Tool 调用 → Session/Memory 写入 → IM 回复，`traceparent` 全链贯穿）；分支场景见 §13.1–13.6 |
+| 数据模型设计 | [docs/design/1.tenant-root-design.md](./docs/design/1.tenant-root-design.md)（tenant、agent app 及版本子记录）、[docs/design/3.storage-data-consistency-design.md](./docs/design/3.storage-data-consistency-design.md) §7「最小 SQL 模型」及 §7.1 核心 ER 图（session、event、inbox、outbox、channel binding、summary、memory 等）、[docs/design/5.observability-audit-devops-design.md](./docs/design/5.observability-audit-devops-design.md)（audit event 与合规 Sink 模型） |
+| 数据同步和幂等策略 | [docs/design/3.storage-data-consistency-design.md](./docs/design/3.storage-data-consistency-design.md)（Inbox 幂等、CommitTurn 原子顺序、event/state/summary/Memory 一致性层级、Outbox 与迁移协议） |
+| 多后端适配方案 | [docs/design/3.storage-data-consistency-design.md](./docs/design/3.storage-data-consistency-design.md) §1.1「存储路由与数据域」与 §2「数据域与一致性」（Redis / SQL / 向量库 / 对象存储分别存什么） |
+| 风险清单（≥8 项生产风险及缓解） | [docs/design/5.observability-audit-devops-design.md](./docs/design/5.observability-audit-devops-design.md) §19「生产风险清单」（12 项，含缓解措施与验收口径） |
+| 实现代码 | 本仓库：`cmd/trpc-service` 为启动入口，`trpcservice/` 按模块边界（tenant / gateway / worker / storage / channels / secrets / audit 等）组织，本地验证见上文「快速本地验证」 |
