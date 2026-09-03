@@ -681,6 +681,7 @@ func TestRuntimeConsistencyMigrationContract(t *testing.T) {
 	for _, clause := range []string{
 		"v_execution public.execution_record%ROWTYPE", "execution scope mismatch",
 		"UPDATE public.execution_record SET outcome = p_outcome", "already_terminal boolean",
+		"ON CONFLICT (tenant_id, kind, idempotency_key) DO NOTHING", "outbox idempotency collision",
 	} {
 		if !strings.Contains(runtimeMigration.Up, clause) {
 			t.Errorf("missing commit authority clause %q", clause)
