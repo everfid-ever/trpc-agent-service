@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/openai"
 )
@@ -29,13 +30,14 @@ type ProfileReader interface {
 // Resolver implements agent.ModelResolver. It intentionally has no
 // environment-variable fallback and does not resolve current/latest profiles.
 type Resolver struct {
-	Profiles ProfileReader
-	Secrets  secrets.Provider
-	Subject  string
+	Profiles    ProfileReader
+	Secrets     secrets.Provider
+	Credentials *generation.Pool
+	Subject     string
 }
 
 func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile.VersionedRef) (model.Model, error) {
-	if r.Profiles == nil || r.Secrets == nil || strings.TrimSpace(r.Subject) != r.Subject || r.Subject == "" {
+	if r.Profiles == nil || (r.Secrets == nil && r.Credentials == nil) || strings.TrimSpace(r.Subject) != r.Subject || r.Subject == "" {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
 	if tenantID == "" || ref.ID == "" || ref.Version < 1 {
@@ -66,11 +68,12 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 	}
 	scope := secrets.Scope{TenantID: tenantID, Subject: r.Subject, Purpose: secrets.PurposeModelCall,
 		ResourceID: value.ProfileID, ResourceVersion: value.Version}
-	credential, err := r.Secrets.Resolve(ctx, scope, value.SecretRef)
+	credential, release, err := r.resolveCredential(ctx, scope, value.SecretRef)
 	if err != nil {
 		clear(credential.Bytes)
 		return nil, err
 	}
+	defer release()
 	defer clear(credential.Bytes)
 	apiKey := strings.TrimSpace(string(credential.Bytes))
 	if credential.Version != value.SecretRef.Version || apiKey == "" || strings.ContainsAny(apiKey, "\r\n\x00") {
@@ -85,6 +88,23 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 		opts = append(opts, openai.WithChannelBufferSize(bufferSize))
 	}
 	return openai.New(value.Model, opts...), nil
+}
+
+func (r Resolver) resolveCredential(ctx context.Context, scope secrets.Scope, ref secrets.SecretRef) (secrets.SecretValue, func(), error) {
+	if r.Credentials == nil {
+		value, err := r.Secrets.Resolve(ctx, scope, ref)
+		return value, func() {}, err
+	}
+	lease, err := r.Credentials.Acquire(ctx, scope, ref)
+	if err != nil {
+		return secrets.SecretValue{}, func() {}, err
+	}
+	value, err := lease.Secret()
+	if err != nil {
+		lease.Release()
+		return secrets.SecretValue{}, func() {}, err
+	}
+	return value, lease.Release, nil
 }
 
 func validateEndpoint(raw string) error {

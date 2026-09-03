@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,7 @@ import (
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
@@ -91,7 +93,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	if err != nil {
 		return errors.New("payload key configuration rejected")
 	}
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.QdrantVectorSchema())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}
@@ -100,7 +102,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	configRepo := configpostgres.New(db, tenantRepo)
 	providerRepo := providerpostgres.New(db, catalog)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
-	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Subject: "worker-model"}
+	credentialPool := generation.New(secretProvider)
+	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Credentials: credentialPool, Subject: "worker-model"}
 	toolCatalog, err := servicetool.NewCatalog()
 	if err != nil {
 		return errors.New("tool catalog initialization failed")
@@ -121,6 +124,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 		}
 		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root}, nil, nil
 	}, profilememory.BundleManagerPolicy{FailureBackoff: configValue.WorkerBundleFailureBackoff, CloseTimeout: configValue.WorkerBundleCloseTimeout})
+	credentialInvalidator := modelclient.CredentialInvalidator{Pool: credentialPool, Bundles: bundles, Subject: "worker-model"}
 
 	tasks := gatewaypostgres.NewTaskStore(db)
 	runGovernance := governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}
@@ -174,6 +178,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	if err != nil {
 		return errors.New("execution control queue configuration rejected")
 	}
+	configControlQueue, err := relayredis.NewTenantControlQueue(redis, publisher, relayredis.TenantControlQueueConfig{
+		Group: configValue.WorkerControlGroup + "-config", ReadBlock: 250 * time.Millisecond, ReclaimIdle: configValue.WorkerLeaseTTL})
+	if err != nil {
+		return errors.New("config invalidation queue configuration rejected")
+	}
 	lifecycle := worker.NewLifecycle()
 	consumer := worker.Consumer{WorkerID: workerID, Shards: shards, Broker: dispatchBroker, Leases: leases, Sessions: sessions,
 		Parker: tasks, Statuses: tasks, Executor: executor, LeaseTTL: configValue.WorkerLeaseTTL, RenewInterval: configValue.WorkerLeaseRenew,
@@ -220,7 +229,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 	defer cancelProcess()
 	stopSignals := worker.InstallSignalDrain(processCtx, lifecycle)
 	defer stopSignals()
-	errorsCh := make(chan error, 4)
+	errorsCh := make(chan error, 8)
 	consumerDone := make(chan error, 1)
 	var background sync.WaitGroup
 	start := func(name string, operation func(context.Context) error) {
@@ -257,6 +266,41 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *l
 					}
 					if ackErr := controlQueue.AckExecutionControl(ctx, delivery); ackErr != nil {
 						logger.Printf("worker execution-control reclaim ACK degraded: %v", ackErr)
+					}
+				}
+			}
+		}
+	})
+	consumeConfigInvalidation := func(ctx context.Context, delivery relay.TenantControlDelivery) error {
+		event := delivery.Event
+		if event.Kind != "config-invalidation" || !strings.HasPrefix(event.PayloadRef, "provider-profile://") {
+			return nil
+		}
+		return credentialInvalidator.ConsumeProfileInvalidation(ctx, providerRepo, event.TenantID, event.AggregateID, event.Version, event.PayloadRef)
+	}
+	start("credential invalidation consumer", func(ctx context.Context) error {
+		return configControlQueue.ConsumeTenantControl(ctx, relay.TenantControlConsumerOptions{ConsumerID: workerID + "-config"}, consumeConfigInvalidation)
+	})
+	start("credential invalidation reclaimer", func(ctx context.Context) error {
+		ticker := time.NewTicker(configValue.WorkerReclaimInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+				deliveries, reclaimErr := configControlQueue.ReclaimTenantControls(ctx, relay.TenantControlConsumerOptions{ConsumerID: workerID + "-config", Limit: configValue.WorkerReclaimLimit})
+				if reclaimErr != nil {
+					logger.Printf("worker credential invalidation reclaim degraded: %v", reclaimErr)
+					continue
+				}
+				for _, delivery := range deliveries {
+					if handleErr := consumeConfigInvalidation(ctx, delivery); handleErr != nil {
+						logger.Printf("worker credential invalidation rejected: %v", handleErr)
+						continue
+					}
+					if ackErr := configControlQueue.AckTenantControl(ctx, delivery); ackErr != nil {
+						logger.Printf("worker credential invalidation reclaim ACK degraded: %v", ackErr)
 					}
 				}
 			}

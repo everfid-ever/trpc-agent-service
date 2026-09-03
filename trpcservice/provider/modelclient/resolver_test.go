@@ -9,6 +9,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 )
 
 type profileReaderStub struct{ value provider.ModelProfileSnapshot }
@@ -22,9 +23,11 @@ type secretProviderStub struct {
 	ref   secrets.SecretRef
 	value secrets.SecretValue
 	err   error
+	calls int
 }
 
 func (s *secretProviderStub) Resolve(_ context.Context, scope secrets.Scope, ref secrets.SecretRef) (secrets.SecretValue, error) {
+	s.calls++
 	s.scope, s.ref = scope, ref
 	return s.value, s.err
 }
@@ -39,6 +42,17 @@ func TestResolverBuildsExactScopedOpenAIClient(t *testing.T) {
 	if resolved == nil || secret.scope != (secrets.Scope{TenantID: "tenant-a", Subject: "worker-model", Purpose: secrets.PurposeModelCall,
 		ResourceID: "model", ResourceVersion: 3}) || secret.ref != (secrets.SecretRef{Ref: "secret/model", Version: 9}) {
 		t.Fatalf("scope=%#v ref=%#v model=%T", secret.scope, secret.ref, resolved)
+	}
+}
+
+func TestResolverUsesCredentialGenerationWhenConfigured(t *testing.T) {
+	secret := &secretProviderStub{value: secrets.SecretValue{Bytes: []byte("test-key"), Version: 9}}
+	resolver := Resolver{Profiles: profileReaderStub{validProfile()}, Secrets: secret, Credentials: generation.New(secret), Subject: "worker-model"}
+	if _, err := resolver.ResolveModel(context.Background(), "tenant-a", profile.VersionedRef{ID: "model", Version: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if secret.calls != 1 {
+		t.Fatalf("secret resolutions=%d", secret.calls)
 	}
 }
 

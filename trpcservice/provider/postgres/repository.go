@@ -62,6 +62,9 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb,$12) ON CONFLICT (tenant
 	if err = writeAudit(ctx, tx, value.TenantID, "model", value.ProfileID, value.Version); err != nil {
 		return provider.ModelProfileSnapshot{}, err
 	}
+	if err = writeCredentialInvalidation(ctx, tx, value.TenantID, "model", value.ProfileID, value.Version); err != nil {
+		return provider.ModelProfileSnapshot{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return provider.ModelProfileSnapshot{}, translate(err)
 	}
@@ -110,6 +113,9 @@ VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10) ON CONFLICT (tenant_id,backend_pro
 	if err = writeAudit(ctx, tx, value.TenantID, "backend", value.ProfileID, value.Version); err != nil {
 		return provider.BackendProfileSnapshot{}, err
 	}
+	if err = writeCredentialInvalidation(ctx, tx, value.TenantID, "backend", value.ProfileID, value.Version); err != nil {
+		return provider.BackendProfileSnapshot{}, err
+	}
 	if err = tx.Commit(); err != nil {
 		return provider.BackendProfileSnapshot{}, translate(err)
 	}
@@ -143,6 +149,27 @@ func (r *Repository) GetModel(ctx context.Context, tenantID, profileID string, v
 		return provider.ModelProfileSnapshot{}, runtime.ErrInvariantViolation
 	}
 	return normalized, nil
+}
+
+// PreviousModelCredential returns the newest credential generation strictly
+// before a published Profile version. Consumers use it to retire the old
+// local generation after receiving the durable invalidation for the new one.
+func (r *Repository) PreviousModelCredential(ctx context.Context, tenantID, profileID string, beforeVersion int64) (secrets.SecretRef, int64, error) {
+	if r == nil || r.db == nil || tenantID == "" || profileID == "" || beforeVersion < 1 {
+		return secrets.SecretRef{}, 0, runtime.ErrInvariantViolation
+	}
+	var ref sql.NullString
+	var credentialVersion, profileVersion sql.NullInt64
+	err := r.db.QueryRowContext(ctx, `SELECT secret_ref,secret_version,profile_version
+FROM model_profile_revision WHERE tenant_id=$1 AND model_profile_id=$2 AND profile_version<$3
+ORDER BY profile_version DESC LIMIT 1`, tenantID, profileID, beforeVersion).Scan(&ref, &credentialVersion, &profileVersion)
+	if err != nil {
+		return secrets.SecretRef{}, 0, translate(err)
+	}
+	if ref.String == "" || credentialVersion.Int64 < 1 || profileVersion.Int64 < 1 {
+		return secrets.SecretRef{}, 0, runtime.ErrInvariantViolation
+	}
+	return secrets.SecretRef{Ref: ref.String, Version: credentialVersion.Int64}, profileVersion.Int64, nil
 }
 
 func (r *Repository) GetBackend(ctx context.Context, tenantID, profileID string, version int64) (provider.BackendProfileSnapshot, error) {
@@ -217,6 +244,19 @@ func verifyImmutableInsert(ctx context.Context, tx *sql.Tx, result sql.Result, t
 func writeAudit(ctx context.Context, tx *sql.Tx, tenantID, kind, profileID string, version int64) error {
 	_, err := tx.ExecContext(ctx, `INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
 VALUES($1,$2,'audit',$3,$4,$5,$6) ON CONFLICT (tenant_id,kind,idempotency_key) DO NOTHING`, tenantID, fmt.Sprintf("provider-profile:%s:%s:%s:%d", kind, tenantID, profileID, version), profileID, version, fmt.Sprintf("provider-profile:%s:%s:%s:%d", kind, tenantID, profileID, version), fmt.Sprintf("provider-profile://%s/%s/%s/%d", tenantID, kind, profileID, version))
+	return translate(err)
+}
+
+// writeCredentialInvalidation is deliberately emitted in the same transaction
+// as an immutable Profile revision. It is a broadcast hint only: consumers
+// reload the exact Profile version before retiring a local generation. The
+// payload reference identifies no SecretRef and can never contain a value.
+func writeCredentialInvalidation(ctx context.Context, tx *sql.Tx, tenantID, kind, profileID string, version int64) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+VALUES($1,$2,'config-invalidation',$3,$4,$5,$6) ON CONFLICT (tenant_id,kind,idempotency_key) DO NOTHING`,
+		tenantID, fmt.Sprintf("provider-profile-invalidation:%s:%s:%s:%d", kind, tenantID, profileID, version), profileID, version,
+		fmt.Sprintf("provider-profile:%s:%s:%s:%d:invalidate", kind, tenantID, profileID, version),
+		fmt.Sprintf("provider-profile://%s/%s/%s/%d", tenantID, kind, profileID, version))
 	return translate(err)
 }
 

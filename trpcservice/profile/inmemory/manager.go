@@ -205,6 +205,30 @@ func (m *BundleManager) Retire(key profile.ExecutionProfileKey) {
 	m.closeOwnedReserved(closeFn)
 }
 
+// RetireTenant marks every cached bundle for one tenant retired. Active
+// leases retain their immutable resources; later Acquire calls fail closed.
+func (m *BundleManager) RetireTenant(tenantID string) {
+	if tenantID == "" {
+		return
+	}
+	m.mu.Lock()
+	keys := make([]profile.ExecutionProfileKey, 0)
+	for key := range m.entries {
+		if key.TenantID == tenantID {
+			keys = append(keys, key)
+		}
+	}
+	for key := range m.retired {
+		if key.TenantID == tenantID {
+			keys = append(keys, key)
+		}
+	}
+	m.mu.Unlock()
+	for _, key := range keys {
+		m.Retire(key)
+	}
+}
+
 func (m *BundleManager) Close(ctx context.Context) error {
 	if ctx == nil {
 		return runtime.ErrInvariantViolation

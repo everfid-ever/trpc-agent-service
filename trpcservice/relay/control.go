@@ -101,6 +101,24 @@ type TenantControlPublisher interface {
 	PublishTenantControl(context.Context, TenantControlEvent) error
 }
 
+type TenantControlDelivery struct {
+	ID    string
+	Event TenantControlEvent
+}
+
+type TenantControlConsumerOptions struct {
+	ConsumerID string
+	Limit      int
+}
+
+// TenantControlQueue uses one consumer group per runtime node. Control
+// broadcasts must not be load-balanced between nodes.
+type TenantControlQueue interface {
+	ConsumeTenantControl(context.Context, TenantControlConsumerOptions, func(context.Context, TenantControlDelivery) error) error
+	AckTenantControl(context.Context, TenantControlDelivery) error
+	ReclaimTenantControls(context.Context, TenantControlConsumerOptions) ([]TenantControlDelivery, error)
+}
+
 type TenantControlRelay struct {
 	Outbox             messaging.OutboxStore
 	Controls           TenantControlPublisher

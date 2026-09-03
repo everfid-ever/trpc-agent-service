@@ -75,3 +75,28 @@ func TestDeepSeekModelSchemaPinsOfficialProductionSurface(t *testing.T) {
 		t.Fatalf("deprecated model: %v", err)
 	}
 }
+
+func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
+	catalog, err := NewCatalog(QdrantVectorSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeBackend(BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "vector", ProfileKey: "qdrant",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "qdrant", Configuration: map[string]string{
+			"endpoint": "https://qdrant.example.com", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a",
+		}, CredentialRef: secrets.SecretRef{Ref: "secret/qdrant", Version: 1}, Capabilities: CapabilitySet{"tenant_filter": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Configuration["timeout_ms"] != "20000" || len(value.ContentDigest) != 64 {
+		t.Fatalf("not normalized: %#v", value)
+	}
+	value.Configuration["api_key"] = "forbidden"
+	if _, err := catalog.NormalizeBackend(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("secret-bearing configuration: %v", err)
+	}
+	value.Configuration = map[string]string{"endpoint": "https://qdrant.example.com?api_key=forbidden", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a"}
+	if _, err := catalog.NormalizeBackend(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("secret-bearing endpoint: %v", err)
+	}
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	knowledgedriverpg "github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/contracttest"
 )
@@ -40,7 +41,22 @@ func TestIngestionPostgreSQL16(t *testing.T) {
 	}
 	tenantID := "t_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 	contracttest.Suite(t, New(db), tenantID)
+	assertVerifiedProbeSource(t, db, tenantID)
 	assertAgentRevisionRejectsUnpublishedKnowledge(t, db, tenantID)
+}
+
+func assertVerifiedProbeSource(t *testing.T, db *sql.DB, tenantID string) {
+	t.Helper()
+	probes, err := knowledgedriverpg.NewProbeSource(db).Probes(context.Background(), tenantID, "qdrant-snapshot-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range probes {
+		if probe.KnowledgeID == "kb6" && probe.KnowledgeVersion == 1 && probe.ProbeID == "kb6:1:p1" && len(probe.Expected) == 1 && probe.Expected[0].ChunkID == "c1" {
+			return
+		}
+	}
+	t.Fatalf("verified durable probe missing: %#v", probes)
 }
 
 func assertAgentRevisionRejectsUnpublishedKnowledge(t *testing.T, db *sql.DB, tenantID string) {

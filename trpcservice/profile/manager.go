@@ -23,3 +23,9 @@ type RuntimeBundleManager interface {
 	Retire(ExecutionProfileKey)
 	Close(context.Context) error
 }
+
+// TenantBundleRetirer is the narrow invalidation capability used when a
+// credential generation changes. It never closes an active lease.
+type TenantBundleRetirer interface {
+	RetireTenant(string)
+}

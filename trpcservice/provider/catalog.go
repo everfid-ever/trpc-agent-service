@@ -84,6 +84,28 @@ func DeepSeekModelSchema() Schema {
 	}
 }
 
+// QdrantVectorSchema pins the configuration surface accepted for a Qdrant
+// Knowledge backend. Credentials deliberately remain a versioned SecretRef;
+// neither API keys nor connection strings may enter a backend profile.
+func QdrantVectorSchema() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "qdrant", SchemaVersion: 1,
+		OptionRules: map[string]OptionRule{
+			"collection":         {Type: OptionString, Required: true},
+			"endpoint":           {Type: OptionString, Required: true},
+			"snapshot_watermark": {Type: OptionString, Required: true},
+			"timeout_ms":         {Type: OptionInteger, Default: "20000", Min: 100, Max: 600000},
+			"vector_size":        {Type: OptionInteger, Required: true, Min: 1, Max: 65536},
+		},
+		SecretRequirement: "required",
+		Capabilities: CapabilitySet{
+			"idempotent_upsert":    true,
+			"migration_dual_write": true,
+			"tenant_filter":        true,
+		},
+	}
+}
+
 func NewCatalog(schemas ...Schema) (*Catalog, error) {
 	catalog := &Catalog{schemas: make(map[schemaKey]Schema, len(schemas))}
 	for _, schema := range schemas {
@@ -206,6 +228,11 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 	if err != nil {
 		return BackendProfileSnapshot{}, err
 	}
+	if schema.Name == "qdrant" && schema.SchemaVersion == 1 {
+		if err := validateQdrantConfiguration(configuration); err != nil {
+			return BackendProfileSnapshot{}, err
+		}
+	}
 	if err := validateSecret(input.CredentialRef, schema.SecretRequirement); err != nil {
 		return BackendProfileSnapshot{}, err
 	}
@@ -224,6 +251,23 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 		Capabilities  CapabilitySet
 	}{input.SchemaVersion, input.Provider, input.Configuration, input.CredentialRef, input.Capabilities})
 	return input, err
+}
+
+func validateQdrantConfiguration(configuration map[string]string) error {
+	endpoint, err := url.Parse(configuration["endpoint"])
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return runtime.ErrCapabilityUnsupported
+	}
+	collection := configuration["collection"]
+	if collection == "" || len(collection) > 255 {
+		return runtime.ErrInvariantViolation
+	}
+	for _, value := range collection {
+		if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '-') {
+			return runtime.ErrCapabilityUnsupported
+		}
+	}
+	return nil
 }
 
 func validateIdentity(tenantID, profileID, profileKey, status string, version int64) error {

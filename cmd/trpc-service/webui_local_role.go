@@ -54,6 +54,7 @@ import (
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
@@ -159,7 +160,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	appRepo := agentpostgres.New(db)
 	configRepo := configpostgres.New(db, tenantRepo)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
-	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Subject: "worker-model"}
+	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Credentials: generation.New(bootstrap.SecretStore), Subject: "worker-model"}
 	governanceStore := governancepostgres.New(db)
 	toolCatalog, err := servicetool.NewCatalog(localnote.Registration(webUILocalTenantID))
 	if err != nil {
