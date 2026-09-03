@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"io"
-	"log"
 	"testing"
 	"time"
 
@@ -16,7 +14,7 @@ func TestRunPreprocessLoopRetriesTransientErrorsAndStopsOnCancel(t *testing.T) {
 	defer cancel()
 	calls := make(chan int, 4)
 	done := make(chan error, 1)
-	logger := log.New(io.Discard, "", 0)
+	logger := testLogger()
 	go func() {
 		done <- runPreprocessLoop(ctx, func(context.Context, int) (int, error) {
 			calls <- 1
@@ -42,14 +40,14 @@ func TestRunPreprocessLoopRetriesTransientErrorsAndStopsOnCancel(t *testing.T) {
 func TestRunPreprocessLoopRejectsInvariantFailure(t *testing.T) {
 	err := runPreprocessLoop(context.Background(), func(context.Context, int) (int, error) {
 		return 0, runtime.ErrInvariantViolation
-	}, time.Millisecond, 1, log.New(io.Discard, "", 0))
+	}, time.Millisecond, 1, testLogger())
 	if !errors.Is(err, runtime.ErrInvariantViolation) {
 		t.Fatalf("error=%v", err)
 	}
 }
 
 func TestRunRoleRejectsUnknownRoleBeforeOpeningDependencies(t *testing.T) {
-	err := runRole(context.Background(), nil, log.New(io.Discard, "", 0), "unknown")
+	err := runRole(context.Background(), nil, testLogger(), "unknown")
 	if err == nil || err.Error() != "unsupported service role" {
 		t.Fatalf("error=%v", err)
 	}

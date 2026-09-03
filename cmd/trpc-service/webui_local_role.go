@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -95,7 +94,7 @@ type webUILocalBootstrap struct {
 	ProviderRepo *providerpostgres.Repository
 }
 
-func runWebUILocalRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runWebUILocalRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || getenv == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -38,7 +37,7 @@ import (
 // runChannelRole owns only callback ingress. Provider adapters are kept
 // transport-neutral here: they verify/decode and persist durable facts, while
 // sender/token clients remain in the channel delivery role.
-func runChannelRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runChannelRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}
@@ -204,7 +203,7 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	return nil
 }
 
-func runChannelCandidateReaper(ctx context.Context, store ingress.Store, interval time.Duration, batch int, logger *log.Logger) error {
+func runChannelCandidateReaper(ctx context.Context, store ingress.Store, interval time.Duration, batch int, logger *roleLogger) error {
 	if ctx == nil || store == nil || interval <= 0 || batch < 1 || logger == nil {
 		return runtime.ErrInvariantViolation
 	}

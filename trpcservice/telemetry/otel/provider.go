@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"strings"
 	"sync"
@@ -23,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/semconv/v1.26.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
+	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicetelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
@@ -33,13 +33,13 @@ type Config struct {
 	AllowInsecure                               bool
 	BatchTimeout, ExportTimeout, MetricInterval time.Duration
 	MaxQueueSize, MaxExportBatchSize            int
-	Logger                                      *log.Logger
+	Logger                                      *servicelog.Logger
 }
 
 type Provider struct {
 	tracer oteltrace.Tracer
 	meter  otelmetric.Meter
-	logger *log.Logger
+	logger *servicelog.Logger
 
 	traces  *sdktrace.TracerProvider
 	metrics *metric.MeterProvider
@@ -179,27 +179,32 @@ func (h wrappedHistogram) Record(ctx context.Context, value float64, attributes 
 }
 
 type wrappedLogger struct {
-	logger    *log.Logger
+	logger    *servicelog.Logger
 	component servicetelemetry.Component
 }
 
-func (l wrappedLogger) Info(_ context.Context, event servicetelemetry.LogEvent, attributes ...servicetelemetry.Attribute) {
-	l.write(event, attributes)
+func (l wrappedLogger) Info(ctx context.Context, event servicetelemetry.LogEvent, attributes ...servicetelemetry.Attribute) {
+	l.write(ctx, false, event, attributes)
 }
-func (l wrappedLogger) Error(_ context.Context, event servicetelemetry.LogEvent, attributes ...servicetelemetry.Attribute) {
-	l.write(event, attributes)
+func (l wrappedLogger) Error(ctx context.Context, event servicetelemetry.LogEvent, attributes ...servicetelemetry.Attribute) {
+	l.write(ctx, true, event, attributes)
 }
-func (l wrappedLogger) write(event servicetelemetry.LogEvent, attributes []servicetelemetry.Attribute) {
+func (l wrappedLogger) write(ctx context.Context, isError bool, event servicetelemetry.LogEvent, attributes []servicetelemetry.Attribute) {
 	if l.logger == nil {
 		return
 	}
-	values := []any{"component", l.component, "event", event}
+	values := make([]servicelog.Attribute, 0, len(attributes)+2)
+	values = append(values, servicelog.String("component", string(l.component)), servicelog.String("event", string(event)))
 	for _, item := range attributes {
 		if item.Valid() {
-			values = append(values, item.Key(), item.Value())
+			values = append(values, servicelog.String(item.Key(), item.Value()))
 		}
 	}
-	l.logger.Print(values...)
+	if isError {
+		l.logger.Error(ctx, string(event), values...)
+		return
+	}
+	l.logger.Info(ctx, string(event), values...)
 }
 
 func convertAttributes(values []servicetelemetry.Attribute) []attribute.KeyValue {

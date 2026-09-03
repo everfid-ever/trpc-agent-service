@@ -52,11 +52,14 @@ func TestWorkloadProductionContracts(t *testing.T) {
 
 func TestAvailabilityAndNetworkContracts(t *testing.T) {
 	values := read(t, "values.yaml")
+	workloads := read(t, filepath.Join("templates", "workloads.yaml"))
 	requireFragments(t, values,
 		"runAsNonRoot: true",
 		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
+		"logging:\n  level: info\n  maskingLevel: basic",
 	)
+	requireFragments(t, workloads, "TRPC_LOG_LEVEL", "TRPC_LOG_MASKING_LEVEL")
 	for _, role := range []string{"gateway:", "worker:", "channel:", "channel-delivery:", "preprocess:", "artifact:", "audit-relay:", "audit-query:", "audit-purge:", "business-audit-purge:"} {
 		requireFragments(t, values, role)
 	}

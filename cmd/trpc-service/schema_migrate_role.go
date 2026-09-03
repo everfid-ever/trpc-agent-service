@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -56,7 +55,7 @@ func loadSchemaMigrationConfig(getenv func(string) string) (schemaMigrationConfi
 	return config, nil
 }
 
-func runSchemaMigrate(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runSchemaMigrate(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid schema migration dependencies")
 	}

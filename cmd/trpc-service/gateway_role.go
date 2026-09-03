@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -33,7 +32,7 @@ func gatewayAuthScope(tenantID string, version int64) secrets.Scope {
 		ResourceID: gatewayAuthResourceID, ResourceVersion: version}
 }
 
-func runGatewayRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runGatewayRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

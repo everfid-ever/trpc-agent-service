@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
+	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 )
 
 type channelReadinessStub bool
@@ -87,4 +87,10 @@ func TestRunChannelCandidateReaperStopsOnCancel(t *testing.T) {
 	}
 }
 
-func testLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+func testLogger() *roleLogger {
+	logger, err := servicelog.New(servicelog.Config{Writer: io.Discard, Level: servicelog.LevelInfo, Role: "test"})
+	if err != nil {
+		panic(err)
+	}
+	return logger
+}

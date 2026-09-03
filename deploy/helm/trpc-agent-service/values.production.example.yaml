@@ -9,6 +9,10 @@ telemetry:
   allowInsecure: true
   serviceVersion: replace-with-release-id
 
+logging:
+  level: info
+  maskingLevel: strict
+
 secretProvider:
   enabled: true
 

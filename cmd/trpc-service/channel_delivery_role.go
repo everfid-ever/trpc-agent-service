@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -34,7 +33,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
-func runChannelDeliveryRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runChannelDeliveryRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

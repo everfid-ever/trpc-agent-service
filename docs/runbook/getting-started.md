@@ -278,6 +278,10 @@ trpc-service webui-local
 | `TRPC_PROBE_TIMEOUT` | `5s` | 单次依赖探测超时 |
 | `TRPC_PROBE_INTERVAL` | `15s` | readiness 探测周期 |
 | `TRPC_SHUTDOWN_TIMEOUT` | 一般 `30s`；Gateway/Worker `45s` | 总关闭时间预算 |
+| `TRPC_LOG_LEVEL` | `info` | `debug`、`info`、`warn`、`error`；非法值会拒绝启动 |
+| `TRPC_LOG_MASKING_LEVEL` | `basic` | `none`、`basic`、`strict`；所有级别都会隐藏 Secret、token、DSN、payload 与 Authorization |
+
+日志输出为 JSON。生产 Helm 示例使用 `strict`，本地开发默认 `basic`；不要依赖文本前缀解析，也不要把敏感值作为错误字符串或格式化参数传入。
 
 ### 6.2 按角色必填矩阵
 

@@ -85,6 +85,10 @@ spec:
               value: {{ $role.preStopSettleDelay | quote }}
             - name: TRPC_SERVICE_VERSION
               value: {{ $.Values.telemetry.serviceVersion | quote }}
+            - name: TRPC_LOG_LEVEL
+              value: {{ $.Values.logging.level | quote }}
+            - name: TRPC_LOG_MASKING_LEVEL
+              value: {{ $.Values.logging.maskingLevel | quote }}
             {{- if $.Values.telemetry.endpoint }}
             - name: TRPC_OTEL_ENDPOINT
               value: {{ $.Values.telemetry.endpoint | quote }}

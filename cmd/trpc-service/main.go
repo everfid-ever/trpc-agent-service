@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +20,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	"github.com/liuzengh/trpc-agent-service/trpcservice"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
+	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/clamav"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/httpdlp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
@@ -42,7 +42,11 @@ func main() {
 	if len(os.Args) > 1 {
 		role = os.Args[1]
 	}
-	logger := log.New(os.Stderr, "", log.LstdFlags|log.LUTC)
+	logger, err := servicelog.NewFromEnv(os.Getenv, os.Stderr, role)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "trpc-agent-service logging configuration rejected: %v\n", err)
+		os.Exit(2)
+	}
 	processContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := runRole(processContext, os.Getenv, logger, role); err != nil {
@@ -51,11 +55,13 @@ func main() {
 	}
 }
 
-func run(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+type roleLogger = servicelog.Logger
+
+func run(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	return runRole(parent, getenv, logger, "artifact")
 }
 
-func runRole(parent context.Context, getenv func(string) string, logger *log.Logger, role string) error {
+func runRole(parent context.Context, getenv func(string) string, logger *roleLogger, role string) error {
 	switch role {
 	case "artifact":
 		return runArtifactRole(parent, getenv, logger)
@@ -90,7 +96,7 @@ func runRole(parent context.Context, getenv func(string) string, logger *log.Log
 	}
 }
 
-func runArtifactRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runArtifactRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

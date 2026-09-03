@@ -2,15 +2,13 @@ package main
 
 import (
 	"context"
-	"io"
-	"log"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 func TestNewRoleTelemetryDefaultsToNoopAndRejectsUnsafeConfiguration(t *testing.T) {
-	logger := log.New(io.Discard, "", 0)
+	logger := testLogger()
 	provider, err := newRoleTelemetry(context.Background(), mapEnvironment(nil), "gateway", logger)
 	if err != nil || provider != telemetry.Noop() {
 		t.Fatalf("provider=%T err=%v", provider, err)

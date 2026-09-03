@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -27,7 +26,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
-func runAuditRelayRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runAuditRelayRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}
@@ -190,7 +189,7 @@ func verifyIndependentAuditDatabases(ctx context.Context, source, target *sql.DB
 	return nil
 }
 
-func runAuditComplianceMigrate(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runAuditComplianceMigrate(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || getenv == nil || logger == nil {
 		return errors.New("invalid migration dependencies")
 	}

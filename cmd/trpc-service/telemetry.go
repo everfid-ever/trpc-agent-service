@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"strings"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 	serviceotel "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry/otel"
 )
 
-func newRoleTelemetry(ctx context.Context, getenv func(string) string, role string, logger *log.Logger) (telemetry.Provider, error) {
+func newRoleTelemetry(ctx context.Context, getenv func(string) string, role string, logger *roleLogger) (telemetry.Provider, error) {
 	if getenv == nil || strings.TrimSpace(role) == "" || logger == nil {
 		return nil, errors.New("invalid telemetry dependencies")
 	}
@@ -53,7 +52,7 @@ func newRoleTelemetry(ctx context.Context, getenv func(string) string, role stri
 	return serviceotel.New(ctx, config)
 }
 
-func shutdownRoleTelemetry(provider telemetry.Provider, logger *log.Logger) {
+func shutdownRoleTelemetry(provider telemetry.Provider, logger *roleLogger) {
 	if provider == nil {
 		return
 	}

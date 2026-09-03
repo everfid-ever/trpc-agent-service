@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -69,7 +68,7 @@ func loadBusinessAuditPurgeConfig(getenv func(string) string) (businessAuditPurg
 	return config, nil
 }
 
-func runBusinessAuditPurgeRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runBusinessAuditPurgeRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

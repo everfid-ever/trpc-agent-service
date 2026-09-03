@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["image", "serviceAccount", "podSecurityContext", "securityContext", "telemetry", "secretProvider", "networkPolicy", "migration", "roles"],
+  "required": ["image", "serviceAccount", "podSecurityContext", "securityContext", "telemetry", "logging", "secretProvider", "networkPolicy", "migration", "roles"],
   "properties": {
     "nameOverride": {"type": "string"},
     "fullnameOverride": {"type": "string"},
@@ -34,6 +34,15 @@
         "endpoint": {"type": "string"},
         "allowInsecure": {"type": "boolean"},
         "serviceVersion": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "logging": {
+      "type": "object",
+      "required": ["level", "maskingLevel"],
+      "properties": {
+        "level": {"enum": ["debug", "info", "warn", "error"]},
+        "maskingLevel": {"enum": ["none", "basic", "strict"]}
       },
       "additionalProperties": false
     },

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -44,7 +43,7 @@ import (
 // process. It owns only the durable preprocess/dispatch path and its scanner,
 // object-store and secret dependencies; Redis and channel transports are not
 // required for this role.
-func runPreprocessRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runPreprocessRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}
@@ -215,7 +214,7 @@ func runPreprocessRole(parent context.Context, getenv func(string) string, logge
 	return nil
 }
 
-func runPreprocessLoop(ctx context.Context, runOnce func(context.Context, int) (int, error), interval time.Duration, batch int, logger *log.Logger) error {
+func runPreprocessLoop(ctx context.Context, runOnce func(context.Context, int) (int, error), interval time.Duration, batch int, logger *roleLogger) error {
 	if ctx == nil || runOnce == nil || interval <= 0 || batch < 1 || logger == nil {
 		return runtime.ErrInvariantViolation
 	}

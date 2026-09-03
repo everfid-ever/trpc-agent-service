@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -94,7 +93,7 @@ func auditQueryAuthScope(tenantID string, version int64) secrets.Scope {
 		ResourceID: auditQueryAuthResourceID, ResourceVersion: version}
 }
 
-func runAuditQueryRole(parent context.Context, getenv func(string) string, logger *log.Logger) error {
+func runAuditQueryRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
 	if parent == nil || logger == nil {
 		return errors.New("invalid process dependencies")
 	}

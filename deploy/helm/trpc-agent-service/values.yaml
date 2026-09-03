@@ -30,6 +30,10 @@ telemetry:
   allowInsecure: false
   serviceVersion: development
 
+logging:
+  level: info
+  maskingLevel: basic
+
 secretProvider:
   enabled: false
   mountPath: /run/secrets/trpc
