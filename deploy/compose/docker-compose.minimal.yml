@@ -8,14 +8,16 @@ name: trpc-agent-minimal
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # Digests keep the disposable CI environment reproducible. Keep the human
+    # readable tag as well so an operator can identify the intended release.
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     environment: {POSTGRES_USER: trpc, POSTGRES_PASSWORD: trpc_test_password, POSTGRES_DB: postgres}
     ports:
       - "127.0.0.1:${TRPC_MINIMAL_PG_PORT:-55434}:5432"
     healthcheck: {test: ["CMD-SHELL", "pg_isready -U trpc -d postgres"], interval: 2s, timeout: 3s, retries: 30}
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     ports:
       - "127.0.0.1:${TRPC_MINIMAL_REDIS_PORT:-56381}:6379"
     healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 3s, retries: 30}
@@ -24,12 +26,12 @@ services:
   # bash, so it cannot self-report a shell healthcheck. The smoke container
   # waits for /healthz instead; keep this service on service_started.
   qdrant:
-    image: qdrant/qdrant:v1.13.6
+    image: qdrant/qdrant:v1.13.6@sha256:bd67306b6cc77c98122cada2321eb60b20d00b19d26cb61c86681e7bd5951498
     ports:
       - "127.0.0.1:${TRPC_MINIMAL_QDRANT_PORT:-56334}:6333"
 
   vault:
-    image: hashicorp/vault:1.18
+    image: hashicorp/vault:1.18@sha256:750bb37c1638fa194ab37053a81618c61bb0491ddec6fccac87c07a8e6cd8166
     cap_add: ["IPC_LOCK"]
     command: server -dev -dev-root-token-id=trpc-dev-token -dev-listen-address=0.0.0.0:8200
     ports:
@@ -37,7 +39,7 @@ services:
     healthcheck: {test: ["CMD-SHELL", "VAULT_ADDR=http://127.0.0.1:8200 vault status >/dev/null"], interval: 2s, timeout: 3s, retries: 30}
 
   smoke:
-    image: golang:1.25-bookworm
+    image: golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
     working_dir: /src
     volumes: [../..:/src:ro]
     environment:

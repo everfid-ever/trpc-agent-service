@@ -34,6 +34,8 @@ it validates the migration matrix, Redis recovery contracts and real
 Vault/Qdrant adapters. It removes containers and volumes on success and keeps
 Compose logs in a temporary directory on failure. No external credentials are
 used and it does not test IM, model, S3, OTEL or Kubernetes integrations.
+Every image is pinned by digest. The same entrypoint is the CI backend-smoke
+job, so it does not depend on a developer's Go or module cache.
 
 ## Gateway/Worker (environment 2)
 

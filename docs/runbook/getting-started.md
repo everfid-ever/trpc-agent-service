@@ -215,6 +215,15 @@ bash scripts/minimal_backend_smoke.sh
 
 它随机生成 Compose 项目名以避免与本地 WebUI/IM 环境冲突，四个后端端口默认仅绑定 `127.0.0.1`（可通过 `TRPC_MINIMAL_PG_PORT` / `TRPC_MINIMAL_REDIS_PORT` / `TRPC_MINIMAL_QDRANT_PORT` / `TRPC_MINIMAL_VAULT_PORT` 覆盖），使用合成 secret 与合成 chunk，不读取任何外部凭据。成功退出后容器、卷与网络全部自动清理；失败时 Compose 日志保留在临时目录并打印路径。它不验证 IM、模型、S3、OTEL 或 Kubernetes 集成。
 
+仓库 CI 还会用 Go 1.21.13 的全新模块与编译缓存运行仓库门禁。若本机已安装该版本，可先执行：
+
+```bash
+bash scripts/ci_admission.sh
+bash scripts/ci_admission.sh --race
+```
+
+这两个命令不调用 Docker；最小后端验证仍使用前述 `minimal_backend_smoke.sh`。
+
 ## 4. 可执行角色
 
 统一二进制的调用方式：
