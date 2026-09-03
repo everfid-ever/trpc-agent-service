@@ -23,6 +23,18 @@ existing migration matrix and then runs the opt-in Gateway/Worker/Reply Queue
 slice. Use a disposable Compose volume; the test user must be allowed to
 create databases (the default `postgres` image user is).
 
+## 0909 minimal backend smoke
+
+```bash
+bash scripts/minimal_backend_smoke.sh
+```
+
+This runs isolated PostgreSQL 16, Redis 7, Qdrant and Vault KV v2 containers;
+it validates the migration matrix, Redis recovery contracts and real
+Vault/Qdrant adapters. It removes containers and volumes on success and keeps
+Compose logs in a temporary directory on failure. No external credentials are
+used and it does not test IM, model, S3, OTEL or Kubernetes integrations.
+
 ## Gateway/Worker (environment 2)
 
 Build and start the infrastructure plus application containers with:

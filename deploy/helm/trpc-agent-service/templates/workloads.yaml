@@ -1,6 +1,6 @@
 {{- range $roleName, $role := .Values.roles }}
 {{- if $role.enabled }}
-{{- $mountRuntimeSecrets := and $.Values.secretProvider.enabled (ne $roleName "audit-relay") (ne $roleName "audit-purge") }}
+{{- $mountRuntimeSecrets := and $.Values.secretProvider.enabled (ne $roleName "audit-relay") (ne $roleName "audit-purge") (ne $roleName "business-audit-purge") }}
 ---
 apiVersion: apps/v1
 kind: Deployment

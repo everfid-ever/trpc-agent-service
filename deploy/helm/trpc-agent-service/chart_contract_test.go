@@ -57,7 +57,7 @@ func TestAvailabilityAndNetworkContracts(t *testing.T) {
 		"readOnlyRootFilesystem: true",
 		"drop: [\"ALL\"]",
 	)
-	for _, role := range []string{"gateway:", "worker:", "channel:", "channel-delivery:", "preprocess:", "artifact:", "audit-relay:", "audit-query:", "audit-purge:"} {
+	for _, role := range []string{"gateway:", "worker:", "channel:", "channel-delivery:", "preprocess:", "artifact:", "audit-relay:", "audit-query:", "audit-purge:", "business-audit-purge:"} {
 		requireFragments(t, values, role)
 	}
 	requireFragments(t, values,

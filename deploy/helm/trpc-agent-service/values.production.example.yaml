@@ -16,7 +16,7 @@ migration:
   enabled: true
   # New cluster bootstrap. For upgrades, set the exact deployed source version.
   expectedCurrent: empty
-  target: "000034"
+  target: "000035"
   existingEnvSecret: trpc-agent-schema-migration-env
   serviceAccountAnnotations:
     example.invalid/workload-identity: replace-migration-identity
@@ -137,7 +137,7 @@ roles:
           ports: [{protocol: TCP, port: 5432}]
         - to:
             - namespaceSelector:
-                matchLabels: {kubernetes.io/metadata.name: data}
+              matchLabels: {kubernetes.io/metadata.name: data}
               podSelector:
                 matchLabels: {app.kubernetes.io/name: compliance-postgresql}
           ports: [{protocol: TCP, port: 5432}]
@@ -174,5 +174,23 @@ roles:
             - namespaceSelector:
                 matchLabels: {kubernetes.io/metadata.name: data}
               podSelector:
-                matchLabels: {app.kubernetes.io/name: compliance-postgresql}
+              matchLabels: {app.kubernetes.io/name: compliance-postgresql}
+          ports: [{protocol: TCP, port: 5432}]
+
+  business-audit-purge:
+    serviceAccountAnnotations:
+      example.invalid/workload-identity: replace-business-audit-purge-identity
+    existingEnvSecret: trpc-agent-business-audit-purge-env
+    secretProviderClass: ""
+    env:
+      TRPC_BUSINESS_AUDIT_PURGE_DRY_RUN: "true"
+      TRPC_BUSINESS_AUDIT_RETENTION: 4320h
+    networkPolicy:
+      ingress: []
+      egress:
+        - to:
+            - namespaceSelector:
+                matchLabels: {kubernetes.io/metadata.name: data}
+              podSelector:
+                matchLabels: {app.kubernetes.io/name: postgresql}
           ports: [{protocol: TCP, port: 5432}]

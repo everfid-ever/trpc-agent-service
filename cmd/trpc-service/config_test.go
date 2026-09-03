@@ -66,6 +66,39 @@ func TestLoadAuditRelayConfigRequiresIndependentCompliancePostgreSQL(t *testing.
 	}
 }
 
+func TestLoadBusinessAuditPurgeConfigDefaultsSafeAndRejectsUnsafeValues(t *testing.T) {
+	values := map[string]string{
+		"TRPC_BUSINESS_AUDIT_PURGE_POSTGRES_DSN": "postgres://purger:secret@postgres/service",
+		"TRPC_BUSINESS_AUDIT_PURGE_OWNER":        "business-audit-purge-1",
+	}
+	config, err := loadBusinessAuditPurgeConfig(mapEnvironment(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.DryRun || config.Retention != 180*24*time.Hour || config.MaxBatchSize != 1000 {
+		t.Fatalf("unexpected safe defaults: %+v", config)
+	}
+	for name, value := range map[string]string{
+		"TRPC_BUSINESS_AUDIT_PURGE_DRY_RUN":        "sometimes",
+		"TRPC_BUSINESS_AUDIT_RETENTION":            "1h",
+		"TRPC_BUSINESS_AUDIT_PURGE_MAX_ATTEMPTS":   "0",
+		"TRPC_BUSINESS_AUDIT_PURGE_MAX_BATCH_SIZE": "0",
+	} {
+		copy := cloneEnvironment(values)
+		copy[name] = value
+		if _, err := loadBusinessAuditPurgeConfig(mapEnvironment(copy)); err == nil {
+			t.Fatalf("%s=%q accepted", name, value)
+		}
+	}
+	for _, name := range []string{"TRPC_BUSINESS_AUDIT_PURGE_POSTGRES_DSN", "TRPC_BUSINESS_AUDIT_PURGE_OWNER"} {
+		copy := cloneEnvironment(values)
+		delete(copy, name)
+		if _, err := loadBusinessAuditPurgeConfig(mapEnvironment(copy)); err == nil {
+			t.Fatalf("missing %s accepted", name)
+		}
+	}
+}
+
 func TestLoadProductionConfigRejectsUnsafeLifecycleValuesWithoutLeakingSecrets(t *testing.T) {
 	for name, value := range map[string]string{
 		"TRPC_ARTIFACT_PUT_TIMEOUT":          "3m",

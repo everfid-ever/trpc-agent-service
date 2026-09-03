@@ -48,7 +48,7 @@ networkPolicy:
 migration:
   enabled: false
   expectedCurrent: empty
-  target: "000034"
+  target: "000035"
   timeout: 10m
   existingEnvSecret: trpc-agent-schema-migration-env
   serviceAccountAnnotations: {}
@@ -276,6 +276,27 @@ roles:
     env:
       TRPC_AUDIT_PURGE_DRY_RUN: "true"
       TRPC_AUDIT_PURGE_REQUIRE_APPROVAL: "true"
+    service: {enabled: false}
+    pdb: {enabled: false}
+    autoscaling: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {memory: 512Mi}
+    networkPolicy:
+      ingress: []
+      egress: []
+
+  business-audit-purge:
+    enabled: true
+    serviceAccountAnnotations: {}
+    replicaCount: 1
+    existingEnvSecret: trpc-agent-business-audit-purge-env
+    secretProviderClass: ""
+    terminationGracePeriodSeconds: 45
+    preStopSettleDelay: 2s
+    env:
+      TRPC_BUSINESS_AUDIT_PURGE_DRY_RUN: "true"
+      TRPC_BUSINESS_AUDIT_RETENTION: 4320h
     service: {enabled: false}
     pdb: {enabled: false}
     autoscaling: {enabled: false}

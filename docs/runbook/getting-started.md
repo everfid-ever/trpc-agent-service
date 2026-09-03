@@ -8,6 +8,7 @@
 |---|---|---|---|
 | 在本机直接聊天并验证完整内部链路 | `webui-local` Compose profile | 是 | 首次体验、开发联调、无 Feishu/WeCom 凭据 |
 | 验证 PostgreSQL、Redis 和故障恢复契约 | `runtime-test` Compose profile | 测试脚本创建并删除随机测试库 | CI、后端契约、故障恢复验证 |
+| 验证 PG16/Redis7/Qdrant/Vault 最小后端 | `bash scripts/minimal_backend_smoke.sh` | 是（成功后自动清理容器与卷） | 后端契约、真实 Vault/Qdrant adapter、环境固化 smoke |
 | 独立启动 Gateway 和 Worker | `gateway-worker` Compose profile | 否 | 已具备控制面数据、scoped Secret 和对象存储的集成环境 |
 | 部署全部生产角色 | [`deploy/helm/trpc-agent-service`](../../deploy/helm/trpc-agent-service/README.md) | 否 | Kubernetes、独立进程或正式部署系统 |
 
@@ -203,6 +204,16 @@ docker compose -f deploy/compose/docker-compose.m2.yml \
 ```bash
 docker compose -f deploy/compose/docker-compose.m2.yml down
 ```
+
+### 3.1 最小后端一键 smoke（PG16 / Redis7 / Qdrant / Vault）
+
+需要同时验证 PostgreSQL 16 迁移矩阵、Redis 恢复契约、真实 Vault KV v2 与真实 Qdrant adapter 时，用独立的一次性环境：
+
+```bash
+bash scripts/minimal_backend_smoke.sh
+```
+
+它随机生成 Compose 项目名以避免与本地 WebUI/IM 环境冲突，四个后端端口默认仅绑定 `127.0.0.1`（可通过 `TRPC_MINIMAL_PG_PORT` / `TRPC_MINIMAL_REDIS_PORT` / `TRPC_MINIMAL_QDRANT_PORT` / `TRPC_MINIMAL_VAULT_PORT` 覆盖），使用合成 secret 与合成 chunk，不读取任何外部凭据。成功退出后容器、卷与网络全部自动清理；失败时 Compose 日志保留在临时目录并打印路径。它不验证 IM、模型、S3、OTEL 或 Kubernetes 集成。
 
 ## 4. 可执行角色
 

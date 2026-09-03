@@ -34,7 +34,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|schema-migrate|audit-compliance-migrate|webui-local|prestop]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -75,6 +75,8 @@ func runRole(parent context.Context, getenv func(string) string, logger *log.Log
 		return runAuditQueryRole(parent, getenv, logger)
 	case "audit-purge":
 		return runAuditPurgeRole(parent, getenv, logger)
+	case "business-audit-purge":
+		return runBusinessAuditPurgeRole(parent, getenv, logger)
 	case "schema-migrate":
 		return runSchemaMigrate(parent, getenv, logger)
 	case "audit-compliance-migrate":

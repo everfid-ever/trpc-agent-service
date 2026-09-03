@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 34 {
+	if len(all) != 35 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -51,6 +51,35 @@ func TestKnowledgeIngestionMigrationContract(t *testing.T) {
 	}
 	for _, clause := range []string{"DROP TABLE IF EXISTS public.knowledge_probe", "DROP TABLE IF EXISTS public.knowledge_chunk",
 		"DROP TABLE IF EXISTS public.knowledge_manifest"} {
+		if !strings.Contains(migration.Down, clause) {
+			t.Errorf("down missing %q", clause)
+		}
+	}
+}
+
+func TestBusinessAuditRetentionMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[34]
+	if migration.Version != "000035" || migration.Name != "business_audit_retention" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{"CREATE TABLE public.business_audit_purge_batch (",
+		"CREATE TABLE public.business_audit_purge_certificate (", "audit_retention_purger",
+		"business_audit_watermark", "plan_business_audit_purge", "execute_business_audit_purge", "quarantine_business_audit_purge",
+		"state <> 'published'", "purge_authorized", "pg_has_role",
+		"session_user", "audit event is immutable", "watermark_drift", "divergence",
+		"business audit purge batch identity is immutable", "illegal business audit purge batch transition",
+		"business audit purge certificate is immutable", "p_chunk bigint", "LIMIT p_chunk", "not_before > clock_timestamp()",
+		"BEFORE UPDATE OR DELETE", "FOR UPDATE", "REVOKE ALL ON FUNCTION"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	for _, clause := range []string{"DROP TABLE IF EXISTS public.business_audit_purge_certificate",
+		"DROP TABLE IF EXISTS public.business_audit_purge_batch", "DROP ROLE IF EXISTS audit_retention_purger"} {
 		if !strings.Contains(migration.Down, clause) {
 			t.Errorf("down missing %q", clause)
 		}
