@@ -23,6 +23,16 @@ Redis, object storage, scanners, provider credentials, or ingress.
 
 ## Preflight
 
+先对仓库内无密钥示例生成可复现的结构证据（不需要在本机安装 Helm 或
+kubeconform）：
+
+```bash
+bash scripts/helm_admission.sh --output-dir /secure/change/trpc-helm-evidence
+```
+
+该输出只证明 chart 结构与角色 lifecycle 接线；随后仍须对本次变更的
+locator-only values 执行以下人工预检，且不得把凭据值写入渲染文件或 CI 日志：
+
 ```bash
 helm lint deploy/helm/trpc-agent-service \
   --strict --values /secure/change/production-values.yaml

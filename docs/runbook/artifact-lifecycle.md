@@ -48,12 +48,13 @@ AWS 凭据由官方 SDK default credential chain 解析，优先使用 Kubernete
 推荐复制模板后一键执行；本机没有 Go 时脚本自动使用 Docker：
 
 ```bash
-cp deploy/compose/.env.m3-im.example deploy/compose/.env.m3-im
+cp deploy/smoke/m3-im.env.example /secure/change/m3-im.env
+chmod 600 /secure/change/m3-im.env
 chmod 600 /absolute/secret/feishu.json /absolute/secret/wecom.json
-bash scripts/m3_im_provider_smoke_test.sh
+bash scripts/m3_im_provider_smoke_test.sh /secure/change/m3-im.env
 ```
 
-`.env.m3-im` 只填写 secret 文件绝对路径、App/Corp ID、飞书已有授权消息 ID 和企微测试用户 ID。`TRPC_M3_IM_PROVIDERS` 可取 `feishu`、`wecom` 或 `feishu,wecom`。测试只有在所有选中 Provider 返回有效 provider message ID 时通过。该入口验证真实 provider credential/API，不替代 production PostgreSQL binding locator 与 CSI Secret scope contract；后者由组合根和 repository/credential tests 验证。WeCom Bot、WebSocket/Webhook 与群聊 mention 不在支持范围，见[能力边界](../design/8.capability-boundaries.md)。
+`m3-im.env` 只填写 secret 文件绝对路径、App/Corp ID、飞书已有授权消息 ID 和企微测试用户 ID。`TRPC_M3_IM_PROVIDERS` 可取 `feishu`、`wecom` 或 `feishu,wecom`。测试只有在所有选中 Provider 返回有效 provider message ID 时通过。该入口验证真实 provider credential/API，不替代 production PostgreSQL binding locator 与 CSI Secret scope contract；后者由组合根和 repository/credential tests 验证。WeCom Bot、WebSocket/Webhook 与群聊 mention 不在支持范围，见[能力边界](../design/8.capability-boundaries.md)。
 
 ## 本地 WebUI Channel 验证
 

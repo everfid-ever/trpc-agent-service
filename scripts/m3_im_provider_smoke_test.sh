@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-default_config="${repo_root}/deploy/compose/.env.m3-im"
+default_config="${repo_root}/deploy/smoke/m3-im.env"
 config_file="${TRPC_M3_IM_CONFIG_FILE:-${default_config}}"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -10,9 +10,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 Usage: bash scripts/m3_im_provider_smoke_test.sh [config-file]
 
 Runs the opt-in M3 real Feishu/WeCom delivery smoke. The test sends a visible
-nonce message to each selected provider. Copy deploy/compose/.env.m3-im.example
-to deploy/compose/.env.m3-im, fill only locators and absolute credential-file
-paths, then run this script.
+nonce message to each selected provider. Copy deploy/smoke/m3-im.env.example
+to an owner-only file, fill only locators and absolute credential-file paths,
+then run this script.
 USAGE
   exit 0
 fi
@@ -28,13 +28,19 @@ if [[ $# -eq 1 ]]; then
   fi
 fi
 if [[ -f "${config_file}" ]]; then
+  mode="$(stat -f '%Lp' "${config_file}" 2>/dev/null || stat -c '%a' "${config_file}")"
+  mode="${mode#0}"
+  if (( (8#${mode} & 077) != 0 )); then
+    echo "config file must not be group/world-readable; run chmod 600 on it" >&2
+    exit 1
+  fi
   set -a
   # This is a local operator-owned shell environment file. It must contain
   # locators and credential-file paths only, never credential values.
   source "${config_file}"
   set +a
 elif [[ -z "${TRPC_M3_IM_PROVIDER_SMOKE:-}" ]]; then
-  echo "missing ${default_config}; copy deploy/compose/.env.m3-im.example and fill it first" >&2
+  echo "missing ${default_config}; copy deploy/smoke/m3-im.env.example to an owner-only file and fill it first" >&2
   exit 1
 fi
 

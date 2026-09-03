@@ -207,10 +207,10 @@ authorized provider environment becomes available in M3, copy the locator-only
 template and run the final provider smoke:
 
 ```bash
-cp deploy/compose/.env.m3-im.example deploy/compose/.env.m3-im
-# Create the credential JSON files referenced by .env.m3-im, then:
+cp deploy/smoke/m3-im.env.example /secure/change/m3-im.env
+# Create the credential JSON files referenced by m3-im.env, then:
 chmod 600 /absolute/path/to/feishu.json /absolute/path/to/wecom.json
-bash scripts/m3_im_provider_smoke_test.sh
+bash scripts/m3_im_provider_smoke_test.sh /secure/change/m3-im.env
 ```
 
 Set `TRPC_M3_IM_PROVIDERS=feishu` or `wecom` to validate one provider first;

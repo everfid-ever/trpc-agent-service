@@ -521,13 +521,18 @@ WeCom callback 验证材料使用严格 JSON：
 
 真实 Provider smoke 会发送可见消息。只允许对授权测试账号执行。
 
+先按 [外部 smoke evidence](../../deploy/evidence/external-smoke/README.md)
+生成 preflight；缺资源时记录 `SKIPPED` 或 `BLOCKED`，不要把本地 fixture
+结果写成 Provider 通过。
+
 ```bash
-cp deploy/compose/.env.m3-im.example deploy/compose/.env.m3-im
+cp deploy/smoke/m3-im.env.example /secure/change/m3-im.env
+chmod 600 /secure/change/m3-im.env
 chmod 600 /absolute/path/to/feishu.json /absolute/path/to/wecom.json
-bash scripts/m3_im_provider_smoke_test.sh
+bash scripts/m3_im_provider_smoke_test.sh /secure/change/m3-im.env
 ```
 
-`.env.m3-im` 只填写绝对凭据文件路径和非密钥 locator。可以通过 `TRPC_M3_IM_PROVIDERS=feishu`、`wecom` 或 `feishu,wecom` 选择 Provider。
+`m3-im.env` 只填写绝对凭据文件路径和非密钥 locator。可以通过 `TRPC_M3_IM_PROVIDERS=feishu`、`wecom` 或 `feishu,wecom` 选择 Provider。
 
 WebUI 成功不能替代这项验证。WeCom Bot/WebSocket 和群聊 mention 不属于 WeCom Agent Adapter 支持范围。
 
