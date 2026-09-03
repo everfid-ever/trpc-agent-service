@@ -17,8 +17,20 @@ if [[ "${go_version}" != go1.21.* ]]; then
   exit 2
 fi
 
-cache_root="$(mktemp -d "${TMPDIR:-/tmp}/trpc-ci-go.XXXXXX")"
-cleanup() { rm -rf "${cache_root}"; }
+# RUNNER_TEMP is job-private on GitHub Actions.  Fall back to TMPDIR for local
+# execution, but never touch a shared Go cache.  Some integration helpers can
+# leave files owned by another user in this directory; cleanup is best-effort
+# and must not turn a successful admission run into a failed job.
+temp_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+cache_root="$(mktemp -d "${temp_parent%/}/trpc-ci-go.XXXXXX")"
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if ! rm -rf -- "${cache_root}"; then
+    echo "warning: could not fully remove disposable Go cache ${cache_root}; the ephemeral runner will discard it" >&2
+  fi
+  exit "${status}"
+}
 trap cleanup EXIT
 export GOMODCACHE="${cache_root}/mod"
 export GOCACHE="${cache_root}/build"
