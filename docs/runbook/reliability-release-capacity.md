@@ -1,6 +1,6 @@
 # 可靠性、发布与容量验收 Runbook
 
-本文把现有的 durable runtime 能力整理为可执行的本地验收口径，并定义生产环境应采用的同一套安全语义。仓库的可执行边界仍是 Docker Desktop；Kubernetes 是推荐拓扑而非本仓库当前提供的部署清单。
+本文把现有的 durable runtime 能力整理为可执行的本地 Docker 验收口径。全部验证在 Docker Desktop 的 PostgreSQL、Redis、Worker、OTel 与 IM profile 上完成；不要求 Kubernetes、云数据库、远端告警或生产运维资源。
 
 ## 1. 验收范围与不可变规则
 
@@ -58,7 +58,7 @@
 
 ## 5. 容量评估方法
 
-容量必须用真实负载报告，不凭容器数量或 HPA 对象猜测。每个候选版本至少收集：
+容量基线必须用本地 Docker 的真实负载报告，不凭容器数量猜测。每个候选版本至少收集：
 
 - 峰值/持续 IM callback QPS，重复率和单租户热点比例；
 - p50/p95/p99 turn 时长、TTFT、输入/输出 token、模型超时率；
@@ -75,7 +75,7 @@ sql_tps ≈ turn_rps × (writes_per_turn + inbox/outbox/relay_writes)
 redis_qps ≈ broker_ops + active_sessions / lease_renew_seconds + reply/control/wakeup_ops
 ```
 
-`safe_model_concurrency_per_worker` 不是 CPU 核数：取模型限额、内存、p99 latency 和预留 30% 余量中的最小值。先从每节点 4–8 个模型并发、数据库连接池上限 32、lease TTL 至少为 p99 单次关键区间的 3 倍开始压测，再用观测结果调整；这些是起测假设，不能作为生产承诺。
+`safe_model_concurrency_per_worker` 不是 CPU 核数：取模型限额、内存、p99 latency 和预留 30% 余量中的最小值。先从每节点 4–8 个模型并发、数据库连接池上限 32、lease TTL 至少为 p99 单次关键区间的 3 倍开始本地压测，再用观测结果调整；这些是本机基线，不能外推成生产承诺。
 
 仓库提供确定性判定器，报告模板见 [capacity-report.example.json](examples/capacity-report.example.json)：
 
@@ -102,7 +102,7 @@ bash scripts/local_multinode_smoke.sh
 
 随后按 getting-started 的步骤串行完成 WebUI、Feishu 与 WeCom 的 real-account smoke。每次只启动一个 standalone IM profile。
 
-### 生产推荐拓扑：Kubernetes 或等价编排器
+### 非验收参考：生产推荐拓扑
 
 生产应将当前已有入口的 Channel callback、Gateway、Preprocess、Worker、Channel Delivery、Audit Relay、Audit Query/Purge 分开部署；Business Relay 只有在拥有实际进程入口后才能单列 Deployment。PostgreSQL 使用 HA/备份恢复策略，Redis 使用具备 failover 的托管或自管集群，审计库独立于业务库。每个角色独立 Deployment、ServiceAccount、Secret projection、NetworkPolicy、readiness/liveness、PDB 与资源限额。
 
@@ -112,7 +112,7 @@ bash scripts/local_multinode_smoke.sh
 - 网络仅放行角色所需方向：Channel→官方 IM、Worker→Model/Tool/Storage、所有角色→PostgreSQL/Redis/OTel；默认拒绝其余流量；
 - 发布按第 4 节 canary 扩大。PDB 保证 gateway/worker 至少一个 ready 副本，Worker 不能因 HPA 缩容直接中断未 drain work。
 
-当前仓库不提供 Kubernetes manifest、云数据库、告警路由或生产凭据；将此拓扑落地需要相应运维资源，不能把 Docker Compose 成功描述为生产部署已验收。
+本节仅保留架构参考。当前仓库不提供 Kubernetes manifest、云数据库、告警路由或生产凭据，且这些内容不属于本项目的验收条件。
 
 ## 7. 最终验收清单
 
@@ -129,7 +129,7 @@ bash scripts/local_multinode_smoke.sh
   其中覆盖 Worker drain、bounded Runner event drain、ACK 前崩溃 reclaim、relay publish/mark 间退出、callback/reply 重复投递、lease reclaim 与真实 PostgreSQL/Redis Runtime Slice。
 - [ ] PostgreSQL/Redis 短断后没有半提交；恢复或重启后 durable work 能收敛。
 - [ ] WebUI 真实 DeepSeek、Feishu 私聊/群 @、WeCom 单聊各自留下脱敏证据；standalone profile 串行切换。
-- [ ] 灰度 allowlist、copy-forward rollback、schema expand/rollback 观察窗和发布门禁被记录。
-- [ ] 真实负载报告经 `capacity-evaluate` 判定通过，或明确标为未进行容量验收。
+- [ ] 本地 fixture 的 ConfigSnapshot copy-forward rollback 与 schema migration 观察窗契约通过，并记录发布门禁。
+- [ ] 本地 Docker 负载报告经 `capacity-evaluate` 判定通过，或明确标为未进行容量验收。
 
-前四项为本地技术验收；生产拓扑、真实峰值容量和远端告警需要取得相应基础设施后，使用本 runbook 的同一门禁重新验收。
+以上全部是本地 Docker 技术验收。生产拓扑段落不产生额外资源需求，也不阻塞本次验收。
