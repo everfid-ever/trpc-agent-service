@@ -21,6 +21,12 @@ import (
 const (
 	defaultTimeout = 60 * time.Second
 	maximumTimeout = 10 * time.Minute
+
+	// The upstream OpenAI compatibility adapter treats DeepSeek as text-only
+	// by default, which is correct for the regular v4 models but would silently
+	// replace a vision image with an attachment-unavailable hint. Keep this
+	// narrow until another DeepSeek vision model is explicitly catalogued.
+	deepSeekVisionModel = "deepseek-v4-flash-vision-exp"
 )
 
 type ProfileReader interface {
@@ -87,8 +93,13 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 	if bufferSize > 0 {
 		opts = append(opts, openai.WithChannelBufferSize(bufferSize))
 	}
+	if isDeepSeekVisionModel(value.Model) {
+		opts = append(opts, openai.WithTextOnlyMessageContent(false))
+	}
 	return openai.New(value.Model, opts...), nil
 }
+
+func isDeepSeekVisionModel(name string) bool { return name == deepSeekVisionModel }
 
 func (r Resolver) resolveCredential(ctx context.Context, scope secrets.Scope, ref secrets.SecretRef) (secrets.SecretValue, func(), error) {
 	if r.Credentials == nil {

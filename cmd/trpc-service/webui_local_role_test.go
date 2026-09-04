@@ -201,7 +201,7 @@ func TestEnsureWebUILocalToolControlPlaneUpgradesOnce(t *testing.T) {
 	}
 	childRevision, err := apps.GetRevision(ctx, webUILocalTenantID, webUILocalChildAppID, childApp.CurrentRevision)
 	if err != nil || !webUILocalGraphRevisionReady(upgradedRevision, childRevision) || !webUILocalLLMRevisionReady(childRevision) ||
-		len(childRevision.ToolRefs) != 1 || childRevision.ToolRefs[0].ID != localnote.ID {
+		childRevision.ModelProfileVersion != webUILocalModelVersion || len(childRevision.ToolRefs) != 1 || childRevision.ToolRefs[0].ID != localnote.ID {
 		t.Fatalf("revision=%#v err=%v", upgradedRevision, err)
 	}
 	priorRevision, priorAppVersion, priorChildVersion, priorConfigVersion, priorTenantVersion :=

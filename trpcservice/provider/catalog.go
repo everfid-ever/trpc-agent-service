@@ -74,7 +74,9 @@ type schemaKey struct {
 func DeepSeekModelSchema() Schema {
 	return Schema{
 		Kind: KindModel, Name: "deepseek", SchemaVersion: 1,
-		AllowedModels:   []string{"deepseek-v4-flash", "deepseek-v4-pro"},
+		// The local service deliberately has one capability-complete default:
+		// image-capable chat. Text requests are valid inputs to this model too.
+		AllowedModels:   []string{"deepseek-v4-flash-vision-exp"},
 		EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.deepseek.com"},
 		OptionRules: map[string]OptionRule{
 			"timeout_ms":          {Type: OptionInteger, Default: "60000", Min: 100, Max: 600000},

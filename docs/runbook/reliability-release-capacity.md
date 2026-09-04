@@ -140,6 +140,7 @@ bash scripts/local_dependency_recovery_smoke.sh
   其中覆盖 Worker drain、bounded Runner event drain、ACK 前崩溃 reclaim、relay publish/mark 间退出、callback/reply 重复投递、lease reclaim 与真实 PostgreSQL/Redis Runtime Slice。
 - [ ] `local_dependency_recovery_smoke.sh` 证明 PostgreSQL/Redis 短断会使两个节点 unready，恢复后两个节点无需重启即可重新 ready；durable work 不发生半提交。
 - [ ] WebUI 真实 DeepSeek、Feishu 私聊/群 @、WeCom 单聊各自留下脱敏证据；standalone profile 串行切换。
+- [ ] Feishu 私聊与 WeCom 单聊各发送一张不超过 10 MiB 的新 JPEG、PNG、GIF 或 WebP 图片，确认该 standalone profile 的 `/readyz`、ClamAV 容器健康、provider media download、tenant-scoped artifact、视觉模型输入与最终文本回复均有脱敏证据。非图片文件只验证安全接收、扫描和审计；当前本地 DeepSeek Profile 不把 PDF/Office 文件伪装为可理解的模型输入。飞书 media-only 群消息按缺少可验证 @mention 的安全规则忽略，不作为失败。
 - [ ] 本地 fixture 的 ConfigSnapshot copy-forward rollback 与 schema migration 观察窗契约通过，并记录发布门禁。
 - [ ] 本地 Docker 负载报告经 `capacity-evaluate` 判定通过，或明确标为未进行容量验收。
 

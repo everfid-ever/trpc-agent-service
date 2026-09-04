@@ -40,7 +40,7 @@ func TestProfileCredentialInvalidationPostgreSQL16(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository := New(db, catalog)
-	value, err := repository.PublishModel(context.Background(), provider.ModelProfileSnapshot{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileID: "credential-model-contract", ProfileKey: "credential-model-contract", DisplayName: "Credential contract", Status: "active", SchemaVersion: 1, Provider: "deepseek", Model: "deepseek-v4-flash", Endpoint: "https://api.deepseek.com", SecretRef: secrets.SecretRef{Ref: "vault://tenant/model", Version: 1}, Version: 1})
+	value, err := repository.PublishModel(context.Background(), provider.ModelProfileSnapshot{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", ProfileID: "credential-model-contract", ProfileKey: "credential-model-contract", DisplayName: "Credential contract", Status: "active", SchemaVersion: 1, Provider: "deepseek", Model: "deepseek-v4-flash-vision-exp", Endpoint: "https://api.deepseek.com", SecretRef: secrets.SecretRef{Ref: "vault://tenant/model", Version: 1}, Version: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

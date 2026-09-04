@@ -113,9 +113,18 @@ func TestResolverClearsCredentialBytesOnProviderError(t *testing.T) {
 	}
 }
 
+func TestDeepSeekVisionModelIsExplicitlyOptedOutOfTextOnlyCompatibilityMode(t *testing.T) {
+	if !isDeepSeekVisionModel("deepseek-v4-flash-vision-exp") {
+		t.Fatal("vision model must preserve image content parts")
+	}
+	if isDeepSeekVisionModel("deepseek-v4-flash-vision") {
+		t.Fatal("only the catalogued vision model may bypass text-only compatibility")
+	}
+}
+
 func validProfile() provider.ModelProfileSnapshot {
 	return provider.ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "model", Status: "active", SchemaVersion: 1,
-		Provider: "deepseek", Model: "deepseek-v4-flash", Endpoint: "https://api.deepseek.com",
+		Provider: "deepseek", Model: "deepseek-v4-flash-vision-exp", Endpoint: "https://api.deepseek.com",
 		Options:   map[string]string{"timeout_ms": "1000", "channel_buffer_size": "32"},
 		SecretRef: secrets.SecretRef{Ref: "secret/model", Version: 9}, ContentDigest: "digest", Version: 3}
 }

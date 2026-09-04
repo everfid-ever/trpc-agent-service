@@ -98,6 +98,8 @@ https://<temporary-host>.trycloudflare.com/callbacks/feishu?route_key=local-feis
 
 使用同一份 `Verification Token` 和 `Encrypt Key` 完成 URL 验证，订阅 `im.message.receive_v1`，开启机器人能力及 `im:message` 权限，并在每次变更后发布应用版本。先私聊机器人发送一条新消息；成功时机器人会调用 DeepSeek 并回复。群聊验收通过“群设置 → 群机器人 → 添加机器人”将机器人加入群，再从 @ 菜单选择机器人发送消息；普通未 @ 的群消息会被安全地忽略。
 
+图片/文件验收必须在**私聊**中发送一张不超过 10 MiB 的新媒体。服务会用该应用的官方 Media API 下载原始内容、由本机 ClamAV 扫描、写入 PostgreSQL 的 tenant-scoped 临时制品，再交给 Runner；本地 Profile 的不可变 v2 版本固定为 `deepseek-v4-flash-vision-exp`，因此 JPEG、PNG、GIF 或 WebP 图片会作为视觉输入交给模型。DeepSeek 的该接口不提供通用 PDF/Office 文档理解：非图片文件仍会被安全下载、扫描和审计，但应明确提示当前本地模型不解析它们，而非谎称已经读取。`/readyz` 只有在 ClamAV 可用时才返回成功。当前本地 fixture 的输入 DLP 策略明确为 disabled（记录在制品元数据中），不应把它表述为已接入远端 DLP。飞书媒体-only 群消息没有可验证的 @mention 证据，因此会被安全忽略；请先用私聊验证媒体链路。
+
 排查顺序：
 
 1. `docker logs trpc-agent-m2-feishu-local-1`：`app secret invalid` 表示 `FEISHU_APP_SECRET` 与 App ID 不匹配；更换 Secret 后必须重建服务。
@@ -150,7 +152,7 @@ docker run --rm --name trpc-wecom-tunnel \
 https://<temporary-host>.trycloudflare.com/callbacks/wecom?route_key=local-wecom
 ```
 
-`Token` 与 `EncodingAESKey` 必须与 `wecom.env` 一致；保存时企业微信会发起 GET URL 验证，本地服务完成回调验签并返回 echostr 后握手成功。先在手机端给该应用发一条消息；成功时应用会调用 DeepSeek 并通过官方 Reply API 回复。
+`Token` 与 `EncodingAESKey` 必须与 `wecom.env` 一致；保存时企业微信会发起 GET URL 验证，本地服务完成回调验签并返回 echostr 后握手成功。先在手机端给该应用发一条消息；成功时应用会调用 DeepSeek 并通过官方 Reply API 回复。媒体验收同样发送一张不超过 10 MiB 的新 JPEG、PNG、GIF 或 WebP 图片；它会经过企业微信官方 Media API、本机 ClamAV 与 tenant-scoped 临时制品后，以视觉模型输入进入 Runner。非图片文件只做安全接收和审计，不宣称其内容已被模型读取。
 
 排查顺序：
 
@@ -219,5 +221,5 @@ docker compose -f deploy/compose/docker-compose.m2.yml \
 - 结构化 JSON 日志默认脱敏；`TRPC_LOG_LEVEL` 可设 `debug|info|warn|error`，`TRPC_LOG_MASKING_LEVEL` 可设 `none|basic|strict`。
 - 节点故障、IM 重试、PostgreSQL/Redis 短断、模型/Tool 超时的降级策略，以及灰度、回滚、容量和生产推荐拓扑，统一见 [`reliability-release-capacity.md`](reliability-release-capacity.md)。
 - Collector 或 Jaeger 停止不会阻断本地业务链路；Trace 可见性是本地诊断辅助，而非远端 SLO 告警。
-- MinIO、ClamAV、DLP 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。Feishu 与 WeCom 只分别支持第 3、4 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
+- MinIO、远端 DLP 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。ClamAV 是 Feishu/WeCom 图片或文件 smoke 的本地必需依赖，由 Compose 自动启动；它的官方多架构镜像首次拉取与病毒库初始化可能需要数分钟。Feishu 与 WeCom 只分别支持第 3、4 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
 - `deploy/compose/secrets/` 已被 Git 忽略；不得用 `git add -f` 加入 API Key 或其他凭据。

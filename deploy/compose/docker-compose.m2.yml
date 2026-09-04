@@ -46,6 +46,17 @@ services:
       timeout: 3s
       retries: 20
 
+  clamav:
+    # `1.4_base` is amd64-only. Pin the full official multi-arch image so the
+    # local media verification stack also works on Apple Silicon Docker Desktop.
+    image: clamav/clamav:1.4.6-debian13-slim
+    profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping=1 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+
   minio:
     image: minio/minio:RELEASE.2025-02-28T09-55-16Z
     profiles: ["gateway-worker"]
@@ -111,6 +122,7 @@ services:
     environment:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
       TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
@@ -125,6 +137,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
       otel-collector:
         condition: service_started
@@ -146,6 +160,7 @@ services:
     environment:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
       TRPC_FEISHU_LOCAL_ENABLED: "true"
@@ -161,6 +176,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
       otel-collector:
         condition: service_started
@@ -182,6 +199,7 @@ services:
     environment:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME: "true"
       TRPC_WECOM_LOCAL_ENABLED: "true"
@@ -197,6 +215,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
       otel-collector:
         condition: service_started
@@ -240,6 +260,7 @@ services:
     environment:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
       TRPC_WEBUI_LOCAL_INSTANCE_ID: node-a
@@ -253,6 +274,8 @@ services:
     depends_on:
       webui-bootstrap:
         condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
       otel-collector:
         condition: service_started
 
@@ -268,6 +291,7 @@ services:
     environment:
       TRPC_POSTGRES_DSN: postgres://${M2_POSTGRES_USER:-postgres}:${M2_POSTGRES_PASSWORD:-postgres}@postgres:5432/${M2_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
       TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS: clamav:3310
       TRPC_LISTEN_ADDRESS: ":8080"
       TRPC_WEBUI_DEEPSEEK_KEY_FILE: /run/secrets/deepseek_api_key
       TRPC_WEBUI_LOCAL_INSTANCE_ID: node-b
@@ -281,6 +305,8 @@ services:
     depends_on:
       webui-bootstrap:
         condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
       otel-collector:
         condition: service_started
 

@@ -51,6 +51,7 @@ import (
 	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/clamav"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
@@ -59,6 +60,7 @@ import (
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
@@ -81,6 +83,8 @@ const (
 	webUILocalBindingID      = "local-webui"
 	webUILocalAccountID      = "local-webui"
 	webUILocalModelID        = "deepseek-local"
+	webUILocalModelVersion   = int64(2)
+	webUILocalModelName      = "deepseek-v4-flash-vision-exp"
 	webUILocalRouteKey       = "local-webui"
 	webUILocalToken          = "local-webui-token-change-me"
 	feishuLocalBindingID     = "local-feishu"
@@ -88,13 +92,13 @@ const (
 	wecomLocalBindingID      = "local-wecom"
 	wecomLocalRouteKey       = "local-wecom"
 	payloadKeyRef            = "secret://local/payload-key"
-	webUILocalInstruction    = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
+	webUILocalInstruction    = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available. When an image content part is present, it was securely attached to this request: analyze its visible content directly and do not claim that the image or attachment was unavailable."
 )
 
 type webUILocalConfig struct {
 	PostgresDSN, RedisAddress, ListenAddress                   string
 	RedisEnvironment, SecretRoot, APIKeyFile                   string
-	RouteKey, Token, InstanceID                                string
+	RouteKey, Token, InstanceID, ClamAVAddress                 string
 	ExclusiveRuntime                                           bool
 	FeishuEnabled                                              bool
 	FeishuAppID, FeishuAppSecret                               string
@@ -143,6 +147,10 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err := redis.Ping(parent).Err(); err != nil {
 		return errors.New("redis unavailable")
 	}
+	malware := clamav.Scanner{Address: configValue.ClamAVAddress, MaxBytes: 10 << 20}
+	if err := malware.Probe(parent); err != nil {
+		return errors.New("malware scanner unavailable")
+	}
 	releaseRuntimeLock, err := acquireWebUILocalRuntimeLock(parent, db, configValue.ExclusiveRuntime)
 	if err != nil {
 		return err
@@ -175,12 +183,15 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	// construction is therefore unconditional; the profile switches only gate
 	// ingress endpoints and bootstrap, and a disabled channel enqueues no
 	// reply outbox work because its callbacks are not mounted.
+	providerHTTP := &http.Client{Timeout: 30 * time.Second}
 	sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: bootstrap.SecretStore}
+	feishuCredentials := &feishu.CredentialProvider{Secrets: sendCredentials, Client: providerHTTP}
+	wecomTokens := &wecom.TokenProvider{Secrets: sendCredentials, Client: providerHTTP}
 	feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{
-		Credentials: &feishu.CredentialProvider{Secrets: sendCredentials},
+		Credentials: feishuCredentials,
 		NewClient:   func(appID, appSecret string) *lark.Client { return lark.NewClient(appID, appSecret) },
 	}}}
-	wecomAdapter := &wecom.Adapter{Protocol: wecomprotocol.Verifier{}, Sender: wecom.OfficialSender{Tokens: &wecom.TokenProvider{Secrets: sendCredentials}}}
+	wecomAdapter := &wecom.Adapter{Protocol: wecomprotocol.Verifier{}, Sender: wecom.OfficialSender{Tokens: wecomTokens}}
 	adapters = append(adapters, feishuAdapter, wecomAdapter)
 	if configValue.FeishuEnabled {
 		feishuEndpoint, err = newChannelEndpoint(feishuAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
@@ -254,8 +265,13 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		}}
 
 	dispatcher := gateway.BrokerDispatcher{Tasks: tasks, Bindings: configRepo}
+	media := preprocess.MediaStager{Fetcher: preprocess.MediaRouter{
+		Feishu: feishu.OfficialMediaFetcher{Tokens: feishuCredentials, Client: providerHTTP},
+		WeCom:  wecom.OfficialMediaFetcher{Tokens: wecomTokens, Client: providerHTTP},
+	}, Malware: malware, DLP: localDisabledDLP{}, Artifacts: artifactpostgres.New(db), MaxBytes: 10 << 20}
 	preprocessor := preprocess.Worker{Store: preprocessStore, Payloads: payloads, Dispatcher: dispatcher,
-		Owner: configValue.instanceName("preprocess"), LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8, Telemetry: telemetryProvider}
+		Owner: configValue.instanceName("preprocess"), LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8,
+		Media: &media, ArtifactRetention: 24 * time.Hour, Telemetry: telemetryProvider}
 	dispatchRelay := relay.DispatchRelay{Outbox: inbox, Tasks: tasks, Broker: streamBroker, Owner: configValue.instanceName("dispatch-relay"),
 		ShardCount: 4, ClaimTTL: 30 * time.Second, ClaimRenewInterval: 10 * time.Second, PollInterval: 100 * time.Millisecond,
 		Telemetry: telemetryProvider}
@@ -303,7 +319,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	}
 	mux.HandleFunc("/livez", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
-		if db.PingContext(request.Context()) != nil || redis.Ping(request.Context()).Err() != nil {
+		if db.PingContext(request.Context()) != nil || redis.Ping(request.Context()).Err() != nil || malware.Probe(request.Context()) != nil {
 			http.Error(writer, "not ready", http.StatusServiceUnavailable)
 			return
 		}
@@ -428,6 +444,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
 		Token:                   valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
 		InstanceID:              valueOr(getenv("TRPC_WEBUI_LOCAL_INSTANCE_ID"), "standalone"),
+		ClamAVAddress:           valueOr(getenv("TRPC_WEBUI_LOCAL_CLAMAV_ADDRESS"), "clamav:3310"),
 		ExclusiveRuntime:        strings.EqualFold(strings.TrimSpace(getenv("TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME")), "true"),
 		FeishuEnabled:           strings.EqualFold(strings.TrimSpace(getenv("TRPC_FEISHU_LOCAL_ENABLED")), "true"),
 		FeishuAppID:             strings.TrimSpace(getenv("FEISHU_APP_ID")),
@@ -442,7 +459,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		WeComEncodingAESKey:     strings.TrimSpace(getenv("WECOM_ENCODING_AES_KEY")),
 	}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
-		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
+		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || strings.TrimSpace(value.ClamAVAddress) != value.ClamAVAddress || value.ClamAVAddress == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
 		return webUILocalConfig{}, errors.New("required WebUI local configuration is missing or invalid")
 	}
 	if !validWebUILocalInstanceID(value.InstanceID) {
@@ -546,13 +563,13 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		}
 		_, err = providers.PublishModel(ctx, provider.ModelProfileSnapshot{TenantID: webUILocalTenantID,
 			ProfileID: webUILocalModelID, ProfileKey: "deepseek-local", DisplayName: "DeepSeek Local", Status: "active",
-			SchemaVersion: 1, Provider: "deepseek", Model: "deepseek-v4-flash", Endpoint: "https://api.deepseek.com",
-			SecretRef: secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, Version: 1})
+			SchemaVersion: 1, Provider: "deepseek", Model: webUILocalModelName, Endpoint: "https://api.deepseek.com",
+			SecretRef: secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, Version: webUILocalModelVersion})
 		if err != nil {
 			return webUILocalBootstrap{}, err
 		}
 		policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow,
-			AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: 1}},
+			AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: webUILocalModelVersion}},
 			Tools:         []governance.ToolRule{{ToolID: localnote.ID, Version: localnote.Version, Dangerous: true, ConfirmationSupported: true}},
 			InputDLP:      governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
 		policyDigest, _, digestErr := governance.PolicyDigest(policy)
@@ -573,7 +590,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		draft, draftErr := apps.CreateDraft(ctx, agentapp.CreateDraftInput{TenantID: webUILocalTenantID,
 			AgentAppID: webUILocalAppID, ExpectedAppVersion: app.Version,
 			Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: webUILocalInstruction,
-				ModelProfileID: webUILocalModelID, ModelProfileVersion: 1,
+				ModelProfileID: webUILocalModelID, ModelProfileVersion: webUILocalModelVersion,
 				ToolRefs: []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}}}, ChangeMetadata: appMetadata})
 		if draftErr != nil {
 			return webUILocalBootstrap{}, draftErr
@@ -598,6 +615,9 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	}
 	snapshot, err := configs.GetCurrent(ctx, webUILocalTenantID)
 	if err != nil {
+		return webUILocalBootstrap{}, err
+	}
+	if err = ensureWebUILocalModel(ctx, providers); err != nil {
 		return webUILocalBootstrap{}, err
 	}
 	root, snapshot, err = ensureWebUILocalToolControlPlane(ctx, tenants, apps, configs, governanceStore, root, snapshot)
@@ -660,7 +680,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		{secrets.Scope{TenantID: webUILocalTenantID, Subject: webUILocalTenantID, Purpose: secrets.PurposeTenantSession,
 			ResourceID: webUILocalTenantID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/session", Version: 1}, deriveLocalSecret("session", configValue.Token)},
 		{secrets.Scope{TenantID: webUILocalTenantID, Subject: "worker-model", Purpose: secrets.PurposeModelCall,
-			ResourceID: webUILocalModelID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, apiKey},
+			ResourceID: webUILocalModelID, ResourceVersion: webUILocalModelVersion}, secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, apiKey},
 	}
 	if configValue.FeishuEnabled {
 		secretValues = append(secretValues,
@@ -749,6 +769,32 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	}
 	return webUILocalBootstrap{Tenant: root, Config: snapshot, Route: route, SecretRoot: configValue.SecretRoot,
 		FeishuRoute: feishuRoute, WeComRoute: wecomRoute, PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
+}
+
+// ensureWebUILocalModel keeps the one local, capability-complete model
+// profile immutable and exact. Version 2 is retained as the stable profile
+// version so existing local Docker volumes continue to run without a reset.
+func ensureWebUILocalModel(ctx context.Context, providers *providerpostgres.Repository) error {
+	if ctx == nil || providers == nil {
+		return errors.New("invalid WebUI local model repository")
+	}
+	current, err := providers.GetModel(ctx, webUILocalTenantID, webUILocalModelID, webUILocalModelVersion)
+	if err == nil {
+		if current.Provider != "deepseek" || current.Model != webUILocalModelName || current.Endpoint != "https://api.deepseek.com" ||
+			current.SecretRef != (secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}) {
+			return errors.New("WebUI local model revision is incompatible")
+		}
+		return nil
+	}
+	if !errors.Is(err, runtime.ErrNotFound) {
+		return err
+	}
+	_, err = providers.PublishModel(ctx, provider.ModelProfileSnapshot{
+		TenantID: webUILocalTenantID, ProfileID: webUILocalModelID, ProfileKey: "deepseek-local", DisplayName: "DeepSeek Local", Status: "active",
+		SchemaVersion: 1, Provider: "deepseek", Model: webUILocalModelName, Endpoint: "https://api.deepseek.com",
+		SecretRef: secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, Version: webUILocalModelVersion,
+	})
+	return err
 }
 
 type webUILocalPolicyStore interface {
@@ -952,7 +998,7 @@ func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, m
 	draft, err := apps.CreateDraft(ctx, agentapp.CreateDraftInput{TenantID: webUILocalTenantID,
 		AgentAppID: webUILocalChildAppID, ExpectedAppVersion: app.Version,
 		Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: webUILocalInstruction,
-			ModelProfileID: webUILocalModelID, ModelProfileVersion: 1,
+			ModelProfileID: webUILocalModelID, ModelProfileVersion: webUILocalModelVersion,
 			ToolRefs: []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}}}, ChangeMetadata: metadata})
 	if err != nil {
 		return agentapp.Revision{}, err
@@ -968,7 +1014,7 @@ func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, m
 
 func webUILocalLLMRevisionReady(value agentapp.Revision) bool {
 	if value.AgentKind != agentapp.AgentKindLLM || value.Instruction != webUILocalInstruction ||
-		value.ModelProfileID != webUILocalModelID || value.ModelProfileVersion != 1 {
+		value.ModelProfileID != webUILocalModelID || value.ModelProfileVersion != webUILocalModelVersion {
 		return false
 	}
 	for _, ref := range value.ToolRefs {
@@ -997,7 +1043,7 @@ func webUILocalPolicyReady(value governance.PolicyV1) bool {
 	}
 	modelAllowed := false
 	for _, ref := range value.AllowedModels {
-		if ref.ID == webUILocalModelID && ref.Version == 1 {
+		if ref.ID == webUILocalModelID && ref.Version == webUILocalModelVersion {
 			modelAllowed = true
 			break
 		}
@@ -1014,13 +1060,13 @@ func webUILocalPolicyReady(value governance.PolicyV1) bool {
 }
 
 func upsertWebUILocalModelRef(values []governance.VersionedRef) []governance.VersionedRef {
-	result := append([]governance.VersionedRef(nil), values...)
-	for _, ref := range result {
-		if ref.ID == webUILocalModelID && ref.Version == 1 {
-			return result
+	result := make([]governance.VersionedRef, 0, len(values)+1)
+	for _, ref := range values {
+		if ref.ID != webUILocalModelID {
+			result = append(result, ref)
 		}
 	}
-	return append(result, governance.VersionedRef{ID: webUILocalModelID, Version: 1})
+	return append(result, governance.VersionedRef{ID: webUILocalModelID, Version: webUILocalModelVersion})
 }
 
 func upsertWebUILocalToolRule(values []governance.ToolRule) []governance.ToolRule {
