@@ -86,6 +86,16 @@ go run ./cmd/capacity-evaluate \
 
 模板会被判定器以 `evidence_incomplete` 拒绝，不是容量通过证据。真实报告必须替换时间窗口、镜像 digest、观测值和至少两个不可变 evidence reference；`accepted=true` 还要求 backlog 清零、audit 无 dead letter、指标覆盖完整且满足选定阈值。
 
+在已获得模型额度授权时，可先用下列受控客户端建立真实链路的小并发基线。它不会输出模型回复或密钥，每个请求使用独立 session，并等待 durable reply：
+
+```bash
+go run ./cmd/local-webui-load \
+  -base-url http://127.0.0.1:58086 \
+  -requests 8 -concurrency 4 -timeout 2m
+```
+
+该命令只产生端到端完成数、失败数、p95 与完成吞吐，适合验证本地 DeepSeek、PostgreSQL、Redis、Worker 和 reply relay 的闭环；它不是长期压测工具，也不会单独构成 `capacity-evaluate` 的容量验收证据。
+
 ## 6. 部署方案
 
 ### 最小可运行部署：Docker Desktop
