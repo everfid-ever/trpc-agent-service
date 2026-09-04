@@ -119,7 +119,7 @@ func finite(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value
 func invalidEvidence(values []string) bool {
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if !text(value) || len(value) > 512 {
+		if !text(value) || len(value) > 512 || strings.HasPrefix(value, "example://") {
 			return true
 		}
 		if _, exists := seen[value]; exists {

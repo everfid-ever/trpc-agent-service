@@ -217,6 +217,7 @@ docker compose -f deploy/compose/docker-compose.m2.yml \
 ## 7. 本地边界
 
 - 结构化 JSON 日志默认脱敏；`TRPC_LOG_LEVEL` 可设 `debug|info|warn|error`，`TRPC_LOG_MASKING_LEVEL` 可设 `none|basic|strict`。
+- 节点故障、IM 重试、PostgreSQL/Redis 短断、模型/Tool 超时的降级策略，以及灰度、回滚、容量和生产推荐拓扑，统一见 [`reliability-release-capacity.md`](reliability-release-capacity.md)。
 - Collector 或 Jaeger 停止不会阻断本地业务链路；Trace 可见性是本地诊断辅助，而非远端 SLO 告警。
 - MinIO、ClamAV、DLP 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。Feishu 与 WeCom 只分别支持第 3、4 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
 - `deploy/compose/secrets/` 已被 Git 忽略；不得用 `git add -f` 加入 API Key 或其他凭据。

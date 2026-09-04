@@ -40,3 +40,12 @@ func TestEvaluateRejectsBacklogStaleMetricsAndMissingScaleUp(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 }
+
+func TestEvaluateRejectsExampleEvidence(t *testing.T) {
+	report := acceptedReport()
+	report.EvidenceRefs = []string{"example://trace", "example://audit"}
+	result := Evaluate(report)
+	if result.Accepted || !slices.Contains(result.Violations, "evidence_incomplete") {
+		t.Fatalf("result=%+v", result)
+	}
+}
