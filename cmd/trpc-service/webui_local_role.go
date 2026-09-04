@@ -346,12 +346,24 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 			}
 		}
 	})
-	start("dispatch relay", dispatchRelay.Run)
-	start("worker", workerConsumer.Run)
-	start("reply relay", replyRelay.Run)
-	start("wakeup relay", wakeupRelay.Run)
-	start("wakeup dispatcher", wakeupDispatcher.Run)
-	start("delivery", deliverySupervisor.Run)
+	start("dispatch relay", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui dispatch relay", dispatchRelay.Run, 250*time.Millisecond, logger)
+	})
+	start("worker", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui worker", workerConsumer.Run, 250*time.Millisecond, logger)
+	})
+	start("reply relay", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui reply relay", replyRelay.Run, 250*time.Millisecond, logger)
+	})
+	start("wakeup relay", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui wakeup relay", wakeupRelay.Run, 250*time.Millisecond, logger)
+	})
+	start("wakeup dispatcher", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui wakeup dispatcher", wakeupDispatcher.Run, 250*time.Millisecond, logger)
+	})
+	start("delivery", func(ctx context.Context) error {
+		return runRecoverableLoop(ctx, "webui delivery", deliverySupervisor.Run, 250*time.Millisecond, logger)
+	})
 	start("http", func(context.Context) error { return server.ListenAndServe() })
 	logger.Printf("WebUI local node=%q ready: http://localhost%s/webui/ route=%q account=%q model=deepseek",
 		configValue.InstanceID, configValue.ListenAddress, configValue.RouteKey, webUILocalAccountID)

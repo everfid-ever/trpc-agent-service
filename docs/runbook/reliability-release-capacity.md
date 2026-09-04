@@ -19,7 +19,7 @@
 | Worker 节点被终止 | 停止 lease 续租；未完成 delivery 留在 Redis pending | 租约到期后其他 Worker reclaim；旧 fence 的 CommitTurn 被拒绝 | 终态唯一、旧 owner 不能覆盖新 owner |
 | IM 重投、429 或 5xx | callback 由 Inbox 去重；Reply relay 不直接调用 Provider；Delivery Ledger 先 claim segment | Provider retry 进入 `retry_wait`，按 Retry-After 或有界退避重试；sent segment 不再发送 | 相同 IM message 只形成一个 request；已发送分片不重复 |
 | PostgreSQL 短暂不可用 | callback 不 ACK；依赖 probe 失败时 `/readyz` 为 503；已有事务整体回滚 | Provider 重投 callback；Outbox/lease 在数据库恢复后重放或接管 | 无只写 event、只推进 input seq 或只发 reply 的半提交 |
-| Redis 短暂不可用 | 角色 unready；不把 broker 状态当成功；已提交 Outbox 保留 | Redis 恢复后 relay 重发；若进程因 broker 错误退出，由编排器重启并 reclaim | durable state 不丢，恢复后只产生一次业务效果 |
+| Redis 短暂不可用 | 角色 unready；不把 broker 状态当成功；已提交 Outbox 保留 | WebUI 本地组合的 broker/relay/delivery consumer 以有界退避重连；Redis 恢复后 relay 重发 | durable state 不丢，恢复后只产生一次业务效果 |
 | 模型超时/网络错误 | 请求 context 取消模型 HTTP 调用，未提交 terminal reply | execution 保持可重放；当前本地模型 Profile 默认 60 秒，可设 `timeout_ms`（100ms–10min） | 不发送半截回复；重放结果仍受 session fence/input gate 约束 |
 | 工具失败 | 无副作用 Tool 可随 execution reclaim 重试，但完整结果前不写 terminal reply；有副作用 Tool 的 timeout/未知结果标为 ambiguous，禁止盲重试 | 人工对账或工具自身 idempotency key 后才继续 | 不会因 timeout 重复执行外部副作用 |
 | Telemetry/Jaeger 不可用 | 有界 telemetry 降级，业务路径继续 | Collector 恢复后继续导出；Audit 走独立 Outbox | Trace 可丢，Audit intent 不丢 |
@@ -98,6 +98,7 @@ go run ./cmd/capacity-evaluate \
 bash scripts/ci_admission.sh
 bash scripts/minimal_backend_smoke.sh
 bash scripts/local_multinode_smoke.sh
+bash scripts/local_dependency_recovery_smoke.sh
 ```
 
 随后按 getting-started 的步骤串行完成 WebUI、Feishu 与 WeCom 的 real-account smoke。每次只启动一个 standalone IM profile。
@@ -127,7 +128,7 @@ bash scripts/local_multinode_smoke.sh
   ```
 
   其中覆盖 Worker drain、bounded Runner event drain、ACK 前崩溃 reclaim、relay publish/mark 间退出、callback/reply 重复投递、lease reclaim 与真实 PostgreSQL/Redis Runtime Slice。
-- [ ] PostgreSQL/Redis 短断后没有半提交；恢复或重启后 durable work 能收敛。
+- [ ] `local_dependency_recovery_smoke.sh` 证明 PostgreSQL/Redis 短断会使两个节点 unready，恢复后两个节点无需重启即可重新 ready；durable work 不发生半提交。
 - [ ] WebUI 真实 DeepSeek、Feishu 私聊/群 @、WeCom 单聊各自留下脱敏证据；standalone profile 串行切换。
 - [ ] 本地 fixture 的 ConfigSnapshot copy-forward rollback 与 schema migration 观察窗契约通过，并记录发布门禁。
 - [ ] 本地 Docker 负载报告经 `capacity-evaluate` 判定通过，或明确标为未进行容量验收。
