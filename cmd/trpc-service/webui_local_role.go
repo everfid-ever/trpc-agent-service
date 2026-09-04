@@ -17,6 +17,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
 	redisclient "github.com/redis/go-redis/v9"
 
 	"github.com/liuzengh/trpc-agent-service/migrations"
@@ -27,8 +28,12 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/credentials"
+	credentialpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/credentials/postgres"
 	channeldelivery "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery"
 	deliverypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/delivery/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu"
+	feishuprotocol "github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu/protocol"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
 	ingresspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/postgres"
@@ -74,20 +79,26 @@ const (
 	webUILocalModelID     = "deepseek-local"
 	webUILocalRouteKey    = "local-webui"
 	webUILocalToken       = "local-webui-token-change-me"
+	feishuLocalBindingID  = "local-feishu"
+	feishuLocalRouteKey   = "local-feishu"
 	payloadKeyRef         = "secret://local/payload-key"
 	webUILocalInstruction = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
 )
 
 type webUILocalConfig struct {
-	PostgresDSN, RedisAddress, ListenAddress string
-	RedisEnvironment, SecretRoot, APIKeyFile string
-	RouteKey, Token, InstanceID              string
+	PostgresDSN, RedisAddress, ListenAddress                   string
+	RedisEnvironment, SecretRoot, APIKeyFile                   string
+	RouteKey, Token, InstanceID                                string
+	FeishuEnabled                                              bool
+	FeishuAppID, FeishuAppSecret                               string
+	FeishuVerificationToken, FeishuEncryptKey, FeishuBotOpenID string
 }
 
 type webUILocalBootstrap struct {
 	Tenant       tenant.Tenant
 	Config       configdomain.Snapshot
 	Route        ingress.BindingRoute
+	FeishuRoute  ingress.BindingRoute
 	SecretRoot   string
 	PayloadKey   *payloadkey.Resolver
 	SecretStore  *secretfs.Provider
@@ -140,6 +151,22 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	}
 	browser := webui.BrowserHandler{Callback: endpoint, Routes: bindings, Secrets: bootstrap.SecretStore,
 		Messages: webuiMailbox, Results: payloads}
+	adapters := []channel.Adapter{webuiAdapter}
+	var feishuEndpoint http.Handler
+	if configValue.FeishuEnabled {
+		sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: bootstrap.SecretStore}
+		feishuCredentials := &feishu.CredentialProvider{Secrets: sendCredentials}
+		feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{
+			Credentials: feishuCredentials,
+			NewClient:   func(appID, appSecret string) *lark.Client { return lark.NewClient(appID, appSecret) },
+		}}}
+		feishuEndpoint, err = newChannelEndpoint(feishuAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
+			preprocessStore, payloads, 1, 1<<20, telemetryProvider)
+		if err != nil {
+			return errors.New("Feishu callback configuration rejected")
+		}
+		adapters = append(adapters, feishuAdapter)
+	}
 
 	streamBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment,
 		Group: "webui-workers", ShardCount: 4, ReadBlock: 250 * time.Millisecond, ReclaimIdle: 30 * time.Second})
@@ -222,7 +249,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err != nil {
 		return errors.New("reply queue configuration rejected")
 	}
-	deliveryCatalog, err := deliverypostgres.New(db, webuiAdapter)
+	deliveryCatalog, err := deliverypostgres.New(db, adapters...)
 	if err != nil {
 		return errors.New("delivery catalog configuration rejected")
 	}
@@ -239,6 +266,9 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	mux := http.NewServeMux()
 	mux.Handle("/webui", browser)
 	mux.Handle("/webui/", browser)
+	if feishuEndpoint != nil {
+		mux.Handle("/callbacks/feishu", feishuEndpoint)
+	}
 	mux.HandleFunc("/livez", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
 		if db.PingContext(request.Context()) != nil || redis.Ping(request.Context()).Err() != nil {
@@ -348,18 +378,29 @@ func runWebUILocalBootstrap(parent context.Context, getenv func(string) string, 
 func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) {
 	value := webUILocalConfig{PostgresDSN: strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")),
 		RedisAddress: strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS")), ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
-		RedisEnvironment: valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "m2-webui-local"),
-		SecretRoot:       valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
-		APIKeyFile:       valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
-		RouteKey:         valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
-		Token:            valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
-		InstanceID:       valueOr(getenv("TRPC_WEBUI_LOCAL_INSTANCE_ID"), "standalone")}
+		RedisEnvironment:        valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "m2-webui-local"),
+		SecretRoot:              valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
+		APIKeyFile:              valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
+		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
+		Token:                   valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
+		InstanceID:              valueOr(getenv("TRPC_WEBUI_LOCAL_INSTANCE_ID"), "standalone"),
+		FeishuEnabled:           strings.EqualFold(strings.TrimSpace(getenv("TRPC_FEISHU_LOCAL_ENABLED")), "true"),
+		FeishuAppID:             strings.TrimSpace(getenv("FEISHU_APP_ID")),
+		FeishuAppSecret:         strings.TrimSpace(getenv("FEISHU_APP_SECRET")),
+		FeishuVerificationToken: strings.TrimSpace(getenv("FEISHU_VERIFICATION_TOKEN")),
+		FeishuEncryptKey:        strings.TrimSpace(getenv("FEISHU_ENCRYPT_KEY")),
+		FeishuBotOpenID:         strings.TrimSpace(getenv("FEISHU_BOT_OPEN_ID")),
+	}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
 		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
 		return webUILocalConfig{}, errors.New("required WebUI local configuration is missing or invalid")
 	}
 	if !validWebUILocalInstanceID(value.InstanceID) {
 		return webUILocalConfig{}, errors.New("WebUI local instance ID is invalid")
+	}
+	if value.FeishuEnabled && (value.FeishuAppID == "" || value.FeishuAppSecret == "" || value.FeishuVerificationToken == "" ||
+		value.FeishuEncryptKey == "") {
+		return webUILocalConfig{}, errors.New("Feishu local configuration is incomplete")
 	}
 	return value, nil
 }
@@ -475,6 +516,10 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
+	root, snapshot, err = ensureWebUILocalFeishuBinding(ctx, configs, root, snapshot, configValue)
+	if err != nil {
+		return webUILocalBootstrap{}, err
+	}
 	var binding configdomain.ChannelBinding
 	for _, candidate := range snapshot.Payload.ChannelBindings {
 		if candidate.BindingID == webUILocalBindingID && candidate.Channel == "webui" {
@@ -484,6 +529,18 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	}
 	if binding.BindingID == "" || binding.ExternalAccountID != webUILocalAccountID {
 		return webUILocalBootstrap{}, errors.New("existing local control plane is incompatible; recreate the Compose volume")
+	}
+	var feishuBinding configdomain.ChannelBinding
+	if configValue.FeishuEnabled {
+		for _, candidate := range snapshot.Payload.ChannelBindings {
+			if candidate.BindingID == feishuLocalBindingID && candidate.Channel == "feishu" {
+				feishuBinding = candidate
+				break
+			}
+		}
+		if feishuBinding.BindingID == "" || feishuBinding.ExternalAccountID != configValue.FeishuAppID {
+			return webUILocalBootstrap{}, errors.New("existing Feishu local control plane is incompatible; recreate the Compose volume")
+		}
 	}
 	secretValues := []struct {
 		scope secrets.Scope
@@ -500,6 +557,25 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 			ResourceID: webUILocalTenantID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/session", Version: 1}, deriveLocalSecret("session", configValue.Token)},
 		{secrets.Scope{TenantID: webUILocalTenantID, Subject: "worker-model", Purpose: secrets.PurposeModelCall,
 			ResourceID: webUILocalModelID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, apiKey},
+	}
+	if configValue.FeishuEnabled {
+		secretValues = append(secretValues,
+			struct {
+				scope secrets.Scope
+				ref   secrets.SecretRef
+				value []byte
+			}{scope: secrets.Scope{TenantID: webUILocalTenantID, Subject: feishuLocalBindingID, Purpose: secrets.PurposeChannelVerify,
+				ResourceID: feishuLocalBindingID, ResourceVersion: snapshot.ConfigVersion}, ref: feishuBinding.SecretRef,
+				value: []byte(fmt.Sprintf(`{"encrypt_key":%q,"verification_token":%q,"app_id":%q,"bot_open_id":%q}`,
+					configValue.FeishuEncryptKey, configValue.FeishuVerificationToken, configValue.FeishuAppID, configValue.FeishuBotOpenID))},
+			struct {
+				scope secrets.Scope
+				ref   secrets.SecretRef
+				value []byte
+			}{scope: secrets.Scope{TenantID: webUILocalTenantID, Subject: feishuLocalBindingID, Purpose: secrets.PurposeChannelSend,
+				ResourceID: feishuLocalBindingID, ResourceVersion: snapshot.ConfigVersion}, ref: feishuBinding.SendSecretRef,
+				value: []byte(fmt.Sprintf(`{"app_id":%q,"app_secret":%q}`, configValue.FeishuAppID, configValue.FeishuAppSecret))},
+		)
 	}
 	for _, item := range secretValues {
 		if err := writeLocalSecret(configValue.SecretRoot, item.scope, item.ref, item.value); err != nil {
@@ -523,8 +599,20 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	if err := ingresspostgres.New(db).PutBindingRoute(ctx, route); err != nil {
 		return webUILocalBootstrap{}, err
 	}
+	var feishuRoute ingress.BindingRoute
+	if configValue.FeishuEnabled {
+		feishuRoute = ingress.BindingRoute{OpaqueBindingID: "feishu-local-binding-v1", Channel: "feishu",
+			RouteKeyDigest: feishuprotocol.RouteKeyDigest(feishuLocalRouteKey), TenantID: webUILocalTenantID, AgentAppID: webUILocalAppID,
+			ChannelBindingID: feishuLocalBindingID, ExternalAccountID: configValue.FeishuAppID, TenantVersion: root.Version,
+			BindingVersion: snapshot.ConfigVersion, SecretRef: feishuBinding.SecretRef,
+			IdentitySecretRef: secrets.SecretRef{Ref: "secret://local/identity", Version: 1},
+			SessionSecretRef:  secrets.SecretRef{Ref: "secret://local/session", Version: 1}, Enabled: true}
+		if err := ingresspostgres.New(db).PutBindingRoute(ctx, feishuRoute); err != nil {
+			return webUILocalBootstrap{}, err
+		}
+	}
 	return webUILocalBootstrap{Tenant: root, Config: snapshot, Route: route, SecretRoot: configValue.SecretRoot,
-		PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
+		FeishuRoute: feishuRoute, PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
 }
 
 type webUILocalPolicyStore interface {
@@ -600,6 +688,58 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 		CorrelationID: "webui-local-tool", TraceID: "webui-local-tool"}
 	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID,
 		ExpectedTenantVersion: root.Version, Payload: payload, Metadata: metadata})
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	return published.Tenant, published.Snapshot, nil
+}
+
+// ensureWebUILocalFeishuBinding extends the disposable local snapshot only
+// when the explicit feishu-local profile is enabled. The production channel
+// bindings remain immutable snapshots; a credential change therefore requires
+// a fresh local Compose volume instead of mutating an already-published ref.
+func ensureWebUILocalFeishuBinding(ctx context.Context, configs configdomain.Repository, root tenant.Tenant,
+	snapshot configdomain.Snapshot, value webUILocalConfig,
+) (tenant.Tenant, configdomain.Snapshot, error) {
+	if !value.FeishuEnabled {
+		return root, snapshot, nil
+	}
+	if ctx == nil || configs == nil || root.TenantID != webUILocalTenantID || snapshot.TenantID != webUILocalTenantID ||
+		value.FeishuAppID == "" || value.FeishuAppSecret == "" || value.FeishuVerificationToken == "" || value.FeishuEncryptKey == "" {
+		return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("invalid Feishu local control plane")
+	}
+	payload := snapshot.Payload
+	for index, binding := range payload.ChannelBindings {
+		if binding.BindingID != feishuLocalBindingID {
+			continue
+		}
+		if binding.Channel != "feishu" || binding.AgentAppID != webUILocalAppID ||
+			binding.SecretRef != (secrets.SecretRef{Ref: "secret://local/feishu-verify", Version: 1}) ||
+			binding.SendSecretRef != (secrets.SecretRef{Ref: "secret://local/feishu-send", Version: 1}) {
+			return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("existing Feishu local binding is incompatible")
+		}
+		if binding.ExternalAccountID == value.FeishuAppID {
+			return root, snapshot, nil
+		}
+		// App IDs are routing identities, not secret material. Publish a new
+		// snapshot instead of overwriting history so a local credential rotation
+		// keeps exact-version delivery and old callbacks fail closed.
+		payload.ChannelBindings[index].ExternalAccountID = value.FeishuAppID
+		published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID, ExpectedTenantVersion: root.Version,
+			Payload: payload, Metadata: tenant.ChangeMetadata{ActorType: "system", ActorID: "feishu-local", ReasonCode: "local_feishu_app_rotation",
+				CorrelationID: "feishu-local-app-rotation", TraceID: "feishu-local-app-rotation"}})
+		if err != nil {
+			return tenant.Tenant{}, configdomain.Snapshot{}, err
+		}
+		return published.Tenant, published.Snapshot, nil
+	}
+	payload.ChannelBindings = append(payload.ChannelBindings, configdomain.ChannelBinding{BindingID: feishuLocalBindingID, Channel: "feishu",
+		ExternalAccountID: value.FeishuAppID, AgentAppID: webUILocalAppID,
+		SecretRef:     secrets.SecretRef{Ref: "secret://local/feishu-verify", Version: 1},
+		SendSecretRef: secrets.SecretRef{Ref: "secret://local/feishu-send", Version: 1}})
+	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID, ExpectedTenantVersion: root.Version,
+		Payload: payload, Metadata: tenant.ChangeMetadata{ActorType: "system", ActorID: "feishu-local", ReasonCode: "local_feishu_binding",
+			CorrelationID: "feishu-local-binding", TraceID: "feishu-local-binding"}})
 	if err != nil {
 		return tenant.Tenant{}, configdomain.Snapshot{}, err
 	}

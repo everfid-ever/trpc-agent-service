@@ -2,7 +2,7 @@
 
 本仓库只提供本地 Docker Desktop 验收入口。PostgreSQL、Redis、Vault、Qdrant、Jaeger 和 OpenTelemetry Collector 都运行在本机容器中；不需要 Kubernetes、云主机、Prometheus Alertmanager 或外部运维资源。
 
-DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。
+DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu smoke 会使用开发者自行创建的 Feishu 应用和临时 HTTPS tunnel；它同样只服务于本机 Docker 验收。
 
 ## 1. 前置条件
 
@@ -47,9 +47,63 @@ WebUI → HMAC callback → Inbox / Preprocess → Redis dispatch
 → Worker + DeepSeek → Result / Reply Outbox → Delivery Ledger → WebUI mailbox
 ```
 
-WebUI 仅验证 provider-neutral 的本地链路；Feishu 和 WeCom 的 adapter 在本仓库保留离线协议与契约测试，但没有真实账号验收承诺。
+WebUI 验证 provider-neutral 的本地链路。Feishu 另有下面的可选真实账号 smoke；WeCom 仍只保留离线协议与契约测试。
 
-## 3. 多节点 Docker 验收
+## 3. 可选：真实 Feishu 本地验收
+
+此 smoke 运行完整的 Feishu Webhook、验签、durable ingress、Redis Worker、DeepSeek 调用和 Feishu Reply API。数据库、Worker 和可观测性组件仍全部运行在 Docker Desktop；唯一的外部依赖是开发者自己的 Feishu 应用、DeepSeek Key 和临时 HTTPS tunnel。
+
+先创建仅供本机使用的凭据文件：
+
+```bash
+mkdir -p deploy/compose/secrets
+cp deploy/compose/feishu.env.example deploy/compose/secrets/feishu.env
+chmod 600 deploy/compose/secrets/feishu.env
+```
+
+编辑 `deploy/compose/secrets/feishu.env`，填入同一个 Feishu 应用的 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_VERIFICATION_TOKEN` 和 `FEISHU_ENCRYPT_KEY`。`FEISHU_BOT_OPEN_ID` 对私聊可留空；要验收群聊 @mention 时必须填入该机器人的 Open ID。不要给值添加引号或反引号。这个文件被 Git 忽略，严禁强制加入版本库。
+
+启动本地服务：
+
+```bash
+M2_FEISHU_LOCAL_PORT=58086 \
+docker compose -f deploy/compose/docker-compose.m2.yml \
+  --profile feishu-local up -d --build
+
+curl --fail http://localhost:58086/readyz
+```
+
+然后用开发者选择的临时 HTTPS tunnel 将宿主机 `58086` 暴露出去。例如，已安装 Docker Desktop 时可运行一次性 Cloudflare Quick Tunnel：
+
+```bash
+docker run --rm --name trpc-feishu-tunnel \
+  cloudflare/cloudflared:latest tunnel --no-autoupdate \
+  --url http://host.docker.internal:58086
+```
+
+从 tunnel 输出中复制 `https://<temporary-host>.trycloudflare.com`。在 Feishu 开放平台的“事件与回调”中选择 **Webhook 接收事件**，而不是“长连接接收事件”，并配置：
+
+```text
+https://<temporary-host>.trycloudflare.com/callbacks/feishu?route_key=local-feishu
+```
+
+使用同一份 `Verification Token` 和 `Encrypt Key` 完成 URL 验证，订阅 `im.message.receive_v1`，开启机器人能力及 `im:message` 权限，并在每次变更后发布应用版本。先私聊机器人发送一条新消息；成功时机器人会调用 DeepSeek 并回复。群聊验收通过“群设置 → 群机器人 → 添加机器人”将机器人加入群，再从 @ 菜单选择机器人发送消息；普通未 @ 的群消息会被安全地忽略。
+
+排查顺序：
+
+1. `docker logs trpc-agent-m2-feishu-local-1`：`app secret invalid` 表示 `FEISHU_APP_SECRET` 与 App ID 不匹配；更换 Secret 后必须重建服务。
+2. `docker logs trpc-feishu-tunnel`：Quick Tunnel 重启会生成新域名，必须把新 URL 重新保存到 Feishu。
+3. 若私聊成功但群聊无响应，确认使用 @ 菜单选择机器人，且 `FEISHU_BOT_OPEN_ID` 为当前机器人 Open ID。
+
+App Secret 更新后的本地重启命令：
+
+```bash
+M2_FEISHU_LOCAL_PORT=58086 \
+docker compose -f deploy/compose/docker-compose.m2.yml \
+  --profile feishu-local up -d --force-recreate feishu-local
+```
+
+## 4. 多节点 Docker 验收
 
 多租户/节点化代码不会因本地验收而被简化。`webui-multinode` profile 先建立同一套本地 tenant、ConfigSnapshot、Graph 与 scoped secret fixture，再启动两个独立容器；两个容器共享 PostgreSQL 和 Redis、分别使用唯一 Worker/relay/delivery consumer ID。
 
@@ -79,7 +133,7 @@ docker compose -f deploy/compose/docker-compose.m2.yml \
   --profile webui down -v
 ```
 
-## 4. 本地验证命令
+## 5. 本地验证命令
 
 ```bash
 # 纯 Go 静态、单元与 race 检查（Go 1.21）
@@ -95,11 +149,11 @@ docker compose -f deploy/compose/docker-compose.m2.yml \
   --profile runtime-test run --rm runtime-test
 ```
 
-`minimal_backend_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为真实 Feishu/WeCom、云对象存储、DLP 或生产集群已通过。
+`minimal_backend_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 3 节中开发者亲自完成的 Feishu real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为真实 WeCom、云对象存储、DLP 或生产集群已通过。
 
-## 5. 本地边界
+## 6. 本地边界
 
 - 结构化 JSON 日志默认脱敏；`TRPC_LOG_LEVEL` 可设 `debug|info|warn|error`，`TRPC_LOG_MASKING_LEVEL` 可设 `none|basic|strict`。
 - Collector 或 Jaeger 停止不会阻断本地业务链路；Trace 可见性是本地诊断辅助，而非远端 SLO 告警。
-- MinIO、ClamAV、DLP、Feishu、WeCom 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。
+- MinIO、ClamAV、DLP、WeCom 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。Feishu 只支持第 3 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
 - `deploy/compose/secrets/` 已被 Git 忽略；不得用 `git add -f` 加入 API Key 或其他凭据。

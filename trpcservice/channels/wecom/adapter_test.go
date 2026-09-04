@@ -79,7 +79,7 @@ func TestEncryptedCallbackRunsThroughCommonDurablePipeline(t *testing.T) {
 		t.Fatalf("accepted=%#v err=%v", accepted, err)
 	}
 	stored, err := payloads.GetPayload(context.Background(), "tenant", accepted[0].RequestID)
-	if err != nil || string(stored.Content) != `{"external_message_id":"message-1","external_user_id":"zhangsan","external_chat_id":"","config_version":1,"text":"hello"}` {
+	if err != nil || string(stored.Content) != `{"external_message_id":"message-1","external_user_id":"zhangsan","external_chat_id":"","channel_binding_id":"binding","external_account_id":"ww_corp","config_version":1,"text":"hello"}` {
 		t.Fatalf("payload=%s err=%v", stored.Content, err)
 	}
 }

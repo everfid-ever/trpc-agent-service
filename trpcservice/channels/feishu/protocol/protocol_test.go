@@ -124,6 +124,17 @@ func TestDecodeMessageMentionMatrix(t *testing.T) {
 	}
 }
 
+func TestDecodeMessageWithoutBotOpenIDAllowsP2PAndIgnoresGroups(t *testing.T) {
+	p2p, err := protocol.DecodeMessage(channel.VerifiedCallback{Body: messagePayload("p2p", `{"text":"hello"}`, nil)})
+	if err != nil || p2p.Ignored || p2p.Event.Text != "hello" {
+		t.Fatalf("p2p=%#v err=%v", p2p, err)
+	}
+	group, err := protocol.DecodeMessage(channel.VerifiedCallback{Body: messagePayload("group", `{"text":"hello"}`, nil)})
+	if err != nil || !group.Ignored {
+		t.Fatalf("group=%#v err=%v", group, err)
+	}
+}
+
 func TestDecodeMessageMapsP2PMediaAndRejectsGroupMedia(t *testing.T) {
 	for _, test := range []struct{ kind, content, id string }{
 		{kind: "image", content: `{"image_key":"img_key"}`, id: "img_key"},

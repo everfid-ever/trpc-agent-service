@@ -43,6 +43,24 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 			t.Fatalf("%s=%q accepted", item.name, item.value)
 		}
 	}
+	feishu := cloneEnvironment(base)
+	feishu["TRPC_FEISHU_LOCAL_ENABLED"] = "true"
+	if _, err := loadWebUILocalConfig(mapEnvironment(feishu)); err == nil {
+		t.Fatal("incomplete Feishu local configuration accepted")
+	}
+	feishu["FEISHU_APP_ID"] = "cli_local"
+	feishu["FEISHU_APP_SECRET"] = "local-app-secret"
+	feishu["FEISHU_VERIFICATION_TOKEN"] = "local-verification-token"
+	feishu["FEISHU_ENCRYPT_KEY"] = "local-encrypt-key"
+	configured, err := loadWebUILocalConfig(mapEnvironment(feishu))
+	if err != nil || !configured.FeishuEnabled || configured.FeishuBotOpenID != "" {
+		t.Fatalf("configured=%+v err=%v", configured, err)
+	}
+	feishu["FEISHU_BOT_OPEN_ID"] = "ou_local_bot"
+	configured, err = loadWebUILocalConfig(mapEnvironment(feishu))
+	if err != nil || configured.FeishuBotOpenID != "ou_local_bot" {
+		t.Fatalf("configured=%+v err=%v", configured, err)
+	}
 }
 
 func TestWriteLocalSecretUsesScopedStableFilenameAndRejectsDrift(t *testing.T) {
@@ -171,5 +189,28 @@ func TestEnsureWebUILocalToolControlPlaneUpgradesOnce(t *testing.T) {
 	if err != nil || stableApp.CurrentRevision != priorRevision || stableApp.Version != priorAppVersion ||
 		childErr != nil || stableChild.Version != priorChildVersion || snapshot.ConfigVersion != priorConfigVersion || root.Version != priorTenantVersion {
 		t.Fatalf("non-idempotent app=%#v root=%#v snapshot=%#v err=%v", stableApp, root, snapshot, err)
+	}
+	feishu := webUILocalConfig{FeishuEnabled: true, FeishuAppID: "cli_local", FeishuAppSecret: "app-secret",
+		FeishuVerificationToken: "verification-token", FeishuEncryptKey: "encrypt-key", FeishuBotOpenID: "ou_bot"}
+	root, snapshot, err = ensureWebUILocalFeishuBinding(ctx, configs, root, snapshot, feishu)
+	if err != nil || len(snapshot.Payload.ChannelBindings) != 1 {
+		t.Fatalf("Feishu binding snapshot=%#v err=%v", snapshot, err)
+	}
+	binding := snapshot.Payload.ChannelBindings[0]
+	if binding.BindingID != feishuLocalBindingID || binding.Channel != "feishu" || binding.ExternalAccountID != feishu.FeishuAppID ||
+		binding.SendSecretRef.Ref != "secret://local/feishu-send" {
+		t.Fatalf("binding=%#v", binding)
+	}
+	feishuConfigVersion, feishuTenantVersion := snapshot.ConfigVersion, root.Version
+	root, snapshot, err = ensureWebUILocalFeishuBinding(ctx, configs, root, snapshot, feishu)
+	if err != nil || snapshot.ConfigVersion != feishuConfigVersion || root.Version != feishuTenantVersion {
+		t.Fatalf("non-idempotent Feishu binding root=%#v snapshot=%#v err=%v", root, snapshot, err)
+	}
+	rotated := feishu
+	rotated.FeishuAppID = "cli_rotated"
+	root, snapshot, err = ensureWebUILocalFeishuBinding(ctx, configs, root, snapshot, rotated)
+	if err != nil || snapshot.ConfigVersion != feishuConfigVersion+1 || root.Version != feishuTenantVersion+1 ||
+		snapshot.Payload.ChannelBindings[0].ExternalAccountID != rotated.FeishuAppID {
+		t.Fatalf("rotated binding root=%#v snapshot=%#v err=%v", root, snapshot, err)
 	}
 }

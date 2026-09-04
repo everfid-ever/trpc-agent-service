@@ -26,7 +26,10 @@ const EventTypeMessageReceive = "im.message.receive_v1"
 const challengeType = "url_verification"
 
 type VerificationMaterial struct {
-	EncryptKey, VerificationToken, AppID, BotOpenID string
+	EncryptKey        string `json:"encrypt_key"`
+	VerificationToken string `json:"verification_token"`
+	AppID             string `json:"app_id"`
+	BotOpenID         string `json:"bot_open_id"`
 }
 
 type Verifier struct {
@@ -150,8 +153,7 @@ func parseMaterial(secret []byte) (VerificationMaterial, error) {
 	decodeErr := decoder.Decode(&material)
 	var trailing any
 	trailingErr := decoder.Decode(&trailing)
-	if decodeErr != nil || trailingErr != io.EOF || material.EncryptKey == "" || material.VerificationToken == "" ||
-		material.AppID == "" || material.BotOpenID == "" {
+	if decodeErr != nil || trailingErr != io.EOF || material.EncryptKey == "" || material.VerificationToken == "" || material.AppID == "" {
 		return VerificationMaterial{}, runtime.ErrVersionMismatch
 	}
 	return material, nil
@@ -180,8 +182,11 @@ func DecodeMessage(payload channel.VerifiedCallback) (DecodeResult, error) {
 		return DecodeResult{}, runtime.ErrInvalidEnvelope
 	}
 	botOpenID := header(payload.Headers, "x-feishu-bot-open-id")
-	if botOpenID == "" {
-		return DecodeResult{}, runtime.ErrVersionMismatch
+	// A local real-IM smoke can start from a p2p conversation without knowing
+	// the bot Open ID ahead of time. Group messages remain fail-closed until it
+	// is configured, because their @mention must be proven before execution.
+	if *message.ChatType == "group" && botOpenID == "" {
+		return DecodeResult{Ignored: true}, nil
 	}
 	messageType, text, media, ignored, err := decodeContent(*message.MessageType, *message.Content, message.Mentions, botOpenID, *message.ChatType)
 	if err != nil {
