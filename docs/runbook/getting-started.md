@@ -49,6 +49,15 @@ WebUI → HMAC callback → Inbox / Preprocess → Redis dispatch
 
 WebUI 验证 provider-neutral 的本地链路。Feishu 与 WeCom 另有下面各自的可选真实账号 smoke。
 
+`webui-local`、`feishu-local` 和 `wecom-local` 都是同一套本地 PostgreSQL/Redis composition 的完整 Worker runtime，不能并行启动。它们会通过 PostgreSQL advisory lock 拒绝并发启动，避免跨渠道争抢 durable work 或读取不到对方的 scoped secret。切换 profile 前先停止当前的 standalone local service：
+
+```bash
+docker compose -f deploy/compose/docker-compose.m2.yml stop \
+  webui-local feishu-local wecom-local
+```
+
+`webui-multinode` 使用独立 Compose project 与显式节点 ID，不受此限制。
+
 ## 3. 可选：真实 Feishu 本地验收
 
 此 smoke 运行完整的 Feishu Webhook、验签、durable ingress、Redis Worker、DeepSeek 调用和 Feishu Reply API。数据库、Worker 和可观测性组件仍全部运行在 Docker Desktop；唯一的外部依赖是开发者自己的 Feishu 应用、DeepSeek Key 和临时 HTTPS tunnel。

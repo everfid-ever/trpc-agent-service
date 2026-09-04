@@ -74,26 +74,28 @@ import (
 )
 
 const (
-	webUILocalTenantID    = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalAppID       = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalChildAppID  = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
-	webUILocalBindingID   = "local-webui"
-	webUILocalAccountID   = "local-webui"
-	webUILocalModelID     = "deepseek-local"
-	webUILocalRouteKey    = "local-webui"
-	webUILocalToken       = "local-webui-token-change-me"
-	feishuLocalBindingID  = "local-feishu"
-	feishuLocalRouteKey   = "local-feishu"
-	wecomLocalBindingID   = "local-wecom"
-	wecomLocalRouteKey    = "local-wecom"
-	payloadKeyRef         = "secret://local/payload-key"
-	webUILocalInstruction = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
+	webUILocalRuntimeLockKey = "trpc-agent-service:webui-local-runtime"
+	webUILocalTenantID       = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalAppID          = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalChildAppID     = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	webUILocalBindingID      = "local-webui"
+	webUILocalAccountID      = "local-webui"
+	webUILocalModelID        = "deepseek-local"
+	webUILocalRouteKey       = "local-webui"
+	webUILocalToken          = "local-webui-token-change-me"
+	feishuLocalBindingID     = "local-feishu"
+	feishuLocalRouteKey      = "local-feishu"
+	wecomLocalBindingID      = "local-wecom"
+	wecomLocalRouteKey       = "local-wecom"
+	payloadKeyRef            = "secret://local/payload-key"
+	webUILocalInstruction    = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
 )
 
 type webUILocalConfig struct {
 	PostgresDSN, RedisAddress, ListenAddress                   string
 	RedisEnvironment, SecretRoot, APIKeyFile                   string
 	RouteKey, Token, InstanceID                                string
+	ExclusiveRuntime                                           bool
 	FeishuEnabled                                              bool
 	FeishuAppID, FeishuAppSecret                               string
 	FeishuVerificationToken, FeishuEncryptKey, FeishuBotOpenID string
@@ -141,6 +143,11 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err := redis.Ping(parent).Err(); err != nil {
 		return errors.New("redis unavailable")
 	}
+	releaseRuntimeLock, err := acquireWebUILocalRuntimeLock(parent, db, configValue.ExclusiveRuntime)
+	if err != nil {
+		return err
+	}
+	defer releaseRuntimeLock()
 	bootstrap, err := bootstrapWebUILocal(parent, db, configValue)
 	if err != nil {
 		return fmt.Errorf("local bootstrap failed: %w", err)
@@ -409,6 +416,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
 		Token:                   valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
 		InstanceID:              valueOr(getenv("TRPC_WEBUI_LOCAL_INSTANCE_ID"), "standalone"),
+		ExclusiveRuntime:        strings.EqualFold(strings.TrimSpace(getenv("TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME")), "true"),
 		FeishuEnabled:           strings.EqualFold(strings.TrimSpace(getenv("TRPC_FEISHU_LOCAL_ENABLED")), "true"),
 		FeishuAppID:             strings.TrimSpace(getenv("FEISHU_APP_ID")),
 		FeishuAppSecret:         strings.TrimSpace(getenv("FEISHU_APP_SECRET")),
@@ -457,6 +465,36 @@ func validWebUILocalInstanceID(value string) bool {
 
 func (value webUILocalConfig) instanceName(component string) string {
 	return "webui-local-" + component + "-" + value.InstanceID
+}
+
+// acquireWebUILocalRuntimeLock prevents the standalone local compositions
+// from concurrently claiming one shared PostgreSQL/Redis work queue. The
+// multi-node profile deliberately leaves ExclusiveRuntime unset because it
+// uses explicit, distinct node identities and its own Compose project.
+func acquireWebUILocalRuntimeLock(ctx context.Context, db *sql.DB, enabled bool) (func(), error) {
+	if !enabled {
+		return func() {}, nil
+	}
+	if ctx == nil || db == nil {
+		return nil, errors.New("invalid local runtime lock dependencies")
+	}
+	connection, err := db.Conn(ctx)
+	if err != nil {
+		return nil, errors.New("local runtime lock unavailable")
+	}
+	var acquired bool
+	if err := connection.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, webUILocalRuntimeLockKey).Scan(&acquired); err != nil {
+		connection.Close()
+		return nil, errors.New("local runtime lock unavailable")
+	}
+	if !acquired {
+		connection.Close()
+		return nil, errors.New("another standalone local composition is already running; stop webui-local, feishu-local, or wecom-local before starting this profile")
+	}
+	return func() {
+		_, _ = connection.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtext($1))`, webUILocalRuntimeLockKey)
+		_ = connection.Close()
+	}, nil
 }
 
 func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocalConfig) (webUILocalBootstrap, error) {

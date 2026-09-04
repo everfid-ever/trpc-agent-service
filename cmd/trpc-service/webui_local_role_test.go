@@ -28,8 +28,14 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if value.ListenAddress != ":8080" || value.RouteKey != webUILocalRouteKey || value.Token != webUILocalToken || value.InstanceID != "standalone" ||
-		value.APIKeyFile != "/run/secrets/deepseek_api_key" {
+		value.APIKeyFile != "/run/secrets/deepseek_api_key" || value.ExclusiveRuntime {
 		t.Fatalf("unexpected defaults: %+v", value)
+	}
+	exclusive := cloneEnvironment(base)
+	exclusive["TRPC_WEBUI_LOCAL_EXCLUSIVE_RUNTIME"] = "true"
+	configured, err := loadWebUILocalConfig(mapEnvironment(exclusive))
+	if err != nil || !configured.ExclusiveRuntime {
+		t.Fatalf("exclusive config=%+v err=%v", configured, err)
 	}
 	for _, item := range []struct{ name, value string }{
 		{"TRPC_WEBUI_LOCAL_TOKEN", "short"},
@@ -52,7 +58,7 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 	feishu["FEISHU_APP_SECRET"] = "local-app-secret"
 	feishu["FEISHU_VERIFICATION_TOKEN"] = "local-verification-token"
 	feishu["FEISHU_ENCRYPT_KEY"] = "local-encrypt-key"
-	configured, err := loadWebUILocalConfig(mapEnvironment(feishu))
+	configured, err = loadWebUILocalConfig(mapEnvironment(feishu))
 	if err != nil || !configured.FeishuEnabled || configured.FeishuBotOpenID != "" {
 		t.Fatalf("configured=%+v err=%v", configured, err)
 	}
