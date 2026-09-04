@@ -87,12 +87,14 @@ bash scripts/local_dependency_recovery_smoke.sh
 
 ## 架构与交付文档
 
+- [交付架构总览](docs/architecture-delivery.md)：面向验收的精简组件图、时序、数据、风险和复用边界。
 - [架构总览](docs/design/0.architecture.md)：组件拓扑、租户隔离、请求时序和跨节点职责。
 - [租户根设计](docs/design/1.tenant-root-design.md)：配置、版本、密钥和授权边界。
 - [存储与数据一致性](docs/design/3.storage-data-consistency-design.md)：Inbox/Outbox、幂等、relay、迁移和多后端路由。
 - [可观测、审计与运维](docs/design/5.observability-audit-devops-design.md)：trace、指标、审计、保留策略、故障处理、容量与回滚。
 - [本地 Compose 说明](deploy/compose/README.md)：profile 与运行面职责。
 - [本地运行手册](docs/runbook/getting-started.md)：命令、密钥、IM 回调和故障排查。
+- [本地验证矩阵](docs/runbook/verification-matrix.md)：每项验收的命令、所需资源与成功证据。
 
 ## 代码布局
 

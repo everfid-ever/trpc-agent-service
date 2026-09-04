@@ -225,6 +225,8 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 
 `backend_adapter_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 3、4 节中开发者亲自完成的 Feishu 与 WeCom real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为云对象存储、DLP 或生产集群已通过。
 
+每个验证项的命令、所需资源和成功证据汇总见 [verification-matrix.md](verification-matrix.md)。
+
 ## 7. 本地边界
 
 - 结构化 JSON 日志默认脱敏；`TRPC_LOG_LEVEL` 可设 `debug|info|warn|error`，`TRPC_LOG_MASKING_LEVEL` 可设 `none|basic|strict`。
