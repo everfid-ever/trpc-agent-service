@@ -42,6 +42,9 @@ VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-request',1,'app_01ARZ3NDEKTSV4RRFF
 ON CONFLICT DO NOTHING;
 
 DO $$
+DECLARE
+  v_outbox_count integer;
+  v_outbox_payload text;
 BEGIN
   BEGIN
     INSERT INTO session_event(tenant_id,agent_app_id,session_id,session_seq,request_id,input_seq,event_seq,event_id,event_type,payload_ref)
@@ -52,12 +55,15 @@ BEGIN
   INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
   VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-outbox-1','dispatch','probe',1,'probe-duplicate','payload://probe')
   ON CONFLICT DO NOTHING;
-  BEGIN
-    INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
-    VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-outbox-2','dispatch','probe',1,'probe-duplicate','payload://other');
-    RAISE EXCEPTION 'duplicate outbox key was accepted';
-  EXCEPTION WHEN unique_violation THEN NULL;
-  END;
+  INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+  VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-outbox-2','dispatch','probe',1,'probe-duplicate','payload://other');
+  SELECT count(*),min(payload_ref) INTO v_outbox_count,v_outbox_payload
+    FROM outbox
+    WHERE tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+      AND kind='dispatch' AND idempotency_key='probe-duplicate';
+  IF v_outbox_count <> 1 OR v_outbox_payload <> 'payload://probe' THEN
+    RAISE EXCEPTION 'semantic outbox duplicate did not converge';
+  END IF;
   BEGIN
     PERFORM * FROM commit_turn(
       't_01ARZ3NDEKTSV4RRFFQ69G5FAV','app_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-session',
