@@ -257,9 +257,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
 DECLARE
   v_head public.session_head%ROWTYPE; v_existing public.session_commit%ROWTYPE;
   v_terminal public.session_commit%ROWTYPE; v_event jsonb; v_out jsonb;
-  v_existing_outbox public.outbox%ROWTYPE;
   v_ordinal bigint; v_new_version bigint; v_new_last_seq bigint;
-  v_outbox_inserted bigint;
   v_execution public.execution_record%ROWTYPE;
 BEGIN
   SELECT * INTO v_head FROM public.session_head WHERE tenant_id = p_tenant_id
@@ -329,21 +327,7 @@ BEGIN
       idempotency_key, payload_ref, traceparent)
     VALUES (p_tenant_id, format('%s:%s', v_out->>'kind', v_out->>'idempotency_key'),
       v_out->>'kind', p_request_id, (v_out->>'event_seq')::bigint,
-      v_out->>'idempotency_key', v_out->>'payload_ref', v_out->>'traceparent')
-    ON CONFLICT (tenant_id, kind, idempotency_key) DO NOTHING;
-    GET DIAGNOSTICS v_outbox_inserted = ROW_COUNT;
-    IF v_outbox_inserted = 0 THEN
-      SELECT * INTO v_existing_outbox FROM public.outbox
-        WHERE tenant_id = p_tenant_id AND kind = v_out->>'kind'
-          AND idempotency_key = v_out->>'idempotency_key';
-      IF NOT FOUND OR v_existing_outbox.outbox_id IS DISTINCT FROM format('%s:%s', v_out->>'kind', v_out->>'idempotency_key')
-         OR v_existing_outbox.aggregate_id IS DISTINCT FROM p_request_id
-         OR v_existing_outbox.event_seq IS DISTINCT FROM (v_out->>'event_seq')::bigint
-         OR v_existing_outbox.payload_ref IS DISTINCT FROM v_out->>'payload_ref'
-         OR v_existing_outbox.traceparent IS DISTINCT FROM v_out->>'traceparent' THEN
-        RAISE EXCEPTION 'outbox idempotency collision' USING ERRCODE = '23505';
-      END IF;
-    END IF;
+      v_out->>'idempotency_key', v_out->>'payload_ref', v_out->>'traceparent');
   END LOOP;
   RETURN QUERY SELECT p_commit_id, p_outcome, p_input_seq, v_new_version, p_result_ref, p_reply_cursor, false;
 END;

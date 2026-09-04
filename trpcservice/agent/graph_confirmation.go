@@ -75,12 +75,29 @@ func (a *graphConfirmationAgent) Run(ctx context.Context, invocation *agentcore.
 				for _, choice := range item.Choices {
 					for index := range choice.Message.ToolCalls {
 						call := choice.Message.ToolCalls[index]
+						// In an OpenAI-compatible streaming response, only the
+						// first delta for a tool call is required to carry its ID
+						// and name.  Later argument deltas may omit either field.
+						// They cannot describe an independently confirmable call,
+						// so wait for a stable ID rather than rejecting them.
+						if call.ID == "" {
+							continue
+						}
 						if _, ask := a.askTools[call.Function.Name]; !ask {
 							continue
 						}
-						if pending != nil || call.ID == "" {
+						if pending != nil {
+							// Providers may emit one logical tool call in several
+							// streaming events.  It is safe to retain the final
+							// fragment only when it names the same call and tool;
+							// distinct calls remain unsupported because one durable
+							// confirmation binds exactly one call and argument digest.
+							if pending.ID == call.ID && (call.Function.Name == "" || pending.Function.Name == call.Function.Name) {
+								pending.Function.Arguments = call.Function.Arguments
+								continue
+							}
 							out <- event.NewErrorEvent(value.InvocationID, value.AgentName, model.ErrorTypeFlowError,
-								runtime.ErrCapabilityUnsupported.Error())
+								"graph confirmation received more than one stable tool call: "+runtime.ErrCapabilityUnsupported.Error())
 							return
 						}
 						copyCall := call

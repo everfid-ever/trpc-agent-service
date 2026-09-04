@@ -582,6 +582,8 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 	if policy.Version == int64(^uint64(0)>>1) {
 		return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("WebUI local policy version exhausted")
 	}
+	policy.Policy.DefaultAction = governance.ActionAllow
+	policy.Policy.AllowedModels = upsertWebUILocalModelRef(policy.Policy.AllowedModels)
 	policy.Policy.Tools = upsertWebUILocalToolRule(policy.Policy.Tools)
 	policy.Version++
 	policy.PublishedAt = time.Now().UTC()
@@ -665,12 +667,35 @@ func webUILocalGraphRevisionReady(value, child agentapp.Revision) bool {
 }
 
 func webUILocalPolicyReady(value governance.PolicyV1) bool {
+	if value.DefaultAction != governance.ActionAllow || value.InputDLP != governance.DLPDisabled || value.OutputDLP != governance.DLPDisabled {
+		return false
+	}
+	modelAllowed := false
+	for _, ref := range value.AllowedModels {
+		if ref.ID == webUILocalModelID && ref.Version == 1 {
+			modelAllowed = true
+			break
+		}
+	}
+	if !modelAllowed {
+		return false
+	}
 	for _, rule := range value.Tools {
 		if rule.ToolID == localnote.ID {
 			return rule.Version == localnote.Version && rule.Dangerous && rule.ConfirmationSupported
 		}
 	}
 	return false
+}
+
+func upsertWebUILocalModelRef(values []governance.VersionedRef) []governance.VersionedRef {
+	result := append([]governance.VersionedRef(nil), values...)
+	for _, ref := range result {
+		if ref.ID == webUILocalModelID && ref.Version == 1 {
+			return result
+		}
+	}
+	return append(result, governance.VersionedRef{ID: webUILocalModelID, Version: 1})
 }
 
 func upsertWebUILocalToolRule(values []governance.ToolRule) []governance.ToolRule {

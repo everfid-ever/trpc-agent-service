@@ -48,9 +48,29 @@ func TestGraphContinuationReferenceIsStrictAndRoundTrips(t *testing.T) {
 	if _, err := decodeGraphContinuationRef(graphContinuationRefPrefix + base64.RawURLEncoding.EncodeToString(tampered)); err == nil {
 		t.Fatal("unknown graph continuation field accepted")
 	}
-	want.TaskID = "other-call"
-	if _, err := encodeGraphContinuationRef(want); err == nil {
-		t.Fatal("mismatched graph interrupt target accepted")
+	want.TaskID = "graph-task"
+	encoded, err = encodeGraphContinuationRef(want)
+	if err != nil {
+		t.Fatalf("independent graph task id rejected: %v", err)
+	}
+	got, err = decodeGraphContinuationRef(encoded)
+	if err != nil || got != want {
+		t.Fatalf("independent task coordinate=%#v err=%v", got, err)
+	}
+}
+
+func TestConfirmationBindingIDUsesFrozenReplyRouteForLegacyTextPayload(t *testing.T) {
+	payloads := messagingmemory.New()
+	if err := payloads.PutReplyRoute(messaging.ReplyRoute{TenantID: "tenant-a", RequestID: "request-a", Channel: "webui",
+		ChannelBindingID: "binding-a", ExternalAccountID: "account-a", ConfigVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	bindingID, err := confirmationBindingID(context.Background(), payloads, "tenant-a", "request-a", []byte(`{"text":"legacy"}`))
+	if err != nil || bindingID != "binding-a" {
+		t.Fatalf("binding_id=%q err=%v", bindingID, err)
+	}
+	if _, err := confirmationBindingID(context.Background(), payloads, "tenant-a", "request-a", []byte(`{"channel_binding_id":"other","text":"bad"}`)); !errors.Is(err, runtime.ErrVersionMismatch) {
+		t.Fatalf("mismatched binding err=%v", err)
 	}
 }
 

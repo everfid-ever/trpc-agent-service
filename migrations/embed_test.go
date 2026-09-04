@@ -10,7 +10,7 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 36 {
+	if len(all) != 41 {
 		t.Fatalf("migrations=%d", len(all))
 	}
 	up := all[0].Up
@@ -22,6 +22,49 @@ func TestControlPlaneMigrationContract(t *testing.T) {
 	}
 	if !strings.Contains(all[0].Down, "DROP TABLE IF EXISTS tenant;") {
 		t.Fatal("down migration does not remove tenant")
+	}
+}
+
+func TestBlockedInputRecoveryMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[39]
+	if migration.Version != "000040" || migration.Name != "blocked_input_recovery" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"e.outcome IN ('pending','blocked')", "v_execution.outcome='blocked'",
+		"outcome='pending',park_attempt=0", "e.input_seq=h.next_input_seq",
+		"wakeup:%s:recovered:%s", "ON CONFLICT ON CONSTRAINT outbox_tenant_id_kind_idempotency_key_key",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if !strings.Contains(migration.Down, "AND e.outcome='pending'") {
+		t.Fatal("down does not restore pending-only wakeup behavior")
+	}
+}
+
+func TestNextInputDeadlineRecoveryMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[40]
+	if migration.Version != "000041" || migration.Name != "next_input_deadline_recovery" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"v_execution.outcome='pending' AND v_execution.park_deadline IS NOT NULL",
+		"v_execution.park_deadline <= clock_timestamp()", "e.input_seq=h.next_input_seq",
+		"e.outcome='pending' AND e.park_deadline IS NOT NULL", "outcome='pending',park_attempt=0",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
 	}
 }
 
@@ -681,10 +724,70 @@ func TestRuntimeConsistencyMigrationContract(t *testing.T) {
 	for _, clause := range []string{
 		"v_execution public.execution_record%ROWTYPE", "execution scope mismatch",
 		"UPDATE public.execution_record SET outcome = p_outcome", "already_terminal boolean",
-		"ON CONFLICT (tenant_id, kind, idempotency_key) DO NOTHING", "outbox idempotency collision",
 	} {
 		if !strings.Contains(runtimeMigration.Up, clause) {
 			t.Errorf("missing commit authority clause %q", clause)
 		}
+	}
+}
+
+func TestOutboxIdempotencyMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[37]
+	if migration.Version != "000038" || migration.Name != "outbox_idempotency_lock_key" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"CREATE OR REPLACE FUNCTION public.guard_outbox_idempotency()",
+		"chr(31)", "pg_advisory_xact_lock", "outbox idempotency collision",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if !strings.Contains(migration.Down, "chr(0)") {
+		t.Fatal("down does not restore the prior idempotency guard")
+	}
+	prior := all[36]
+	if prior.Version != "000037" || prior.Name != "outbox_idempotency" {
+		t.Fatalf("migration=%#v", prior)
+	}
+	for _, clause := range []string{
+		"CREATE OR REPLACE FUNCTION public.guard_outbox_idempotency()",
+		"pg_advisory_xact_lock", "outbox idempotency collision",
+		"CREATE TRIGGER outbox_idempotency_guard",
+	} {
+		if !strings.Contains(prior.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if !strings.Contains(prior.Down, "DROP TRIGGER IF EXISTS outbox_idempotency_guard ON public.outbox") {
+		t.Fatal("down does not remove the idempotency guard")
+	}
+}
+
+func TestOutboxIdempotencySemanticKeyMigrationContract(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[38]
+	if migration.Version != "000039" || migration.Name != "outbox_idempotency_semantic_key" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	for _, clause := range []string{
+		"CREATE OR REPLACE FUNCTION public.guard_outbox_idempotency()",
+		"pg_advisory_xact_lock", "RETURN NULL",
+		"(tenant_id, kind, idempotency_key)",
+	} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("missing %q", clause)
+		}
+	}
+	if !strings.Contains(migration.Down, "outbox idempotency collision") {
+		t.Fatal("down does not restore the preceding guard")
 	}
 }

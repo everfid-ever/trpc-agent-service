@@ -86,10 +86,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	authoritative, err := w.Tasks.GetExecution(ctx, gateway.ExecutionKey{TenantID: envelope.TenantID, RequestID: envelope.RequestID})
 	if err != nil {
-		return err
+		return fmt.Errorf("load authoritative execution: %w", err)
 	}
 	if err := verifyAuthoritativeEnvelope(authoritative.Envelope, envelope); err != nil {
-		return err
+		return fmt.Errorf("verify authoritative execution: %w", err)
 	}
 	if authoritative.CancelRequested {
 		return runtime.ErrCancelRequested
@@ -103,14 +103,14 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	snapshot, err := w.Profiles.Resolve(ctx, key)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve execution profile: %w", err)
 	}
 	if snapshot.TenantVersion != envelope.TenantVersion || snapshot.AgentAppVersion != envelope.AgentAppVersion {
 		return runtime.ErrVersionMismatch
 	}
 	modelRef, err := executionModelRef(ctx, w.Profiles, snapshot)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve execution model: %w", err)
 	}
 	appName := snapshot.AppName
 	if appName == "" {
@@ -126,12 +126,12 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			_, readErr := w.Sessions.GetTerminalByInputSeq(ctx, sessionstore.TerminalKey{SessionKey: sessionKey, InputSeq: envelope.InputSeq})
 			return readErr
 		}
-		return err
+		return fmt.Errorf("open session turn: %w", err)
 	}
 
 	turn, err := sessionstore.NewDurableBufferedTurnScoped(w.Sessions, sessionKey, appName, envelope.UserID, w.EncodeEvent)
 	if err != nil {
-		return err
+		return fmt.Errorf("create durable turn buffer: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -175,32 +175,32 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				return runtime.ErrInvariantViolation
 			}
 		} else if !errors.Is(confirmationErr, runtime.ErrNotFound) {
-			return confirmationErr
+			return fmt.Errorf("load confirmation state: %w", confirmationErr)
 		}
 	}
 
 	payload, err := w.executionPayload(ctx, envelope)
 	if err != nil {
-		return err
+		return fmt.Errorf("load execution payload: %w", err)
 	}
 	if payload.PayloadRef != envelope.PayloadRef {
 		return runtime.ErrVersionMismatch
 	}
 	message, err := w.Inputs.DecodeInput(ctx, envelope, payload.Content)
 	if err != nil {
-		return err
+		return fmt.Errorf("decode execution payload: %w", err)
 	}
 	if message.Role != model.RoleUser || (strings.TrimSpace(message.Content) == "" && len(message.ContentParts) == 0) || !validPreparedMessage(message) {
 		return runtime.ErrInvalidEnvelope
 	}
 	if err := w.hydrateArtifacts(ctx, envelope, &message); err != nil {
-		return err
+		return fmt.Errorf("hydrate execution artifacts: %w", err)
 	}
 	var permit governance.RunPermit
 	if w.Governance != nil {
 		permit, err = w.Governance.Begin(ctx, envelope, modelRef, payload.Content)
 		if err != nil {
-			return err
+			return fmt.Errorf("begin governance run: %w", err)
 		}
 		if permit.Decision.Action != governance.ActionAllow {
 			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeDenied, permit.Decision)
@@ -212,7 +212,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		if w.Governance != nil {
 			_ = w.Governance.Refund(ctx, permit, "bundle_acquire_failed")
 		}
-		return err
+		return fmt.Errorf("build execution bundle: %w", err)
 	}
 	defer lease.Release()
 	run, err := lease.Bundle().NewRunner(turn.SessionService())
@@ -220,7 +220,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		if w.Governance != nil {
 			_ = w.Governance.Refund(ctx, permit, "runner_create_failed")
 		}
-		return err
+		return fmt.Errorf("create execution runner: %w", err)
 	}
 	var events <-chan *event.Event
 	runnerClosed := false
@@ -356,13 +356,13 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message, runOptions...)
 	if err != nil {
-		return err
+		return fmt.Errorf("run agent graph: %w", err)
 	}
 	runResult, err := consumeRunnerEvents(ctx, events)
 	if err != nil {
 		closeRunner(run, events, w.EventDrainTimeout)
 		runnerClosed = true
-		return err
+		return fmt.Errorf("consume agent graph events: %w", err)
 	}
 	if continuation != nil {
 		if err := addUsage(&runResult.Usage, usageOffset); err != nil {
@@ -371,20 +371,20 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	if len(runResult.ToolCalls) != 0 {
 		if w.Governance == nil || w.Confirmations == nil || len(runResult.ToolCalls) != 1 {
-			return runtime.ErrCapabilityUnsupported
+			return fmt.Errorf("tool confirmation requires one tool call plus governance and confirmation coordinators: %w", runtime.ErrCapabilityUnsupported)
 		}
 		call := runResult.ToolCalls[0]
 		toolRef, ok := confirmationToolRef(ctx, w.Profiles, snapshot, permit.Policy, call.Function.Name)
 		if !ok || call.ID == "" {
-			return runtime.ErrCapabilityUnsupported
+			return fmt.Errorf("tool confirmation call %q cannot be resolved to an ask-policy tool: %w", call.Function.Name, runtime.ErrCapabilityUnsupported)
 		}
 		_, argsDigest, canonicalErr := governance.CanonicalArguments(call.Function.Arguments)
 		if canonicalErr != nil {
 			return canonicalErr
 		}
-		bindingID, bindingErr := confirmationBindingID(payload.Content)
+		bindingID, bindingErr := confirmationBindingID(ctx, w.Payloads, envelope.TenantID, envelope.RequestID, payload.Content)
 		if bindingErr != nil {
-			return bindingErr
+			return fmt.Errorf("resolve confirmation channel binding: %w", bindingErr)
 		}
 		confirmationID, idErr := governance.StableConfirmationID(envelope.TenantID, envelope.RequestID, call.ID)
 		if idErr != nil {
@@ -395,6 +395,20 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			ttl = 15 * time.Minute
 		}
 		expiresAt := envelope.CreatedAt.UTC().Add(ttl)
+		if !expiresAt.After(time.Now().UTC()) {
+			decision := governance.Decision{DecisionID: governance.StableDecisionID(envelope.TenantID, envelope.RequestID, "confirmation_expired", envelope.PolicyVersion),
+				TenantID: envelope.TenantID, RequestID: envelope.RequestID, Stage: "confirmation_expired", Action: governance.ActionDeny,
+				ReasonCode: governance.ReasonConfirmationExpired, PolicyVersion: envelope.PolicyVersion, ReservationID: permit.Reservation.ReservationID}
+			if w.Governance != nil {
+				if err := w.Governance.Abort(ctx, envelope, modelRef, governance.ReasonConfirmationExpired); err != nil {
+					return err
+				}
+				if err := w.Governance.Record(ctx, decision); err != nil {
+					return err
+				}
+			}
+			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeConfirmationTimeout, decision)
+		}
 		promptRef := "confirmation://" + envelope.TenantID + "/" + confirmationID
 		prompt, promptErr := json.Marshal(map[string]any{"schema_version": 1, "kind": "tool_confirmation", "confirmation_id": confirmationID,
 			"tool_id": toolRef.ID, "tool_version": toolRef.Version, "expires_at": expiresAt.Format(time.RFC3339Nano)})
@@ -403,7 +417,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 		interactions, ok := w.Payloads.(messaging.InteractionStore)
 		if !ok {
-			return runtime.ErrCapabilityUnsupported
+			return fmt.Errorf("tool confirmation requires interaction payload storage: %w", runtime.ErrCapabilityUnsupported)
 		}
 		promptDigest := sha256.Sum256(prompt)
 		if err := interactions.PutInteraction(ctx, messaging.InteractionRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
@@ -419,7 +433,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		if snapshot.AgentKind == agentapp.AgentKindGraph {
 			if runResult.GraphInterrupt == nil || runResult.GraphInterrupt.ToolCallID != call.ID ||
 				runResult.GraphInterrupt.ToolName != call.Function.Name {
-				return runtime.ErrCapabilityUnsupported
+				return fmt.Errorf("graph confirmation interrupt does not match tool call id=%q name=%q: %w", call.ID, call.Function.Name, runtime.ErrCapabilityUnsupported)
 			}
 			checkpointRef, err = encodeGraphContinuationRef(*runResult.GraphInterrupt)
 			if err != nil {
@@ -754,8 +768,12 @@ func decodeGraphContinuationRef(value string) (graphContinuationCoordinate, erro
 }
 
 func validateGraphContinuationCoordinate(value graphContinuationCoordinate) error {
+	// TaskID addresses a graph checkpoint task, while ToolCallID binds the
+	// confirmation to the model-emitted call.  A graph is free to use a task
+	// key that differs from the provider's tool-call ID; both are validated
+	// independently when the continuation is resumed.
 	if value.SchemaVersion != 1 || value.Kind != "graph_tool_confirmation" || value.LineageID == "" || value.CheckpointID == "" ||
-		value.Namespace == "" || value.TaskID == "" || value.ToolCallID == "" || value.ToolName == "" || value.TaskID != value.ToolCallID {
+		value.Namespace == "" || value.TaskID == "" || value.ToolCallID == "" || value.ToolName == "" {
 		return runtime.ErrInvariantViolation
 	}
 	return nil
@@ -850,7 +868,7 @@ func resolveChildExecutionProfile(ctx context.Context, resolver profile.Executio
 		ConfigVersion: parent.Key.ConfigVersion, PolicyVersion: parent.Key.PolicyVersion})
 }
 
-func confirmationBindingID(payload []byte) (string, error) {
+func confirmationBindingID(ctx context.Context, payloads messaging.PayloadStore, tenantID, requestID string, payload []byte) (string, error) {
 	var value map[string]json.RawMessage
 	canonical, _, err := governance.CanonicalArguments(payload)
 	if err != nil {
@@ -859,11 +877,32 @@ func confirmationBindingID(payload []byte) (string, error) {
 	if err := json.Unmarshal(canonical, &value); err != nil {
 		return "", runtime.ErrInvalidEnvelope
 	}
-	var bindingID string
-	if err := json.Unmarshal(value["channel_binding_id"], &bindingID); err != nil || strings.TrimSpace(bindingID) == "" {
+	var payloadBindingID string
+	if raw, present := value["channel_binding_id"]; present {
+		if err := json.Unmarshal(raw, &payloadBindingID); err != nil {
+			return "", runtime.ErrInvalidEnvelope
+		}
+		payloadBindingID = strings.TrimSpace(payloadBindingID)
+	}
+	if routes, ok := payloads.(messaging.ReplyRouteStore); ok {
+		route, routeErr := routes.ResolveReplyRoute(ctx, tenantID, requestID)
+		if routeErr == nil {
+			if route.TenantID != tenantID || route.RequestID != requestID || strings.TrimSpace(route.ChannelBindingID) == "" {
+				return "", runtime.ErrTenantScope
+			}
+			if payloadBindingID != "" && payloadBindingID != route.ChannelBindingID {
+				return "", runtime.ErrVersionMismatch
+			}
+			return route.ChannelBindingID, nil
+		}
+		if !errors.Is(routeErr, runtime.ErrNotFound) {
+			return "", routeErr
+		}
+	}
+	if payloadBindingID == "" {
 		return "", runtime.ErrCapabilityUnsupported
 	}
-	return bindingID, nil
+	return payloadBindingID, nil
 }
 
 func confirmedToolCall(ctx context.Context, sessions sessionstore.AtomicSessionStore, key sessionstore.SessionKey, confirmation governance.Confirmation) (model.ToolCall, error) {

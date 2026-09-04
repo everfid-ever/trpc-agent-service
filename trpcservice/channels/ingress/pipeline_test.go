@@ -29,7 +29,7 @@ func TestPipelinePersistsNormalizedPayloadAndSchedulesExactlyOnce(t *testing.T) 
 		t.Fatalf("second=%#v err=%v", second, err)
 	}
 	payload, err := payloads.GetPayload(context.Background(), "tenant", first[0].RequestID)
-	if err != nil || string(payload.Content) != `{"external_message_id":"message","external_user_id":"external-user","external_chat_id":"","config_version":1,"text":"hello"}` {
+	if err != nil || string(payload.Content) != `{"external_message_id":"message","external_user_id":"external-user","external_chat_id":"","channel_binding_id":"binding","external_account_id":"account","config_version":1,"text":"hello"}` {
 		t.Fatalf("payload=%s err=%v", payload.Content, err)
 	}
 }

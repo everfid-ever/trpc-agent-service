@@ -112,8 +112,12 @@ func TestEnsureWebUILocalToolControlPlaneUpgradesOnce(t *testing.T) {
 		ChangeMetadata: appMetadata}); err != nil {
 		t.Fatal(err)
 	}
-	oldPolicy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow,
-		AllowedModels: []governance.VersionedRef{{ID: webUILocalModelID, Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
+	// This is the pre-upgrade local policy shape. It deliberately lacks the
+	// allowed model and uses deny-by-default so the regression proves bootstrap
+	// upgrades every prerequisite needed for an actual model call, not merely
+	// the tool confirmation rule.
+	oldPolicy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionDeny,
+		InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled}
 	digest, _, err := governance.PolicyDigest(oldPolicy)
 	if err != nil {
 		t.Fatal(err)

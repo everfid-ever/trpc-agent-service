@@ -82,10 +82,10 @@ func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, eve
 	if messageType == "text" {
 		messageType = ""
 	}
-	bindingID, accountID := "", ""
-	if len(event.MediaRefs) > 0 {
-		bindingID, accountID = verified.Binding.ChannelBindingID, verified.Binding.ExternalAccountID
-	}
+	// The verified binding is part of the durable authorization context for
+	// every input, not only media.  In particular, a later confirmation must
+	// be bound to the same channel session that submitted a text-only request.
+	bindingID, accountID := verified.Binding.ChannelBindingID, verified.Binding.ExternalAccountID
 	normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
 		ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
 		ChannelBindingID: bindingID, ExternalAccountID: accountID,
