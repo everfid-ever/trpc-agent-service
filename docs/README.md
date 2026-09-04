@@ -2,7 +2,7 @@
 
 [`design/README.md`](./design/README.md) 是多租户、多节点服务技术方案的入口。设计文档描述系统当前采用的架构、领域模型、协议、数据一致性、安全边界、运行能力和验证规范，不记录开发轮次、里程碑、提交或迁移文件编号。
 
-需要用于验收或汇报的精简交付件，请先阅读 [`architecture-delivery.md`](./architecture-delivery.md)；它汇总组件图、企业微信核心时序、数据模型、多后端策略、风险和上游复用边界，并链接到规范性详细设计。
+需要用于验收或汇报的精简交付件，请先阅读 [`architecture-delivery.md`](./architecture-delivery.md)；它汇总组件图、企业微信核心时序、数据模型、多后端策略、风险和上游复用边界，并链接到规范性详细设计。空数据库验收的 schema 基线与后续追加规则见 [`../migrations/README.md`](../migrations/README.md)。
 
 第一次启动请阅读 [`runbook/getting-started.md`](./runbook/getting-started.md)。可靠性故障策略、灰度/回滚、容量报告与 Docker 验收入口见 [`runbook/reliability-release-capacity.md`](./runbook/reliability-release-capacity.md)；每项能力所需资源、命令和成功证据见 [`runbook/verification-matrix.md`](./runbook/verification-matrix.md)。本仓库的可执行验收边界是 Docker Desktop：本地 Compose、单元/契约测试与最小后端 smoke；不提供 Kubernetes 发布、远端告警或生产 Provider 验收资产。
 
