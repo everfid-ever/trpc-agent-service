@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,8 @@ import (
 	ingresspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui"
 	webuipostgres "github.com/liuzengh/trpc-agent-service/trpcservice/channels/webui/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom"
+	wecomprotocol "github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom/protocol"
 	configdomain "github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
 	coordinationredis "github.com/liuzengh/trpc-agent-service/trpcservice/coordination/redis"
@@ -81,6 +84,8 @@ const (
 	webUILocalToken       = "local-webui-token-change-me"
 	feishuLocalBindingID  = "local-feishu"
 	feishuLocalRouteKey   = "local-feishu"
+	wecomLocalBindingID   = "local-wecom"
+	wecomLocalRouteKey    = "local-wecom"
 	payloadKeyRef         = "secret://local/payload-key"
 	webUILocalInstruction = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available."
 )
@@ -92,6 +97,10 @@ type webUILocalConfig struct {
 	FeishuEnabled                                              bool
 	FeishuAppID, FeishuAppSecret                               string
 	FeishuVerificationToken, FeishuEncryptKey, FeishuBotOpenID string
+	WeComEnabled                                               bool
+	WeComCorpID, WeComAppSecret                                string
+	WeComCallbackToken, WeComEncodingAESKey                    string
+	WeComAgentID                                               int64
 }
 
 type webUILocalBootstrap struct {
@@ -99,6 +108,7 @@ type webUILocalBootstrap struct {
 	Config       configdomain.Snapshot
 	Route        ingress.BindingRoute
 	FeishuRoute  ingress.BindingRoute
+	WeComRoute   ingress.BindingRoute
 	SecretRoot   string
 	PayloadKey   *payloadkey.Resolver
 	SecretStore  *secretfs.Provider
@@ -152,20 +162,32 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	browser := webui.BrowserHandler{Callback: endpoint, Routes: bindings, Secrets: bootstrap.SecretStore,
 		Messages: webuiMailbox, Results: payloads}
 	adapters := []channel.Adapter{webuiAdapter}
-	var feishuEndpoint http.Handler
+	var feishuEndpoint, wecomEndpoint http.Handler
+	// The local profiles share one PostgreSQL volume, so the delivery catalog
+	// must resolve every channel that may already be persisted there. Adapter
+	// construction is therefore unconditional; the profile switches only gate
+	// ingress endpoints and bootstrap, and a disabled channel enqueues no
+	// reply outbox work because its callbacks are not mounted.
+	sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: bootstrap.SecretStore}
+	feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{
+		Credentials: &feishu.CredentialProvider{Secrets: sendCredentials},
+		NewClient:   func(appID, appSecret string) *lark.Client { return lark.NewClient(appID, appSecret) },
+	}}}
+	wecomAdapter := &wecom.Adapter{Protocol: wecomprotocol.Verifier{}, Sender: wecom.OfficialSender{Tokens: &wecom.TokenProvider{Secrets: sendCredentials}}}
+	adapters = append(adapters, feishuAdapter, wecomAdapter)
 	if configValue.FeishuEnabled {
-		sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: bootstrap.SecretStore}
-		feishuCredentials := &feishu.CredentialProvider{Secrets: sendCredentials}
-		feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{
-			Credentials: feishuCredentials,
-			NewClient:   func(appID, appSecret string) *lark.Client { return lark.NewClient(appID, appSecret) },
-		}}}
 		feishuEndpoint, err = newChannelEndpoint(feishuAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
 			preprocessStore, payloads, 1, 1<<20, telemetryProvider)
 		if err != nil {
 			return errors.New("Feishu callback configuration rejected")
 		}
-		adapters = append(adapters, feishuAdapter)
+	}
+	if configValue.WeComEnabled {
+		wecomEndpoint, err = newChannelEndpoint(wecomAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
+			preprocessStore, payloads, 1, 1<<20, telemetryProvider)
+		if err != nil {
+			return errors.New("WeCom callback configuration rejected")
+		}
 	}
 
 	streamBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment,
@@ -268,6 +290,9 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	mux.Handle("/webui/", browser)
 	if feishuEndpoint != nil {
 		mux.Handle("/callbacks/feishu", feishuEndpoint)
+	}
+	if wecomEndpoint != nil {
+		mux.Handle("/callbacks/wecom", wecomEndpoint)
 	}
 	mux.HandleFunc("/livez", func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(writer http.ResponseWriter, request *http.Request) {
@@ -390,6 +415,11 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		FeishuVerificationToken: strings.TrimSpace(getenv("FEISHU_VERIFICATION_TOKEN")),
 		FeishuEncryptKey:        strings.TrimSpace(getenv("FEISHU_ENCRYPT_KEY")),
 		FeishuBotOpenID:         strings.TrimSpace(getenv("FEISHU_BOT_OPEN_ID")),
+		WeComEnabled:            strings.EqualFold(strings.TrimSpace(getenv("TRPC_WECOM_LOCAL_ENABLED")), "true"),
+		WeComCorpID:             strings.TrimSpace(getenv("WECOM_CORP_ID")),
+		WeComAppSecret:          strings.TrimSpace(getenv("WECOM_APP_SECRET")),
+		WeComCallbackToken:      strings.TrimSpace(getenv("WECOM_CALLBACK_TOKEN")),
+		WeComEncodingAESKey:     strings.TrimSpace(getenv("WECOM_ENCODING_AES_KEY")),
 	}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
 		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
@@ -401,6 +431,14 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 	if value.FeishuEnabled && (value.FeishuAppID == "" || value.FeishuAppSecret == "" || value.FeishuVerificationToken == "" ||
 		value.FeishuEncryptKey == "") {
 		return webUILocalConfig{}, errors.New("Feishu local configuration is incomplete")
+	}
+	if value.WeComEnabled {
+		agentID, agentIDErr := strconv.ParseInt(strings.TrimSpace(getenv("WECOM_AGENT_ID")), 10, 64)
+		if agentIDErr != nil || agentID <= 0 || value.WeComCorpID == "" || value.WeComAppSecret == "" || value.WeComCallbackToken == "" ||
+			value.WeComEncodingAESKey == "" {
+			return webUILocalConfig{}, errors.New("WeCom local configuration is incomplete")
+		}
+		value.WeComAgentID = agentID
 	}
 	return value, nil
 }
@@ -520,6 +558,10 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
+	root, snapshot, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, configValue)
+	if err != nil {
+		return webUILocalBootstrap{}, err
+	}
 	var binding configdomain.ChannelBinding
 	for _, candidate := range snapshot.Payload.ChannelBindings {
 		if candidate.BindingID == webUILocalBindingID && candidate.Channel == "webui" {
@@ -540,6 +582,18 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		}
 		if feishuBinding.BindingID == "" || feishuBinding.ExternalAccountID != configValue.FeishuAppID {
 			return webUILocalBootstrap{}, errors.New("existing Feishu local control plane is incompatible; recreate the Compose volume")
+		}
+	}
+	var wecomBinding configdomain.ChannelBinding
+	if configValue.WeComEnabled {
+		for _, candidate := range snapshot.Payload.ChannelBindings {
+			if candidate.BindingID == wecomLocalBindingID && candidate.Channel == "wecom" {
+				wecomBinding = candidate
+				break
+			}
+		}
+		if wecomBinding.BindingID == "" || wecomBinding.ExternalAccountID != configValue.WeComCorpID {
+			return webUILocalBootstrap{}, errors.New("existing WeCom local control plane is incompatible; recreate the Compose volume")
 		}
 	}
 	secretValues := []struct {
@@ -577,6 +631,26 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 				value: []byte(fmt.Sprintf(`{"app_id":%q,"app_secret":%q}`, configValue.FeishuAppID, configValue.FeishuAppSecret))},
 		)
 	}
+	if configValue.WeComEnabled {
+		secretValues = append(secretValues,
+			struct {
+				scope secrets.Scope
+				ref   secrets.SecretRef
+				value []byte
+			}{scope: secrets.Scope{TenantID: webUILocalTenantID, Subject: wecomLocalBindingID, Purpose: secrets.PurposeChannelVerify,
+				ResourceID: wecomLocalBindingID, ResourceVersion: snapshot.ConfigVersion}, ref: wecomBinding.SecretRef,
+				value: []byte(fmt.Sprintf(`{"token":%q,"encoding_aes_key":%q,"receive_id":%q,"agent_id":%d}`,
+					configValue.WeComCallbackToken, configValue.WeComEncodingAESKey, configValue.WeComCorpID, configValue.WeComAgentID))},
+			struct {
+				scope secrets.Scope
+				ref   secrets.SecretRef
+				value []byte
+			}{scope: secrets.Scope{TenantID: webUILocalTenantID, Subject: wecomLocalBindingID, Purpose: secrets.PurposeChannelSend,
+				ResourceID: wecomLocalBindingID, ResourceVersion: snapshot.ConfigVersion}, ref: wecomBinding.SendSecretRef,
+				value: []byte(fmt.Sprintf(`{"corp_id":%q,"corp_secret":%q,"agent_id":%d}`,
+					configValue.WeComCorpID, configValue.WeComAppSecret, configValue.WeComAgentID))},
+		)
+	}
 	for _, item := range secretValues {
 		if err := writeLocalSecret(configValue.SecretRoot, item.scope, item.ref, item.value); err != nil {
 			return webUILocalBootstrap{}, err
@@ -611,8 +685,20 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 			return webUILocalBootstrap{}, err
 		}
 	}
+	var wecomRoute ingress.BindingRoute
+	if configValue.WeComEnabled {
+		wecomRoute = ingress.BindingRoute{OpaqueBindingID: "wecom-local-binding-v1", Channel: "wecom",
+			RouteKeyDigest: wecomprotocol.RouteKeyDigest(wecomLocalRouteKey), TenantID: webUILocalTenantID, AgentAppID: webUILocalAppID,
+			ChannelBindingID: wecomLocalBindingID, ExternalAccountID: configValue.WeComCorpID, TenantVersion: root.Version,
+			BindingVersion: snapshot.ConfigVersion, SecretRef: wecomBinding.SecretRef,
+			IdentitySecretRef: secrets.SecretRef{Ref: "secret://local/identity", Version: 1},
+			SessionSecretRef:  secrets.SecretRef{Ref: "secret://local/session", Version: 1}, Enabled: true}
+		if err := ingresspostgres.New(db).PutBindingRoute(ctx, wecomRoute); err != nil {
+			return webUILocalBootstrap{}, err
+		}
+	}
 	return webUILocalBootstrap{Tenant: root, Config: snapshot, Route: route, SecretRoot: configValue.SecretRoot,
-		FeishuRoute: feishuRoute, PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
+		FeishuRoute: feishuRoute, WeComRoute: wecomRoute, PayloadKey: payloadResolver, SecretStore: secretStore, ProviderRepo: providers}, nil
 }
 
 type webUILocalPolicyStore interface {
@@ -740,6 +826,55 @@ func ensureWebUILocalFeishuBinding(ctx context.Context, configs configdomain.Rep
 	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID, ExpectedTenantVersion: root.Version,
 		Payload: payload, Metadata: tenant.ChangeMetadata{ActorType: "system", ActorID: "feishu-local", ReasonCode: "local_feishu_binding",
 			CorrelationID: "feishu-local-binding", TraceID: "feishu-local-binding"}})
+	if err != nil {
+		return tenant.Tenant{}, configdomain.Snapshot{}, err
+	}
+	return published.Tenant, published.Snapshot, nil
+}
+
+// ensureWebUILocalWeComBinding extends the disposable local snapshot only
+// when the explicit wecom-local profile is enabled. Corp IDs are routing
+// identities, so a changed value is represented by a new snapshot version;
+// the callback and send credentials always remain scoped secret material.
+func ensureWebUILocalWeComBinding(ctx context.Context, configs configdomain.Repository, root tenant.Tenant,
+	snapshot configdomain.Snapshot, value webUILocalConfig,
+) (tenant.Tenant, configdomain.Snapshot, error) {
+	if !value.WeComEnabled {
+		return root, snapshot, nil
+	}
+	if ctx == nil || configs == nil || root.TenantID != webUILocalTenantID || snapshot.TenantID != webUILocalTenantID ||
+		value.WeComCorpID == "" || value.WeComAppSecret == "" || value.WeComCallbackToken == "" || value.WeComEncodingAESKey == "" || value.WeComAgentID <= 0 {
+		return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("invalid WeCom local control plane")
+	}
+	payload := snapshot.Payload
+	for index, binding := range payload.ChannelBindings {
+		if binding.BindingID != wecomLocalBindingID {
+			continue
+		}
+		if binding.Channel != "wecom" || binding.AgentAppID != webUILocalAppID ||
+			binding.SecretRef != (secrets.SecretRef{Ref: "secret://local/wecom-verify", Version: 1}) ||
+			binding.SendSecretRef != (secrets.SecretRef{Ref: "secret://local/wecom-send", Version: 1}) {
+			return tenant.Tenant{}, configdomain.Snapshot{}, errors.New("existing WeCom local binding is incompatible")
+		}
+		if binding.ExternalAccountID == value.WeComCorpID {
+			return root, snapshot, nil
+		}
+		payload.ChannelBindings[index].ExternalAccountID = value.WeComCorpID
+		published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID, ExpectedTenantVersion: root.Version,
+			Payload: payload, Metadata: tenant.ChangeMetadata{ActorType: "system", ActorID: "wecom-local", ReasonCode: "local_wecom_corp_rotation",
+				CorrelationID: "wecom-local-corp-rotation", TraceID: "wecom-local-corp-rotation"}})
+		if err != nil {
+			return tenant.Tenant{}, configdomain.Snapshot{}, err
+		}
+		return published.Tenant, published.Snapshot, nil
+	}
+	payload.ChannelBindings = append(payload.ChannelBindings, configdomain.ChannelBinding{BindingID: wecomLocalBindingID, Channel: "wecom",
+		ExternalAccountID: value.WeComCorpID, AgentAppID: webUILocalAppID,
+		SecretRef:     secrets.SecretRef{Ref: "secret://local/wecom-verify", Version: 1},
+		SendSecretRef: secrets.SecretRef{Ref: "secret://local/wecom-send", Version: 1}})
+	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID, ExpectedTenantVersion: root.Version,
+		Payload: payload, Metadata: tenant.ChangeMetadata{ActorType: "system", ActorID: "wecom-local", ReasonCode: "local_wecom_binding",
+			CorrelationID: "wecom-local-binding", TraceID: "wecom-local-binding"}})
 	if err != nil {
 		return tenant.Tenant{}, configdomain.Snapshot{}, err
 	}

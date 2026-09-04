@@ -61,6 +61,26 @@ func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 	if err != nil || configured.FeishuBotOpenID != "ou_local_bot" {
 		t.Fatalf("configured=%+v err=%v", configured, err)
 	}
+	wecom := cloneEnvironment(base)
+	wecom["TRPC_WECOM_LOCAL_ENABLED"] = "true"
+	if _, err := loadWebUILocalConfig(mapEnvironment(wecom)); err == nil {
+		t.Fatal("incomplete WeCom local configuration accepted")
+	}
+	wecom["WECOM_CORP_ID"] = "ww_local"
+	wecom["WECOM_APP_SECRET"] = "local-corp-secret"
+	wecom["WECOM_CALLBACK_TOKEN"] = "local-callback-token"
+	wecom["WECOM_ENCODING_AES_KEY"] = "local-encoding-aes-key"
+	for _, agentID := range []string{"", "0", "-1000002", "not-a-number"} {
+		wecom["WECOM_AGENT_ID"] = agentID
+		if _, err := loadWebUILocalConfig(mapEnvironment(wecom)); err == nil {
+			t.Fatalf("WECOM_AGENT_ID=%q accepted", agentID)
+		}
+	}
+	wecom["WECOM_AGENT_ID"] = "1000002"
+	configured, err = loadWebUILocalConfig(mapEnvironment(wecom))
+	if err != nil || !configured.WeComEnabled || configured.WeComCorpID != "ww_local" || configured.WeComAgentID != 1000002 {
+		t.Fatalf("configured=%+v err=%v", configured, err)
+	}
 }
 
 func TestWriteLocalSecretUsesScopedStableFilenameAndRejectsDrift(t *testing.T) {
@@ -212,5 +232,39 @@ func TestEnsureWebUILocalToolControlPlaneUpgradesOnce(t *testing.T) {
 	if err != nil || snapshot.ConfigVersion != feishuConfigVersion+1 || root.Version != feishuTenantVersion+1 ||
 		snapshot.Payload.ChannelBindings[0].ExternalAccountID != rotated.FeishuAppID {
 		t.Fatalf("rotated binding root=%#v snapshot=%#v err=%v", root, snapshot, err)
+	}
+	if _, snapshot, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, webUILocalConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	wecomDisabledVersion := snapshot.ConfigVersion
+	wecom := webUILocalConfig{WeComEnabled: true, WeComCorpID: "ww_local", WeComAppSecret: "wecom-corp-secret",
+		WeComCallbackToken: "wecom-callback-token", WeComEncodingAESKey: "wecom-encoding-aes-key", WeComAgentID: 1000002}
+	root, snapshot, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, wecom)
+	if err != nil || len(snapshot.Payload.ChannelBindings) != 2 || snapshot.ConfigVersion != wecomDisabledVersion+1 {
+		t.Fatalf("WeCom binding snapshot=%#v err=%v", snapshot, err)
+	}
+	wecomBinding := snapshot.Payload.ChannelBindings[1]
+	if wecomBinding.BindingID != wecomLocalBindingID || wecomBinding.Channel != "wecom" || wecomBinding.AgentAppID != webUILocalAppID ||
+		wecomBinding.ExternalAccountID != wecom.WeComCorpID ||
+		wecomBinding.SecretRef != (secrets.SecretRef{Ref: "secret://local/wecom-verify", Version: 1}) ||
+		wecomBinding.SendSecretRef != (secrets.SecretRef{Ref: "secret://local/wecom-send", Version: 1}) {
+		t.Fatalf("wecomBinding=%#v", wecomBinding)
+	}
+	wecomConfigVersion, wecomTenantVersion := snapshot.ConfigVersion, root.Version
+	root, snapshot, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, wecom)
+	if err != nil || snapshot.ConfigVersion != wecomConfigVersion || root.Version != wecomTenantVersion {
+		t.Fatalf("non-idempotent WeCom binding root=%#v snapshot=%#v err=%v", root, snapshot, err)
+	}
+	wecomRotated := wecom
+	wecomRotated.WeComCorpID = "ww_rotated"
+	root, snapshot, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, wecomRotated)
+	if err != nil || snapshot.ConfigVersion != wecomConfigVersion+1 || root.Version != wecomTenantVersion+1 ||
+		snapshot.Payload.ChannelBindings[1].ExternalAccountID != wecomRotated.WeComCorpID {
+		t.Fatalf("rotated WeCom binding root=%#v snapshot=%#v err=%v", root, snapshot, err)
+	}
+	invalid := wecomRotated
+	invalid.WeComAgentID = 0
+	if _, _, err = ensureWebUILocalWeComBinding(ctx, configs, root, snapshot, invalid); err == nil {
+		t.Fatal("invalid WeCom local control plane accepted")
 	}
 }
