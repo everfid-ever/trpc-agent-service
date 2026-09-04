@@ -9,6 +9,6 @@
 - `feishu-local` profile：开发者显式提供本地忽略的 `secrets/feishu.env` 与 DeepSeek Key 后，启动真实飞书 callback、验签、durable ingress、Worker 和 Reply API 投递。它只用于本机 Docker 验收；外部事件订阅还需要把宿主机的 `58086` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/feishu?route_key=local-feishu`。
 - `wecom-local` profile：同 feishu-local 的组合方式，改用本地忽略的 `secrets/wecom.env`（Corp ID、Agent ID、回调 Token/EncodingAESKey、应用 Secret），启动真实企业微信回调验签、durable ingress、Worker 和官方 Reply API 投递。外部回调需要把宿主机的 `58087` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/wecom?route_key=local-wecom`。
 - `runtime-test` profile：本地 PostgreSQL/Redis migration 与恢复契约。
-- `docker-compose.minimal.yml`：由 `bash scripts/minimal_backend_smoke.sh` 创建并自动销毁的 PostgreSQL、Redis、Qdrant、Vault smoke 环境。
+- `docker-compose.backend-smoke.yml`：由 `bash scripts/backend_adapter_smoke.sh` 创建并自动销毁的 PostgreSQL、Redis、Qdrant、Vault smoke 环境。
 
 Compose 环境的数据只用于开发和测试。不要把默认 Token、默认密码或容器卷复制到真实环境。

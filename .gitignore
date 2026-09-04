@@ -16,8 +16,8 @@ vendor/
 data/*
 !data/README.md
 .workbuddy
-deploy/compose/.env.m2
-deploy/compose/.env.m3-im
+deploy/compose/.env.local
+deploy/compose/.env.live-im
 deploy/compose/secrets/*
 !deploy/compose/secrets/.gitkeep
 deploy/smoke/*.env

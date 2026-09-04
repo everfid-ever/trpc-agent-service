@@ -4,7 +4,7 @@ for name in TRPC_MIGRATION_TEST TRPC_POSTGRES_ADMIN_DSN TRPC_REDIS_TEST_ADDR TRP
   [[ -n "${!name:-}" ]] || { echo "${name} is required" >&2; exit 2; }
 done
 
-# The Qdrant image has no shell HTTP client, so its readiness is asserted here
+# The Qdrant image has no shell HTTP client, so readiness is asserted here
 # rather than by a container healthcheck.
 for _ in $(seq 1 60); do
   curl -fsS "${TRPC_QDRANT_TEST_ENDPOINT}/healthz" >/dev/null 2>&1 && break

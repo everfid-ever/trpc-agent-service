@@ -15,7 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
-func TestM2WebUIAdapterUsesDurableIMIngressContract(t *testing.T) {
+func TestWebUIAdapterUsesDurableIMIngressContract(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	const tenantID, routeKey, accountID = "tenant-webui", "opaque-webui-route", "local-account"
 	const token = "0123456789abcdef0123456789abcdef"
@@ -24,7 +24,7 @@ func TestM2WebUIAdapterUsesDurableIMIngressContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &webui.Adapter{Protocol: webui.Verifier{Now: func() time.Time { return now }}}
-	endpoint, intake, payloads := newM2Endpoint(t, adapter, tenantID, routeKey, accountID, webui.RouteKeyDigest(routeKey), secret, now)
+	endpoint, intake, payloads := newIMEndpoint(t, adapter, tenantID, routeKey, accountID, webui.RouteKeyDigest(routeKey), secret, now)
 	body, err := json.Marshal(map[string]any{"schema_version": 1, "external_account_id": accountID,
 		"external_message_id": "browser-message-1", "external_user_id": "browser-user", "external_chat_id": "browser-chat",
 		"conversation_type": "p2p", "message_type": "text", "text": "hello from browser", "occurred_at": now})

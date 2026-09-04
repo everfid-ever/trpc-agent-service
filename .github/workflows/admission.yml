@@ -46,6 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Assert Compose input is valid
-        run: docker compose -f deploy/compose/docker-compose.minimal.yml config --quiet
+        run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
       - name: Run isolated backend smoke
-        run: bash scripts/minimal_backend_smoke.sh
+        run: bash scripts/backend_adapter_smoke.sh

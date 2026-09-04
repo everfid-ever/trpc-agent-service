@@ -438,7 +438,7 @@ func runWebUILocalBootstrap(parent context.Context, getenv func(string) string, 
 func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) {
 	value := webUILocalConfig{PostgresDSN: strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")),
 		RedisAddress: strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS")), ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
-		RedisEnvironment:        valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "m2-webui-local"),
+		RedisEnvironment:        valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "local-runtime"),
 		SecretRoot:              valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
 		APIKeyFile:              valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
 		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),

@@ -100,13 +100,13 @@ go run ./cmd/local-webui-load \
 
 ### 最小可运行部署：Docker Desktop
 
-使用仓库的 `deploy/compose/docker-compose.m2.yml`：PostgreSQL 16、Redis 7、OTel Collector、Jaeger 与一个 standalone `webui-local`/`feishu-local`/`wecom-local` runtime。完整命令、密钥文件约束与真实 IM tunnel 步骤见 [getting-started.md](getting-started.md)。三个 standalone profile 共享本地权威后端，因此有 PostgreSQL advisory lock，必须串行运行；多节点验证使用隔离 Compose project 的 `webui-multinode`。
+使用仓库的 `deploy/compose/docker-compose.local.yml`：PostgreSQL 16、Redis 7、OTel Collector、Jaeger 与一个 standalone `webui-local`/`feishu-local`/`wecom-local` runtime。完整命令、密钥文件约束与真实 IM tunnel 步骤见 [getting-started.md](getting-started.md)。三个 standalone profile 共享本地权威后端，因此有 PostgreSQL advisory lock，必须串行运行；多节点验证使用隔离 Compose project 的 `webui-multinode`。
 
 最小本地验收顺序：
 
 ```bash
 bash scripts/ci_admission.sh
-bash scripts/minimal_backend_smoke.sh
+bash scripts/backend_adapter_smoke.sh
 bash scripts/local_multinode_smoke.sh
 bash scripts/local_dependency_recovery_smoke.sh
 ```
@@ -133,8 +133,8 @@ bash scripts/local_dependency_recovery_smoke.sh
 
   ```bash
   go test -count=1 ./trpcservice/worker ./trpcservice/relay ./trpcservice/channels/delivery
-  docker compose -f deploy/compose/docker-compose.m2.yml up -d postgres redis
-  docker compose -f deploy/compose/docker-compose.m2.yml --profile runtime-test run --rm runtime-test
+  docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis
+  docker compose -f deploy/compose/docker-compose.local.yml --profile runtime-test run --rm runtime-test
   ```
 
   其中覆盖 Worker drain、bounded Runner event drain、ACK 前崩溃 reclaim、relay publish/mark 间退出、callback/reply 重复投递、lease reclaim 与真实 PostgreSQL/Redis Runtime Slice。

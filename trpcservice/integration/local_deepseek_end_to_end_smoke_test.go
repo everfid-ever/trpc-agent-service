@@ -15,28 +15,28 @@ import (
 	"time"
 )
 
-// TestM2GatewayWorkerDeepSeekSmoke is intentionally endpoint-driven: the
+// TestLocalGatewayWorkerDeepSeekSmoke is intentionally endpoint-driven: the
 // target deployment must have its Gateway, Redis/PostgreSQL Worker and frozen
 // DeepSeek model profile configured before this test is enabled.
-func TestM2GatewayWorkerDeepSeekSmoke(t *testing.T) {
-	if os.Getenv("TRPC_M2_DEEPSEEK_SMOKE") != "1" {
+func TestLocalGatewayWorkerDeepSeekSmoke(t *testing.T) {
+	if os.Getenv("TRPC_LOCAL_DEEPSEEK_SMOKE") != "1" {
 		t.Skip("requires explicit Gateway/Worker/DeepSeek smoke")
 	}
-	for _, name := range []string{"TRPC_M2_GATEWAY_URL", "TRPC_M2_GATEWAY_BEARER_TOKEN", "TRPC_M2_DEEPSEEK_PROFILE_ID"} {
+	for _, name := range []string{"TRPC_LOCAL_GATEWAY_URL", "TRPC_LOCAL_GATEWAY_BEARER_TOKEN", "TRPC_LOCAL_DEEPSEEK_PROFILE_ID"} {
 		if strings.TrimSpace(os.Getenv(name)) == "" {
 			t.Fatalf("%s is required", name)
 		}
 	}
-	base, err := url.Parse(strings.TrimSpace(os.Getenv("TRPC_M2_GATEWAY_URL")))
-	if err != nil || (base.Scheme != "https" && !(base.Scheme == "http" && os.Getenv("TRPC_M2_ALLOW_INSECURE") == "1")) || base.Host == "" || base.User != nil {
-		t.Fatal("TRPC_M2_GATEWAY_URL must be an authorized absolute HTTP(S) endpoint")
+	base, err := url.Parse(strings.TrimSpace(os.Getenv("TRPC_LOCAL_GATEWAY_URL")))
+	if err != nil || (base.Scheme != "https" && !(base.Scheme == "http" && os.Getenv("TRPC_LOCAL_ALLOW_INSECURE") == "1")) || base.Host == "" || base.User != nil {
+		t.Fatal("TRPC_LOCAL_GATEWAY_URL must be an authorized absolute HTTP(S) endpoint")
 	}
 	random := make([]byte, 12)
 	if _, err := rand.Read(random); err != nil {
 		t.Fatal(err)
 	}
-	nonce := "m2-deepseek-" + hex.EncodeToString(random)
-	payload, err := json.Marshal(map[string]interface{}{"model": os.Getenv("TRPC_M2_DEEPSEEK_PROFILE_ID"), "stream": false,
+	nonce := "local-deepseek-" + hex.EncodeToString(random)
+	payload, err := json.Marshal(map[string]interface{}{"model": os.Getenv("TRPC_LOCAL_DEEPSEEK_PROFILE_ID"), "stream": false,
 		"messages": []map[string]string{{"role": "user", "content": "Reply with exactly this token and nothing else: " + nonce}}})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestM2GatewayWorkerDeepSeekSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+os.Getenv("TRPC_M2_GATEWAY_BEARER_TOKEN"))
+	request.Header.Set("Authorization", "Bearer "+os.Getenv("TRPC_LOCAL_GATEWAY_BEARER_TOKEN"))
 	request.Header.Set("Idempotency-Key", nonce)
 	request.Header.Set("Content-Type", "application/json")
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -79,5 +79,5 @@ func TestM2GatewayWorkerDeepSeekSmoke(t *testing.T) {
 	if got := strings.TrimSpace(completion.Choices[0].Message.Content); got != nonce {
 		t.Fatalf("DeepSeek semantic sentinel mismatch: got %q want %q", got, nonce)
 	}
-	t.Logf("Gateway -> durable dispatch -> Worker -> DeepSeek -> terminal replay passed for profile %s", os.Getenv("TRPC_M2_DEEPSEEK_PROFILE_ID"))
+	t.Logf("Gateway -> durable dispatch -> Worker -> DeepSeek -> terminal replay passed for profile %s", os.Getenv("TRPC_LOCAL_DEEPSEEK_PROFILE_ID"))
 }

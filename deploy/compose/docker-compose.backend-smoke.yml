@@ -1,6 +1,6 @@
 name: trpc-agent-minimal
 
-# Minimal disposable backend environment for the 0909 smoke. Unlike the M2
+# Disposable backend environment for the adapter smoke. Unlike the full local
 # compose (which binds 0.0.0.0 for local development), every host port here is
 # bound to 127.0.0.1 only. Services talk to each other over the compose network;
 # the host ports exist solely for optional debugging and never face the LAN.
@@ -55,4 +55,4 @@ services:
       redis: {condition: service_healthy}
       qdrant: {condition: service_started}
       vault: {condition: service_healthy}
-    command: ["bash", "scripts/minimal_backend_smoke_inside.sh"]
+    command: ["bash", "scripts/backend_adapter_smoke_inside.sh"]

@@ -21,20 +21,20 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 )
 
-// TestM3RealIMCredentialSmoke performs visible provider effects.
+// TestLiveIMCredentialSmoke performs visible provider effects.
 // It is intentionally opt-in and reads credentials only from owner-only files
 // so secrets never appear in environment values, arguments, logs, or errors.
-func TestM3RealIMCredentialSmoke(t *testing.T) {
-	if os.Getenv("TRPC_M3_IM_PROVIDER_SMOKE") != "1" {
+func TestLiveIMCredentialSmoke(t *testing.T) {
+	if os.Getenv("TRPC_LIVE_IM_PROVIDER_SMOKE") != "1" {
 		t.Skip("requires explicit Feishu/WeCom provider smoke")
 	}
-	providers := selectedM3IMProviders(t, os.Getenv("TRPC_M3_IM_PROVIDERS"))
+	providers := selectedLiveIMProviders(t, os.Getenv("TRPC_LIVE_IM_PROVIDERS"))
 	required := make([]string, 0, 6)
 	if providers["feishu"] {
-		required = append(required, "TRPC_M3_FEISHU_SECRET_FILE", "TRPC_M3_FEISHU_APP_ID", "TRPC_M3_FEISHU_MESSAGE_ID")
+		required = append(required, "TRPC_LIVE_FEISHU_SECRET_FILE", "TRPC_LIVE_FEISHU_APP_ID", "TRPC_LIVE_FEISHU_MESSAGE_ID")
 	}
 	if providers["wecom"] {
-		required = append(required, "TRPC_M3_WECOM_SECRET_FILE", "TRPC_M3_WECOM_CORP_ID", "TRPC_M3_WECOM_USER_ID")
+		required = append(required, "TRPC_LIVE_WECOM_SECRET_FILE", "TRPC_LIVE_WECOM_CORP_ID", "TRPC_LIVE_WECOM_USER_ID")
 	}
 	for _, name := range required {
 		if strings.TrimSpace(os.Getenv(name)) == "" {
@@ -45,7 +45,7 @@ func TestM3RealIMCredentialSmoke(t *testing.T) {
 	if _, err := rand.Read(random); err != nil {
 		t.Fatal(err)
 	}
-	nonce := "m2-im-provider-" + hex.EncodeToString(random)
+	nonce := "live-im-provider-" + hex.EncodeToString(random)
 	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
@@ -53,9 +53,9 @@ func TestM3RealIMCredentialSmoke(t *testing.T) {
 	defer cancel()
 
 	if providers["feishu"] {
-		feishuDestination := channel.ReplyDestination{TenantID: "m3-provider-smoke", Channel: "feishu",
-			ChannelBindingID: "m3-feishu", ExternalAccountID: strings.TrimSpace(os.Getenv("TRPC_M3_FEISHU_APP_ID")), ConfigVersion: 1}
-		feishuSecrets := smokeFileSecretResolver{path: os.Getenv("TRPC_M3_FEISHU_SECRET_FILE")}
+		feishuDestination := channel.ReplyDestination{TenantID: "live-provider-smoke", Channel: "feishu",
+			ChannelBindingID: "live-feishu", ExternalAccountID: strings.TrimSpace(os.Getenv("TRPC_LIVE_FEISHU_APP_ID")), ConfigVersion: 1}
+		feishuSecrets := smokeFileSecretResolver{path: os.Getenv("TRPC_LIVE_FEISHU_SECRET_FILE")}
 		feishuCredentials := &feishu.CredentialProvider{Secrets: feishuSecrets, Client: client}
 		feishuAdapter := &feishu.Adapter{Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{Credentials: feishuCredentials,
 			NewClient: func(appID, appSecret string) *lark.Client {
@@ -63,20 +63,20 @@ func TestM3RealIMCredentialSmoke(t *testing.T) {
 			}}}}
 		feishuResult, err := feishuAdapter.Deliver(ctx, smokeDeliveryRequest(feishuDestination, nonce,
 			channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: feishuDestination.ExternalAccountID,
-				ExternalMessageID: strings.TrimSpace(os.Getenv("TRPC_M3_FEISHU_MESSAGE_ID"))}))
+				ExternalMessageID: strings.TrimSpace(os.Getenv("TRPC_LIVE_FEISHU_MESSAGE_ID"))}))
 		if err != nil || !feishuResult.Delivered || feishuResult.ProviderMessageID == "" {
 			t.Fatalf("Feishu real delivery failed: delivered=%t err=%v", feishuResult.Delivered, sanitizeProviderSmokeError(err))
 		}
 	}
 
 	if providers["wecom"] {
-		wecomDestination := channel.ReplyDestination{TenantID: "m3-provider-smoke", Channel: "wecom",
-			ChannelBindingID: "m3-wecom", ExternalAccountID: strings.TrimSpace(os.Getenv("TRPC_M3_WECOM_CORP_ID")), ConfigVersion: 1}
-		wecomTokens := &wecom.TokenProvider{Secrets: smokeFileSecretResolver{path: os.Getenv("TRPC_M3_WECOM_SECRET_FILE")}, Client: client}
+		wecomDestination := channel.ReplyDestination{TenantID: "live-provider-smoke", Channel: "wecom",
+			ChannelBindingID: "live-wecom", ExternalAccountID: strings.TrimSpace(os.Getenv("TRPC_LIVE_WECOM_CORP_ID")), ConfigVersion: 1}
+		wecomTokens := &wecom.TokenProvider{Secrets: smokeFileSecretResolver{path: os.Getenv("TRPC_LIVE_WECOM_SECRET_FILE")}, Client: client}
 		wecomAdapter := &wecom.Adapter{Sender: wecom.OfficialSender{Tokens: wecomTokens, Client: client}}
 		wecomResult, err := wecomAdapter.Deliver(ctx, smokeDeliveryRequest(wecomDestination, nonce,
 			channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: wecomDestination.ExternalAccountID,
-				ExternalUserID: strings.TrimSpace(os.Getenv("TRPC_M3_WECOM_USER_ID"))}))
+				ExternalUserID: strings.TrimSpace(os.Getenv("TRPC_LIVE_WECOM_USER_ID"))}))
 		if err != nil || !wecomResult.Delivered || wecomResult.ProviderMessageID == "" {
 			t.Fatalf("WeCom real delivery failed: delivered=%t err=%v", wecomResult.Delivered, sanitizeProviderSmokeError(err))
 		}
@@ -84,7 +84,7 @@ func TestM3RealIMCredentialSmoke(t *testing.T) {
 	t.Log("selected real IM provider messages accepted with scoped file credentials")
 }
 
-func selectedM3IMProviders(t *testing.T, raw string) map[string]bool {
+func selectedLiveIMProviders(t *testing.T, raw string) map[string]bool {
 	t.Helper()
 	selected := map[string]bool{}
 	raw = strings.TrimSpace(raw)
@@ -95,7 +95,7 @@ func selectedM3IMProviders(t *testing.T, raw string) map[string]bool {
 	for _, name := range strings.Split(raw, ",") {
 		name = strings.TrimSpace(name)
 		if name != "feishu" && name != "wecom" {
-			t.Fatalf("unsupported TRPC_M3_IM_PROVIDERS entry %q", name)
+			t.Fatalf("unsupported TRPC_LIVE_IM_PROVIDERS entry %q", name)
 		}
 		selected[name] = true
 	}
@@ -104,7 +104,7 @@ func selectedM3IMProviders(t *testing.T, raw string) map[string]bool {
 
 func smokeDeliveryRequest(destination channel.ReplyDestination, content string, target channel.DeliveryTarget) channel.DeliveryRequest {
 	digest := sha256.Sum256([]byte(content))
-	deliveryKey := "m2:" + hex.EncodeToString(digest[:16])
+	deliveryKey := "live:" + hex.EncodeToString(digest[:16])
 	event := channel.ReplyEvent{SchemaVersion: 1, TenantID: destination.TenantID, RequestID: deliveryKey,
 		ChannelBindingID: destination.ChannelBindingID, DeliveryKey: deliveryKey, ConfigVersion: destination.ConfigVersion,
 		EventSeq: 1, Kind: "message.completed", ContentRef: "smoke://" + deliveryKey, Target: target, Final: true}
@@ -140,7 +140,7 @@ func sanitizeProviderSmokeError(err error) error {
 	return runtime.ErrBackendUnavailable
 }
 
-func TestM2ProviderSmokeSecretFilesAreOwnerOnlyAndAbsolute(t *testing.T) {
+func TestLiveIMProviderSmokeSecretFilesAreOwnerOnlyAndAbsolute(t *testing.T) {
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "feishu", ChannelBindingID: "binding",
 		ExternalAccountID: "app", ConfigVersion: 1}
 	if _, err := (smokeFileSecretResolver{path: "relative.json"}).Resolve(context.Background(), destination); err == nil {

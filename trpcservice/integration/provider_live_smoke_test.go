@@ -24,7 +24,7 @@ import (
 	objects3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
 )
 
-func TestM2RealObjectStoreAndScannerProviderSmoke(t *testing.T) {
+func TestLiveObjectStoreAndScannerProviderSmoke(t *testing.T) {
 	if os.Getenv("TRPC_PROVIDER_SMOKE") != "1" {
 		t.Skip("requires explicit real provider smoke")
 	}

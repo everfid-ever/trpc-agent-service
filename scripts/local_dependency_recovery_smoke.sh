@@ -4,7 +4,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-compose_file="${repo_root}/deploy/compose/docker-compose.m2.yml"
+compose_file="${repo_root}/deploy/compose/docker-compose.local.yml"
 secret_file="${repo_root}/deploy/compose/secrets/deepseek-api-key"
 project="trpc-local-recovery-${RANDOM}${RANDOM}"
 port_base="$((20000 + RANDOM))"
@@ -23,9 +23,9 @@ docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required"
 test -s "${secret_file}" || { echo "DeepSeek key file is required at ${secret_file}" >&2; exit 2; }
 
 compose() {
-  M2_POSTGRES_PORT="${port_postgres}" M2_REDIS_PORT="${port_redis}" \
-    M2_JAEGER_PORT="${port_jaeger}" M2_OTEL_HTTP_PORT="${port_otel}" M2_OTEL_PROMETHEUS_PORT="${port_metrics}" \
-    M2_MULTINODE_NODE_A_PORT="${port_a}" M2_MULTINODE_NODE_B_PORT="${port_b}" \
+  TRPC_LOCAL_POSTGRES_PORT="${port_postgres}" TRPC_LOCAL_REDIS_PORT="${port_redis}" \
+    TRPC_LOCAL_JAEGER_PORT="${port_jaeger}" TRPC_LOCAL_OTEL_HTTP_PORT="${port_otel}" TRPC_LOCAL_OTEL_PROMETHEUS_PORT="${port_metrics}" \
+    TRPC_LOCAL_MULTINODE_NODE_A_PORT="${port_a}" TRPC_LOCAL_MULTINODE_NODE_B_PORT="${port_b}" \
     docker compose --project-name "${project}" -f "${compose_file}" --profile webui-multinode "$@"
 }
 

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-compose_file="$ROOT/deploy/compose/docker-compose.m2.yml"
+compose_file="$ROOT/deploy/compose/docker-compose.local.yml"
 secret_file="$ROOT/deploy/compose/secrets/deepseek-api-key"
 
 command -v docker >/dev/null 2>&1 || { echo "Docker Desktop is required" >&2; exit 2; }
@@ -19,5 +19,5 @@ EOF
 fi
 
 docker compose -f "$compose_file" --profile webui up -d --build
-echo "Local WebUI: http://localhost:${M2_WEBUI_PORT:-58081}/webui/"
-echo "Local Jaeger: http://localhost:${M2_JAEGER_PORT:-56686}/"
+echo "Local WebUI: http://localhost:${TRPC_LOCAL_WEBUI_PORT:-58081}/webui/"
+echo "Local Jaeger: http://localhost:${TRPC_LOCAL_JAEGER_PORT:-56686}/"
