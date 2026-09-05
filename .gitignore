@@ -13,8 +13,6 @@ coverage.html
 
 vendor/
 
-data/*
-!data/README.md
 .workbuddy
 deploy/compose/.env.local
 deploy/compose/.env.live-im

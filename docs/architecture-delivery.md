@@ -24,6 +24,8 @@ flowchart LR
 
 控制面管理 Tenant、Agent App Revision、模型/后端 Profile、工具权限、Channel Binding 和审计策略。执行固定 `tenant_id`、app、policy 与 backend 的版本快照，发布或回滚只影响后续请求。
 
+规范来源：[组件拓扑（总体架构 §2）](./design/0.architecture.md#component-topology)、[无 sticky session 的 Worker（总体架构 §9）](./design/0.architecture.md#stateless-worker)、[Tenant/App/Config 版本模型（Tenant 根设计：第二部分 §2）](./design/1.tenant-root-design.md#version-model)、[ExecutionEnvelope（Gateway/Worker §2.1）](./design/2.gateway-worker-design.md#execution-envelope)。
+
 ## 2. 多租户、会话和数据模型
 
 可信 `TenantContext` 只能来自认证 HTTP 身份或验签成功的 Channel Binding；Gateway、Worker、Storage Router 和审计入口均复核 tenant scope。模型、IM、数据库密钥仅以 `SecretRef` 引用，日志、trace 和审计均脱敏。
@@ -32,11 +34,15 @@ flowchart LR
 
 完整 DDL、ER 图和状态约束见详细设计。
 
+规范来源：[可信 TenantContext（Tenant 根设计：第一部分 §7.1）](./design/1.tenant-root-design.md#trusted-tenant-context)、[SessionID 命名空间（Tenant 根设计：第一部分 §7.3）](./design/1.tenant-root-design.md#session-namespace)、[最小 SQL 数据模型与 ER 图（Storage §7）](./design/3.storage-data-consistency-design.md#sql-data-model)、[event/state/summary/Memory 更新顺序（Storage §9）](./design/3.storage-data-consistency-design.md#event-state-summary)。
+
 ## 3. 多后端与一致性策略
 
 PostgreSQL 存强一致控制面、Session、事件、Inbox/Outbox 与审计；Redis 存 broker、lease/fence；向量库或外部 Memory 服务存知识/记忆索引；对象存储存 Artifact、图片和文件。`Storage Router` 按租户 Binding 路由。
 
 并发 session 由 lease/fence 串行化，提交由 PostgreSQL 事务/CAS 保证。`CommitTurn` 原子写结果和 outbox；`ClaimInbox` 与 Delivery Ledger 保证入口和 IM 回复效果幂等。派生数据按版本/水位对账；Redis→SQL、Local Vector→Remote Vector 按 snapshot、dual-write、backfill、verify、cutover 迁移。
+
+规范来源：[Storage Router（Storage §3）](./design/3.storage-data-consistency-design.md#storage-router)、[CommitTurn 原子顺序（Storage §8）](./design/3.storage-data-consistency-design.md#commit-turn)、[多后端迁移状态机（Storage §11）](./design/3.storage-data-consistency-design.md#backend-migration)、[lease/fence（Gateway/Worker §5）](./design/2.gateway-worker-design.md#lease-fence)。
 
 ## 4. IM 接入与端到端时序
 
@@ -60,6 +66,8 @@ sequenceDiagram
 
 `request_id`、W3C `traceparent` 与 tenant/app/session 属性贯穿 callback、broker、Runner、Tool、存储、审计和回复，可在 Jaeger 与审计账本还原链路。Channel 契约和限制见 [`4.channel-governance-security-design.md`](./design/4.channel-governance-security-design.md)。
 
+规范来源：[Binding、去重与 Session 规则（Channel §4）](./design/4.channel-governance-security-design.md#channel-binding-session)、[WeCom 协议适配（Channel §5）](./design/4.channel-governance-security-design.md#wecom-adapter)、[Feishu 协议适配（Channel §6）](./design/4.channel-governance-security-design.md#feishu-adapter)、[媒体预处理（Channel §15）](./design/4.channel-governance-security-design.md#preprocess-job)、[IM 接入与租户解析时序（总体架构 §13.1）](./design/0.architecture.md#im-ingress-sequence)。
+
 ## 5. 治理、运维与风险控制
 
 Worker 内嵌不可绕过的 Governance/Filter Chain：校验 tenant、用户、模型/工具白名单、DLP、预算和危险确认。OpenTelemetry 覆盖 callback、Runner、Tool、存储与 delivery；审计记录 tenant、channel、user、session、agent、tool、decision、latency、error、cost 和 trace ID。
@@ -77,8 +85,12 @@ Worker 内嵌不可绕过的 Governance/Filter Chain：校验 tenant、用户、
 
 Gateway、Worker、Relay 和 Adapter 可独立部署，Worker 无需 sticky session。租户灰度使用不可变快照与 active pointer；回滚以新版本 copy-forward。容量输入包括活跃 session、token、Redis/SQL QPS、积压、IM 峰值和模型并发；仓库只给出 Docker 本地验证。
 
+规范来源：[Trace 属性与链路（Observability §2）](./design/5.observability-audit-devops-design.md#trace-design)、[AuditEvent 字段与保留（Observability §4）](./design/5.observability-audit-devops-design.md#audit-design)、[故障降级（Observability §6）](./design/5.observability-audit-devops-design.md#fault-degradation)、[灰度/回滚（Observability §8）](./design/5.observability-audit-devops-design.md#progressive-release-rollback)、[容量模型（Observability §9）](./design/5.observability-audit-devops-design.md#capacity-model)。
+
 ## 6. tRPC-Agent-Go 复用边界与验收
 
 服务复用 tRPC-Agent-Go 的 Runner、Agent、Session/Memory/Knowledge/Artifact、Tool/MCP、Plugin/Guardrail/Callback 与协议公共 API。平台新增可信租户控制面、Profile/Secret 路由、Inbox/Outbox/relay、lease/fence、IM Adapter、治理装配与审计；不依赖上游 `internal` 包。OpenClaw Channel 的 `ID/Run` 生命周期和 sender 语义由服务 Adapter 兼容扩展。
 
 本地 Docker 的命令、资源与成功证据见 [`runbook/verification-matrix.md`](./runbook/verification-matrix.md)；详细规范见 [`design/`](./design/README.md)。
+
+规范来源：[可直接复用的 tRPC-Agent-Go 能力（模块边界 §6）](./design/6.module-boundaries.md#upstream-reuse)、[service 新增平台能力（模块边界 §7）](./design/6.module-boundaries.md#platform-owned-capabilities)、[端到端 Runtime Slice（验证规范 §5）](./design/7.verification-release-design.md#runtime-slice)、[真实 IM Provider 验证（验证规范 §7）](./design/7.verification-release-design.md#real-im-verification)、[Channel 支持矩阵（能力边界 §2）](./design/8.capability-boundaries.md#channel-support-matrix)。

@@ -4,7 +4,9 @@
 
 DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu 与 WeCom smoke 会使用开发者自行创建的应用和临时 HTTPS tunnel；它们同样只服务于本机 Docker 验收。
 
-## 验收者从零复现（推荐顺序）
+## Acceptance from zero
+
+**验收者从零复现（推荐顺序）**
 
 本节面向第一次拿到仓库、没有任何历史数据库或 Docker 数据卷的验收者。无需申请云主机、Kubernetes 或运维账号；Docker Desktop 与自己的 DeepSeek Key 即可完成核心闭环。Feishu、WeCom 是在核心闭环后可选的真实账号验证，不能互相替代。
 
