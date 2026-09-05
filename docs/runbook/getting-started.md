@@ -4,6 +4,55 @@
 
 DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu 与 WeCom smoke 会使用开发者自行创建的应用和临时 HTTPS tunnel；它们同样只服务于本机 Docker 验收。
 
+## 验收者从零复现（推荐顺序）
+
+本节面向第一次拿到仓库、没有任何历史数据库或 Docker 数据卷的验收者。无需申请云主机、Kubernetes 或运维账号；Docker Desktop 与自己的 DeepSeek Key 即可完成核心闭环。Feishu、WeCom 是在核心闭环后可选的真实账号验证，不能互相替代。
+
+1. 克隆仓库，进入根目录，并确认 Compose 文件可解析：
+
+   ```bash
+   git clone <repository-url>
+   cd trpc-agent-service
+   docker compose -f deploy/compose/docker-compose.local.yml config --quiet
+   ```
+
+2. 创建仅本机可读的模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
+
+   ```bash
+   mkdir -p deploy/compose/secrets
+   install -m 600 /absolute/path/to/deepseek-api-key \
+     deploy/compose/secrets/deepseek-api-key
+   ```
+
+3. 启动默认 WebUI 闭环并检查 readiness。首次启动会从空的 PostgreSQL 16 数据库执行业务 schema 基线 `000001`：
+
+   ```bash
+   ./start.sh
+   curl --fail http://localhost:58081/readyz
+   docker compose -f deploy/compose/docker-compose.local.yml exec -T postgres \
+     psql -U postgres -d trpc_agent_service_test -Atc \
+     'SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1'
+   ```
+
+   预期最后一条命令输出 `000001`。然后打开 <http://localhost:58081/webui/>，按第 2 节完成一次文本和 durable confirmation 验收。
+
+4. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据：
+
+   ```bash
+   bash scripts/ci_admission.sh
+   bash scripts/backend_adapter_smoke.sh
+   bash scripts/local_multinode_smoke.sh
+   bash scripts/local_dependency_recovery_smoke.sh
+   ```
+
+5. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 3 节或第 4 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
+
+验收结束后执行 `./stop.sh` 可保留本地数据便于排查。确需重新从空库开始时，才执行下列破坏性命令；它只会删除名为 `trpc-agent-local` 的 Compose project 所创建的卷：
+
+```bash
+docker compose -f deploy/compose/docker-compose.local.yml --profile webui down -v
+```
+
 ## 1. 前置条件
 
 - Docker Desktop（包含 `docker compose` v2）；

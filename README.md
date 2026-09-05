@@ -64,6 +64,8 @@ cp deploy/compose/.env.local.example deploy/compose/.env.local
 
 完整的密钥文件格式、飞书/企业微信回调地址、群聊验证、媒体限制和排障步骤见 [本地运行手册](docs/runbook/getting-started.md)。
 
+首次验收请直接按[验收者从零复现流程](docs/runbook/getting-started.md#验收者从零复现推荐顺序)操作：它明确了空数据库基线、Docker 验证顺序、可选 IM 账号验证，以及不会提交的本机密钥和临时 tunnel 配置。
+
 ## 验证入口
 
 ~~~
