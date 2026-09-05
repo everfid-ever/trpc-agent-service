@@ -495,7 +495,12 @@ BEGIN
       idempotency_key, payload_ref, traceparent)
     VALUES (p_tenant_id, format('%s:%s', v_out->>'kind', v_out->>'idempotency_key'),
       v_out->>'kind', p_request_id, (v_out->>'event_seq')::bigint,
-      v_out->>'idempotency_key', v_out->>'payload_ref', v_out->>'traceparent');
+      v_out->>'idempotency_key', v_out->>'payload_ref', v_out->>'traceparent')
+    -- Governance decisions may durably emit their audit fact before the
+    -- terminal session commit references that same fact. The outbox key is
+    -- the business idempotency boundary, so a replay must converge instead
+    -- of leaving the execution pending on a unique-constraint error.
+    ON CONFLICT ON CONSTRAINT outbox_tenant_id_kind_idempotency_key_key DO NOTHING;
   END LOOP;
   RETURN QUERY SELECT p_commit_id, p_outcome, p_input_seq, v_new_version, p_result_ref, p_reply_cursor, false;
 END;

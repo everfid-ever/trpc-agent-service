@@ -72,6 +72,24 @@ BEGIN
     RAISE EXCEPTION 'stale session version was accepted';
   EXCEPTION WHEN serialization_failure THEN NULL;
   END;
+  -- A governance decision writes its audit fact before the terminal commit.
+  -- CommitTurn must treat that matching durable outbox fact as an idempotent
+  -- replay rather than fail the whole execution with a unique violation.
+  INSERT INTO outbox(tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+  VALUES ('t_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-governance-audit','audit','probe-request',1,
+    'governance:probe-decision','governance://probe')
+  ON CONFLICT DO NOTHING;
+  PERFORM * FROM commit_turn(
+    't_01ARZ3NDEKTSV4RRFFQ69G5FAV','app_01ARZ3NDEKTSV4RRFFQ69G5FAV','probe-session',
+    'probe-request','probe-governance-commit',repeat('e',64),'terminal',1,1,0,'denied',
+    '[]'::jsonb,'{}'::jsonb,NULL,NULL,NULL,
+    '[{"kind":"audit","idempotency_key":"governance:probe-decision","payload_ref":"governance://probe","event_seq":1}]'::jsonb);
+  SELECT count(*) INTO v_outbox_count FROM outbox
+    WHERE tenant_id='t_01ARZ3NDEKTSV4RRFFQ69G5FAV'
+      AND kind='audit' AND idempotency_key='governance:probe-decision';
+  IF v_outbox_count <> 1 THEN
+    RAISE EXCEPTION 'governance outbox duplicate did not converge';
+  END IF;
 END;
 $$;
 
