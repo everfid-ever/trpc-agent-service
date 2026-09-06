@@ -8,10 +8,30 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
+
+const (
+	ContentTypeText = "text/plain"
+	ContentTypeCard = "application/vnd.trpc.card+json"
+)
+
+// NormalizeContentType is deliberately strict: plain text remains the
+// compatibility default, cards must use the service-owned vendor type, and
+// binary replies are limited to images until a file delivery policy exists.
+func NormalizeContentType(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ContentTypeText, nil
+	}
+	if value == ContentTypeText || value == ContentTypeCard || strings.HasPrefix(value, "image/") && len(value) > len("image/") {
+		return value, nil
+	}
+	return "", runtime.ErrCapabilityUnsupported
+}
 
 type InboxKey struct {
 	TenantID, Channel, ExternalAccountID, ExternalMessageID string
@@ -119,10 +139,10 @@ type PreparedPayloadStore interface {
 }
 
 type ResultRecord struct {
-	TenantID, RequestID, ResultRef, ContentDigest string
-	Content                                       []byte
-	KeyVersion                                    int64
-	CreatedAt                                     time.Time
+	TenantID, RequestID, ResultRef, ContentDigest, ContentType string
+	Content                                                    []byte
+	KeyVersion                                                 int64
+	CreatedAt                                                  time.Time
 }
 
 // ResultStore owns immutable terminal response payloads referenced by reply
@@ -153,10 +173,10 @@ type ToolResultStore interface {
 // prompt. Unlike ResultRecord, multiple immutable interactions may belong to
 // one request before its terminal result exists.
 type InteractionRecord struct {
-	TenantID, RequestID, ContentRef, ContentDigest string
-	Content                                        []byte
-	KeyVersion                                     int64
-	CreatedAt                                      time.Time
+	TenantID, RequestID, ContentRef, ContentDigest, ContentType string
+	Content                                                     []byte
+	KeyVersion                                                  int64
+	CreatedAt                                                   time.Time
 }
 
 type InteractionStore interface {

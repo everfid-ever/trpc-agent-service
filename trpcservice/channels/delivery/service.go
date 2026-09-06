@@ -84,17 +84,24 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	if adapter == nil || adapter.ID() != event.Target.Channel {
 		return runtime.ErrTenantScope
 	}
-	segments := splitText(result.Content, maxTextBytes(adapter))
-	plan := messaging.DeliveryPlan{RendererVersion: s.rendererVersion(), FormatVersion: s.formatVersion(len(segments)), ContentDigest: result.ContentDigest, SegmentCount: len(segments)}
+	contentType, err := messaging.NormalizeContentType(result.ContentType)
+	if err != nil {
+		return err
+	}
+	segments := [][]byte{append([]byte(nil), result.Content...)}
+	if contentType == messaging.ContentTypeText {
+		segments = splitText(result.Content, maxTextBytes(adapter))
+	}
+	plan := messaging.DeliveryPlan{RendererVersion: s.rendererVersion(), FormatVersion: s.formatVersion(contentType, len(segments)), ContentDigest: result.ContentDigest, SegmentCount: len(segments)}
 	for segmentNo, content := range segments {
-		if err := s.deliverSegment(ctx, event, adapter, plan, segmentNo, content); err != nil {
+		if err := s.deliverSegment(ctx, event, adapter, plan, segmentNo, content, contentType); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s Service) deliverSegment(ctx context.Context, event channel.ReplyEvent, adapter channel.Adapter, plan messaging.DeliveryPlan, segmentNo int, content []byte) error {
+func (s Service) deliverSegment(ctx context.Context, event channel.ReplyEvent, adapter channel.Adapter, plan messaging.DeliveryPlan, segmentNo int, content []byte, contentType string) error {
 	key := messaging.DeliveryKey{TenantID: event.TenantID, DeliveryKey: event.DeliveryKey, SegmentNo: segmentNo}
 	claimTTL := s.ClaimTTL
 	if claimTTL <= 0 {
@@ -123,7 +130,7 @@ func (s Service) deliverSegment(ctx context.Context, event channel.ReplyEvent, a
 	}
 	record, resultDelivery, deliverErr := s.deliverWithClaimRenewal(ctx, adapter, channel.DeliveryRequest{
 		Event: event, ClientRequestID: record.ClientRequestID, Target: event.Target,
-		Content: append([]byte(nil), content...), ContentDigest: contentDigest,
+		Content: append([]byte(nil), content...), ContentDigest: contentDigest, ContentType: contentType,
 	}, record, claimTTL)
 	if deliverErr != nil {
 		var ambiguous AmbiguousError
@@ -164,9 +171,15 @@ func (s Service) rendererVersion() string {
 	return "terminal-text-v1"
 }
 
-func (s Service) formatVersion(segmentCount int) string {
+func (s Service) formatVersion(contentType string, segmentCount int) string {
 	if s.FormatVersion != "" {
 		return s.FormatVersion
+	}
+	if contentType == messaging.ContentTypeCard {
+		return "card-v1"
+	}
+	if strings.HasPrefix(contentType, "image/") {
+		return "image-v1"
 	}
 	if segmentCount > 1 {
 		return "text-segment-v1"

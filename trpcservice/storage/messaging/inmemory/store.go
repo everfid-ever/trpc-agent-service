@@ -32,9 +32,11 @@ func (s *Store) PutInteraction(ctx context.Context, in messaging.InteractionReco
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if in.TenantID == "" || in.RequestID == "" || in.ContentRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+	contentType, err := messaging.NormalizeContentType(in.ContentType)
+	if in.TenantID == "" || in.RequestID == "" || in.ContentRef == "" || in.ContentDigest == "" || len(in.Content) == 0 || err != nil {
 		return runtime.ErrCommitConflict
 	}
+	in.ContentType = contentType
 	if in.KeyVersion < 1 {
 		in.KeyVersion = 1
 	}
@@ -42,7 +44,7 @@ func (s *Store) PutInteraction(ctx context.Context, in messaging.InteractionReco
 	defer s.mu.Unlock()
 	key := in.TenantID + "\x00" + in.RequestID + "\x00" + in.ContentRef
 	if old, ok := s.interactions[key]; ok {
-		if old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
+		if old.ContentDigest != in.ContentDigest || old.ContentType != in.ContentType || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
 			return runtime.ErrIdempotencyCollision
 		}
 		return nil
@@ -72,7 +74,7 @@ func (s *Store) GetReplyContent(ctx context.Context, tenantID, requestID, conten
 		}
 		return messaging.ResultRecord{}, runtime.ErrNotFound
 	}
-	return messaging.ResultRecord{TenantID: tenantID, RequestID: requestID, ResultRef: contentRef, ContentDigest: value.ContentDigest,
+	return messaging.ResultRecord{TenantID: tenantID, RequestID: requestID, ResultRef: contentRef, ContentDigest: value.ContentDigest, ContentType: value.ContentType,
 		Content: append([]byte(nil), value.Content...), KeyVersion: value.KeyVersion, CreatedAt: value.CreatedAt}, nil
 }
 
@@ -146,9 +148,11 @@ func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if in.TenantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 {
+	contentType, err := messaging.NormalizeContentType(in.ContentType)
+	if in.TenantID == "" || in.RequestID == "" || in.ResultRef == "" || in.ContentDigest == "" || len(in.Content) == 0 || err != nil {
 		return runtime.ErrCommitConflict
 	}
+	in.ContentType = contentType
 	if in.KeyVersion < 1 {
 		in.KeyVersion = 1
 	}
@@ -156,7 +160,7 @@ func (s *Store) PutResult(ctx context.Context, in messaging.ResultRecord) error 
 	defer s.mu.Unlock()
 	key := in.TenantID + "\x00" + in.RequestID
 	if old, ok := s.results[key]; ok {
-		if old.ResultRef != in.ResultRef || old.ContentDigest != in.ContentDigest || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
+		if old.ResultRef != in.ResultRef || old.ContentDigest != in.ContentDigest || old.ContentType != in.ContentType || old.KeyVersion != in.KeyVersion || string(old.Content) != string(in.Content) {
 			return runtime.ErrIdempotencyCollision
 		}
 		return nil

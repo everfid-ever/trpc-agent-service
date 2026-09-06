@@ -11,8 +11,8 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 3 {
-		t.Fatalf("migrations=%d, want baseline plus additive release and memory migrations", len(all))
+	if len(all) != 4 {
+		t.Fatalf("migrations=%d, want baseline plus additive release, memory, and outbound content migrations", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
@@ -61,6 +61,28 @@ func TestMemoryDomainMigrationIsTransactionWrapped(t *testing.T) {
 	for _, clause := range []string{"CREATE TABLE public.memory_entry", "CREATE TABLE public.memory_index_intent", "memory-invalidation"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("memory migration lacks %q", clause)
+		}
+	}
+}
+
+func TestOutboundContentTypeMigrationIsTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[3]
+	if migration.Version != "000004" || migration.Name != "outbound_content_type" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if _, err := transactionBody(migration.Up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionBody(migration.Down); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"result_payload_content_type_check", "interaction_payload_content_type_check", "application/vnd.trpc.card+json"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("outbound content migration lacks %q", clause)
 		}
 	}
 }

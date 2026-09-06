@@ -34,6 +34,19 @@ func TestPayloadEncryptionRoundTripAndAADBinding(t *testing.T) {
 	}
 }
 
+func TestStructuredContentTypeIsBoundIntoPayloadAAD(t *testing.T) {
+	key := bytes.Repeat([]byte{0x3c}, 32)
+	card := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: strings.Repeat("a", 64), ContentType: messaging.ContentTypeCard}
+	ciphertext, nonce, err := encryptPayload(key, resultAAD(card), []byte(`{"header":{"title":"private"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	card.ContentType = messaging.ContentTypeText
+	if _, err := decryptPayload(key, resultAAD(card), ciphertext, nonce); !errors.Is(err, runtime.ErrVersionMismatch) {
+		t.Fatalf("mutated content type err=%v", err)
+	}
+}
+
 func TestTenantScopedPayloadKeysPostgreSQL16(t *testing.T) {
 	db := openPayloadContractDB(t)
 	ctx := context.Background()

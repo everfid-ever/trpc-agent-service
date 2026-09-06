@@ -108,6 +108,9 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 	if request.ContentDigest != hex.EncodeToString(sum[:]) {
 		return channel.DeliveryResult{}, runtime.ErrVersionMismatch
 	}
+	if request.ContentType != "" && request.ContentType != "text/plain" {
+		return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
+	}
 	destination := channel.ReplyDestination{TenantID: request.Event.TenantID, Channel: request.Target.Channel,
 		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID,
 		ConfigVersion: request.Event.ConfigVersion}

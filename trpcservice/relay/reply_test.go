@@ -25,7 +25,7 @@ func (s *replyPublisherStub) PublishReply(_ context.Context, destination channel
 
 func TestReplyRelayPublishesStableReplyEventThenMarks(t *testing.T) {
 	store := memory.New()
-	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+	result := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", ContentType: messaging.ContentTypeCard, Content: []byte(`{"header":{"title":"done"}}`), KeyVersion: 1}
 	if err := store.PutResult(context.Background(), result); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestReplyRelayPublishesStableReplyEventThenMarks(t *testing.T) {
 		t.Fatalf("count=%d err=%v published=%t events=%#v", count, err, outbox.published, publisher.events)
 	}
 	event := publisher.events[0]
-	if event.DeliveryKey != "r1_key" || event.ContentRef != result.ResultRef || event.ChannelBindingID != "binding" || publisher.destination.ExternalAccountID != "account" {
+	if event.DeliveryKey != "r1_key" || event.ContentRef != result.ResultRef || event.ContentType != messaging.ContentTypeCard || event.ChannelBindingID != "binding" || publisher.destination.ExternalAccountID != "account" {
 		t.Fatalf("destination=%#v event=%#v", publisher.destination, event)
 	}
 }

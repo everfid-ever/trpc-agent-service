@@ -146,7 +146,7 @@ type ReplyEvent struct {
 	TenantID, RequestID, ChannelBindingID, DeliveryKey string
 	ConfigVersion                                      int64
 	EventSeq                                           uint64
-	Kind, ContentRef                                   string
+	Kind, ContentRef, ContentType                      string
 	Target                                             DeliveryTarget
 	Final                                              bool
 	TraceParent                                        string
@@ -179,11 +179,11 @@ type ReplyQueue interface {
 	ReclaimReplies(context.Context, ReplyDestination, ReplyConsumerOptions) ([]ReplyDelivery, error)
 }
 type DeliveryRequest struct {
-	Event           ReplyEvent
-	ClientRequestID string
-	Target          DeliveryTarget
-	Content         []byte
-	ContentDigest   string
+	Event                      ReplyEvent
+	ClientRequestID            string
+	Target                     DeliveryTarget
+	Content                    []byte
+	ContentDigest, ContentType string
 }
 
 type DeliveryTarget struct {

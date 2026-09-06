@@ -100,6 +100,15 @@ func TestDeliverUsesFrozenUserTargetAndSenderClassification(t *testing.T) {
 	if _, err := adapter.Deliver(context.Background(), request); err == nil {
 		t.Fatal("classified sender error was swallowed")
 	}
+	request.ContentType = "application/vnd.trpc.card+json"
+	if _, err := adapter.Deliver(context.Background(), request); err == nil {
+		t.Fatal("unsupported structured content was sent as text")
+	} else {
+		var permanent channel.PermanentDeliveryError
+		if !errors.As(err, &permanent) || permanent.Class != "content_type_unsupported" {
+			t.Fatalf("error=%v", err)
+		}
+	}
 }
 
 func TestAdapterDeliveryContract(t *testing.T) {
