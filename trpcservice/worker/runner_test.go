@@ -158,12 +158,14 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 		t.Fatal(err)
 	}
 	sessions := sessionmemory.New()
+	var progressEvents []ProgressEvent
 	executor := RunnerExecutor{
 		Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles,
 		Sessions: sessions, Payloads: payloads,
 		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
 			return "runner", "event://" + value.ID, nil
 		},
+		Progress: ProgressPublisherFunc(func(value ProgressEvent) { progressEvents = append(progressEvents, value) }),
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
@@ -172,6 +174,9 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	}
 	if calls := mock.Calls(envelope.TenantID, envelope.RequestID); calls != 1 {
 		t.Fatalf("model calls=%d", calls)
+	}
+	if len(progressEvents) != 1 || progressEvents[0].Kind != ProgressRunStarted || progressEvents[0].TenantID != envelope.TenantID || progressEvents[0].RequestID != envelope.RequestID {
+		t.Fatalf("progress=%#v", progressEvents)
 	}
 	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
 	if err != nil || result.KeyVersion != 7 || result.ContentType != messaging.ContentTypeText {

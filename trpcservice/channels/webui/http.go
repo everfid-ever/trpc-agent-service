@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -14,18 +15,22 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/ingress"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/progress"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
 type BrowserHandler struct {
-	Callback      http.Handler
-	Routes        ingress.Store
-	Secrets       secrets.Provider
-	Messages      MessageReader
-	Results       messaging.ResultStore
-	ReplyRoutes   messaging.ReplyRouteStore
+	Callback    http.Handler
+	Routes      ingress.Store
+	Secrets     secrets.Provider
+	Messages    MessageReader
+	Results     messaging.ResultStore
+	ReplyRoutes messaging.ReplyRouteStore
+	Progress    interface {
+		Subscribe(int) (<-chan progress.Event, func())
+	}
 	Confirmations interface {
 		GetConfirmation(context.Context, string, string) (governance.Confirmation, error)
 	}
@@ -99,6 +104,12 @@ func (h BrowserHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		h.replies(writer, request)
+	case "/webui/api/progress":
+		if request.Method != http.MethodGet {
+			methodNotAllowed(writer, "GET")
+			return
+		}
+		h.streamProgress(writer, request)
 	case "/webui/api/confirmations/actions":
 		if request.Method != http.MethodPost {
 			methodNotAllowed(writer, "POST")
@@ -108,6 +119,74 @@ func (h BrowserHandler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	default:
 		http.NotFound(writer, request)
 	}
+}
+
+func (h BrowserHandler) streamProgress(writer http.ResponseWriter, request *http.Request) {
+	if h.Progress == nil || h.ReplyRoutes == nil {
+		http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	query := request.URL.Query()
+	routeKey := strings.TrimSpace(query.Get("route_key"))
+	userID := strings.TrimSpace(query.Get("external_user_id"))
+	chatID := strings.TrimSpace(query.Get("external_chat_id"))
+	if routeKey == "" || userID == "" || chatID == "" {
+		http.Error(writer, "invalid request", http.StatusBadRequest)
+		return
+	}
+	route, err := h.authorize(request.Context(), request, routeKey)
+	if err != nil {
+		writeBrowserError(writer, err)
+		return
+	}
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		http.Error(writer, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
+	stream, unsubscribe := h.Progress.Subscribe(32)
+	defer unsubscribe()
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.WriteString(writer, "retry: 1000\n\n")
+	flusher.Flush()
+	for {
+		select {
+		case <-request.Context().Done():
+			return
+		case event, open := <-stream:
+			if !open {
+				return
+			}
+			if !h.progressMatchesRoute(request.Context(), route, userID, chatID, event) {
+				continue
+			}
+			encoded, encodeErr := json.Marshal(struct {
+				RequestID string `json:"request_id"`
+				Kind      string `json:"kind"`
+				Sequence  uint64 `json:"sequence"`
+				Content   string `json:"content,omitempty"`
+			}{RequestID: event.RequestID, Kind: event.Kind, Sequence: event.Sequence, Content: event.Content})
+			if encodeErr != nil {
+				continue
+			}
+			if _, writeErr := fmt.Fprintf(writer, "event: progress\ndata: %s\n\n", encoded); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (h BrowserHandler) progressMatchesRoute(ctx context.Context, binding ingress.BindingRoute, userID, chatID string, event progress.Event) bool {
+	if event.SchemaVersion != 1 || event.TenantID != binding.TenantID || event.RequestID == "" {
+		return false
+	}
+	route, err := h.ReplyRoutes.ResolveReplyRoute(ctx, event.TenantID, event.RequestID)
+	return err == nil && route.Channel == "webui" && route.ChannelBindingID == binding.ChannelBindingID &&
+		route.ExternalAccountID == binding.ExternalAccountID && route.ExternalUserID == userID && route.ExternalChatID == chatID
 }
 
 func (h BrowserHandler) replies(writer http.ResponseWriter, request *http.Request) {

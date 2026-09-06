@@ -59,6 +59,7 @@ type RunnerExecutor struct {
 	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
 	OutputRenderer    OutboundRenderer
+	Progress          ProgressPublisher
 	Governance        governance.RunGuard
 	Confirmations     governance.ConfirmationCoordinator
 	ContinuationTools ConfirmedToolResolver
@@ -359,7 +360,14 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if err != nil {
 		return fmt.Errorf("run agent graph: %w", err)
 	}
-	runResult, err := consumeRunnerEvents(ctx, events)
+	var progress *progressEmitter
+	if progressAllowed(w, permit) {
+		progress = &progressEmitter{publisher: w.Progress, envelope: envelope}
+		progress.publish(ProgressRunStarted, "")
+	}
+	runResult, err := consumeRunnerEventsWithProgress(ctx, events, func(delta string) {
+		progress.publish(ProgressMessageDelta, delta)
+	})
 	if err != nil {
 		closeRunner(run, events, w.EventDrainTimeout)
 		runnerClosed = true
@@ -659,6 +667,10 @@ type graphContinuationCoordinate struct {
 const graphContinuationRefPrefix = "graph-continuation:v1:"
 
 func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runnerResult, error) {
+	return consumeRunnerEventsWithProgress(ctx, events, nil)
+}
+
+func consumeRunnerEventsWithProgress(ctx context.Context, events <-chan *event.Event, onDelta func(string)) (runnerResult, error) {
 	var content strings.Builder
 	var resultUsage governance.Usage
 	var toolCalls []model.ToolCall
@@ -700,6 +712,9 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 					}
 					if choice.Delta.Content != "" {
 						content.WriteString(choice.Delta.Content)
+						if onDelta != nil {
+							onDelta(choice.Delta.Content)
+						}
 					} else if choice.Message.Content != "" && !value.IsRunnerCompletion() {
 						content.Reset()
 						content.WriteString(choice.Message.Content)

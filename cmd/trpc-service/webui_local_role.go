@@ -55,6 +55,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/progress"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider/modelclient"
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
@@ -176,8 +177,9 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err != nil {
 		return errors.New("WebUI callback configuration rejected")
 	}
+	progressHub := progress.NewHub()
 	browser := webui.BrowserHandler{Callback: endpoint, Routes: bindings, Secrets: bootstrap.SecretStore,
-		Messages: webuiMailbox, Results: payloads}
+		Messages: webuiMailbox, Results: payloads, ReplyRoutes: inbox, Progress: progressHub}
 	adapters := []channel.Adapter{webuiAdapter}
 	var feishuEndpoint, wecomEndpoint http.Handler
 	// The local profiles share one PostgreSQL volume, so the delivery catalog
@@ -254,6 +256,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
 		Sessions: sessionpostgres.New(db), Payloads: payloads, Artifacts: artifactpostgres.New(db),
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
+		Progress:   progressHub,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
 	workerConsumer := worker.Consumer{WorkerID: configValue.instanceName("worker"), Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
