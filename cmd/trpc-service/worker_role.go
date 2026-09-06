@@ -45,6 +45,8 @@ import (
 	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
+	memorystore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/memory"
+	memorypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/memory/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	objectstores3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
@@ -143,6 +145,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		runGovernance.InputGuard, runGovernance.OutputGuard = guard, guard
 	}
 	sessions := sessionpostgres.New(db)
+	memoryCache := memorystore.NewCache(memorypostgres.New(db), 5*time.Second)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	agentFactory.Confirmations, agentFactory.ToolResults = governanceStore, payloads
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
@@ -250,6 +253,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,
 		RetryDelay: configValue.WorkerRetryWait, PollInterval: configValue.WorkerReclaimInterval,
 		Telemetry: telemetryProvider}.Run)
+	start("memory invalidation relay", relay.TenantControlRelay{Outbox: payloads, Controls: publisher,
+		Kind: "memory-invalidation", Owner: workerID + "-memory-relay", BatchSize: configValue.WorkerReclaimLimit,
+		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,
+		RetryDelay: configValue.WorkerRetryWait, PollInterval: configValue.WorkerReclaimInterval,
+		Telemetry: telemetryProvider}.Run)
 	start("execution control consumer", func(ctx context.Context) error {
 		return controlQueue.ConsumeExecutionControl(ctx, relay.ExecutionControlConsumerOptions{ConsumerID: workerID + "-control"}, hints.ConsumeExecutionControl)
 	})
@@ -280,10 +288,14 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	})
 	consumeConfigInvalidation := func(ctx context.Context, delivery relay.TenantControlDelivery) error {
 		event := delivery.Event
-		if event.Kind != "config-invalidation" {
-			return nil
-		}
 		switch {
+		case event.Kind == "memory-invalidation" && strings.HasPrefix(event.PayloadRef, "memory://"):
+			// Redis delivery accelerates cache invalidation. The cache TTL remains
+			// the convergence fallback when a notification is missed.
+			memoryCache.ApplyInvalidation(memorystore.Invalidation{TenantID: event.TenantID, Version: int64(event.Version)})
+			return nil
+		case event.Kind != "config-invalidation":
+			return nil
 		case strings.HasPrefix(event.PayloadRef, "provider-profile://"):
 			return credentialInvalidator.ConsumeProfileInvalidation(ctx, providerRepo, event.TenantID, event.AggregateID, event.Version, event.PayloadRef)
 		case strings.HasPrefix(event.PayloadRef, "config://"):

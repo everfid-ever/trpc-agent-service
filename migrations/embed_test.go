@@ -11,8 +11,8 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("migrations=%d, want baseline plus additive releases migration", len(all))
+	if len(all) != 3 {
+		t.Fatalf("migrations=%d, want baseline plus additive release and memory migrations", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
@@ -39,6 +39,28 @@ func TestConfigReleaseMigrationIsTransactionWrapped(t *testing.T) {
 	for _, clause := range []string{"CREATE TABLE public.config_release", "CREATE TABLE public.config_release_target", "config_release_target_effective_idx"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("release migration lacks %q", clause)
+		}
+	}
+}
+
+func TestMemoryDomainMigrationIsTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[2]
+	if migration.Version != "000003" || migration.Name != "memory_domain" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if _, err := transactionBody(migration.Up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionBody(migration.Down); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"CREATE TABLE public.memory_entry", "CREATE TABLE public.memory_index_intent", "memory-invalidation"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("memory migration lacks %q", clause)
 		}
 	}
 }

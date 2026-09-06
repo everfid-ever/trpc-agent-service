@@ -24,10 +24,10 @@ const (
 )
 
 type Key struct {
-	TenantID string
-	Scope    Scope
+	TenantID  string
+	Scope     Scope
 	SubjectID string
-	MemoryID string
+	MemoryID  string
 }
 
 type Entry struct {
@@ -48,10 +48,10 @@ type PutRequest struct {
 }
 
 type Query struct {
-	TenantID string
-	Scope    Scope
+	TenantID  string
+	Scope     Scope
 	SubjectID string
-	Limit    int
+	Limit     int
 }
 
 type Invalidation struct {
@@ -72,9 +72,13 @@ func (k Key) Validate() error {
 	}
 	switch k.Scope {
 	case ScopeTenant:
-		if k.SubjectID != "" { return ErrInvalid }
+		if k.SubjectID != "" {
+			return ErrInvalid
+		}
 	case ScopeUser:
-		if k.SubjectID == "" { return ErrInvalid }
+		if k.SubjectID == "" {
+			return ErrInvalid
+		}
 	default:
 		return ErrInvalid
 	}
