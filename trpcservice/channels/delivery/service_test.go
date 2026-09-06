@@ -1,10 +1,13 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -18,6 +21,8 @@ type adapterStub struct {
 	clientRequestIDs []string
 	requests         []channel.DeliveryRequest
 	delay            time.Duration
+	maxTextBytes     int
+	errorsByCall     map[int]error
 }
 
 func (*adapterStub) ID() string                { return "fake" }
@@ -38,12 +43,16 @@ func (s *adapterStub) Deliver(_ context.Context, request channel.DeliveryRequest
 	if s.delay > 0 {
 		time.Sleep(s.delay)
 	}
+	if err := s.errorsByCall[s.calls]; err != nil {
+		return channel.DeliveryResult{}, err
+	}
 	if s.err != nil {
 		return channel.DeliveryResult{}, s.err
 	}
 	return channel.DeliveryResult{ProviderMessageID: "provider-message", Delivered: true}, nil
 }
 func (*adapterStub) Capabilities() channel.Capabilities { return channel.Capabilities{Text: true} }
+func (s *adapterStub) MaxTextBytes() int                { return s.maxTextBytes }
 
 type reconcilingAdapter struct {
 	adapterStub
@@ -109,6 +118,69 @@ func TestDeliveryLedgerPreventsDuplicateProviderEffect(t *testing.T) {
 	}
 	if len(adapter.requests) != 1 || string(adapter.requests[0].Content) != "done" || adapter.requests[0].ContentDigest != "digest" || adapter.requests[0].Target != testReplyEvent(result.ResultRef).Target {
 		t.Fatalf("delivery request=%#v", adapter.requests)
+	}
+}
+
+func TestLongTextIsDurablySegmentedOnUTF8Boundaries(t *testing.T) {
+	store := memory.New()
+	content := []byte(strings.Repeat("你", 5)) // 15 bytes; 6-byte limit yields 3 complete-rune segments.
+	if err := store.PutResult(context.Background(), messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "whole-content", Content: content, KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &adapterStub{maxTextBytes: 6}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1"}
+	event := testReplyEvent("result://request")
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.calls != 3 || len(adapter.requests) != 3 || len(adapter.clientRequestIDs) != 3 {
+		t.Fatalf("calls=%d requests=%#v ids=%#v", adapter.calls, adapter.requests, adapter.clientRequestIDs)
+	}
+	var rebuilt []byte
+	for index, request := range adapter.requests {
+		if !utf8.Valid(request.Content) || len(request.Content) > 6 {
+			t.Fatalf("segment %d=%q", index, request.Content)
+		}
+		rebuilt = append(rebuilt, request.Content...)
+		record, err := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: event.DeliveryKey, SegmentNo: index})
+		if err != nil || record.State != messaging.DeliverySent || record.Plan.SegmentCount != 3 || record.Plan.FormatVersion != "text-segment-v1" {
+			t.Fatalf("record %d=%#v err=%v", index, record, err)
+		}
+	}
+	if !bytes.Equal(rebuilt, content) || adapter.clientRequestIDs[0] == adapter.clientRequestIDs[1] {
+		t.Fatalf("rebuilt=%q clientIDs=%v", rebuilt, adapter.clientRequestIDs)
+	}
+}
+
+func TestSegmentReplayResumesAfterTheFirstUnsentSegment(t *testing.T) {
+	store := memory.New()
+	content := []byte(strings.Repeat("你", 4))
+	if err := store.PutResult(context.Background(), messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "whole-content", Content: content, KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &adapterStub{maxTextBytes: 6, errorsByCall: map[int]error{2: channel.RetryableDeliveryError{Err: errors.New("rate limited"), RetryAfter: time.Nanosecond}}}
+	service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", DefaultRetryDelay: time.Nanosecond}
+	event := testReplyEvent("result://request")
+	if err := service.Deliver(context.Background(), event); err == nil {
+		t.Fatal("first attempt unexpectedly succeeded")
+	}
+	time.Sleep(time.Millisecond)
+	if err := service.Deliver(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.calls != 3 || len(adapter.requests) != 3 || !bytes.Equal(adapter.requests[1].Content, adapter.requests[2].Content) {
+		t.Fatalf("calls=%d requests=%#v", adapter.calls, adapter.requests)
+	}
+	first, err := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: event.DeliveryKey, SegmentNo: 0})
+	if err != nil || first.Attempt != 1 || first.State != messaging.DeliverySent {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: event.DeliveryKey, SegmentNo: 1})
+	if err != nil || second.Attempt != 2 || second.State != messaging.DeliverySent {
+		t.Fatalf("second=%#v err=%v", second, err)
 	}
 }
 

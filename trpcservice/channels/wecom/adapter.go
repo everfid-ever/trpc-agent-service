@@ -129,6 +129,10 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 
 func (a *Adapter) Capabilities() channel.Capabilities { return channel.Capabilities{Text: true} }
 
+// MaxTextBytes reflects the provider's per-message text content limit. The
+// delivery service uses this value to segment a terminal reply durably.
+func (*Adapter) MaxTextBytes() int { return maxTextContentBytes }
+
 // AccessTokenProvider owns credential resolution and the shared token cache.
 // forceRefresh is true only after WeCom explicitly rejects the first token.
 type AccessTokenProvider interface {

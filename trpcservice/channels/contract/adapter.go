@@ -116,6 +116,13 @@ type IngressBindingResolver interface {
 	PromoteVerified(context.Context, CandidateBindingContext, VerificationReceipt) (VerifiedBinding, error)
 }
 type Capabilities struct{ Text, StreamEdit, Markdown, Card, Image, File, Recall bool }
+
+// TextSegmentLimit is optional. Adapters expose it only when the provider has
+// a hard byte limit for one text message. Delivery uses it to create durable,
+// independently idempotent segments before calling the provider.
+type TextSegmentLimit interface {
+	MaxTextBytes() int
+}
 type ProviderEvent struct {
 	SchemaVersion                                 uint16
 	Channel, ExternalAccountID, ExternalMessageID string

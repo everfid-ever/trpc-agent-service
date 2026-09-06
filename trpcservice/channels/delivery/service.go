@@ -5,9 +5,12 @@ package delivery
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -74,16 +77,25 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	if result.ResultRef != event.ContentRef {
 		return runtime.ErrVersionMismatch
 	}
-	rendererVersion := s.RendererVersion
-	if rendererVersion == "" {
-		rendererVersion = "terminal-text-v1"
+	adapter, err := s.resolveAdapter(ctx, event)
+	if err != nil {
+		return err
 	}
-	formatVersion := s.FormatVersion
-	if formatVersion == "" {
-		formatVersion = "text-v1"
+	if adapter == nil || adapter.ID() != event.Target.Channel {
+		return runtime.ErrTenantScope
 	}
-	key := messaging.DeliveryKey{TenantID: event.TenantID, DeliveryKey: event.DeliveryKey, SegmentNo: 0}
-	plan := messaging.DeliveryPlan{RendererVersion: rendererVersion, FormatVersion: formatVersion, ContentDigest: result.ContentDigest, SegmentCount: 1}
+	segments := splitText(result.Content, maxTextBytes(adapter))
+	plan := messaging.DeliveryPlan{RendererVersion: s.rendererVersion(), FormatVersion: s.formatVersion(len(segments)), ContentDigest: result.ContentDigest, SegmentCount: len(segments)}
+	for segmentNo, content := range segments {
+		if err := s.deliverSegment(ctx, event, adapter, plan, segmentNo, content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s Service) deliverSegment(ctx context.Context, event channel.ReplyEvent, adapter channel.Adapter, plan messaging.DeliveryPlan, segmentNo int, content []byte) error {
+	key := messaging.DeliveryKey{TenantID: event.TenantID, DeliveryKey: event.DeliveryKey, SegmentNo: segmentNo}
 	claimTTL := s.ClaimTTL
 	if claimTTL <= 0 {
 		claimTTL = 30 * time.Second
@@ -104,16 +116,14 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 			return runtime.ErrInvariantViolation
 		}
 	}
-	adapter, err := s.resolveAdapter(ctx, event)
-	if err != nil {
-		return s.finishRetry(ctx, record, err, 0)
-	}
-	if adapter == nil || adapter.ID() != event.Target.Channel {
-		return s.finishFailed(ctx, record, runtime.ErrTenantScope, "delivery_route_mismatch", false)
+	contentDigest := plan.ContentDigest
+	if plan.SegmentCount > 1 {
+		sum := sha256.Sum256(content)
+		contentDigest = hex.EncodeToString(sum[:])
 	}
 	record, resultDelivery, deliverErr := s.deliverWithClaimRenewal(ctx, adapter, channel.DeliveryRequest{
 		Event: event, ClientRequestID: record.ClientRequestID, Target: event.Target,
-		Content: append([]byte(nil), result.Content...), ContentDigest: result.ContentDigest,
+		Content: append([]byte(nil), content...), ContentDigest: contentDigest,
 	}, record, claimTTL)
 	if deliverErr != nil {
 		var ambiguous AmbiguousError
@@ -145,6 +155,59 @@ func (s Service) Deliver(ctx context.Context, event channel.ReplyEvent) error {
 	record.LastErrorClass = ""
 	_, err = s.Ledger.FinishDelivery(ctx, record, record.Version)
 	return err
+}
+
+func (s Service) rendererVersion() string {
+	if s.RendererVersion != "" {
+		return s.RendererVersion
+	}
+	return "terminal-text-v1"
+}
+
+func (s Service) formatVersion(segmentCount int) string {
+	if s.FormatVersion != "" {
+		return s.FormatVersion
+	}
+	if segmentCount > 1 {
+		return "text-segment-v1"
+	}
+	return "text-v1"
+}
+
+func maxTextBytes(adapter channel.Adapter) int {
+	if limit, ok := adapter.(channel.TextSegmentLimit); ok && limit.MaxTextBytes() > 0 {
+		return limit.MaxTextBytes()
+	}
+	return 0
+}
+
+// splitText preserves every input byte while ensuring that a segment never
+// ends in the middle of a UTF-8 rune. Invalid UTF-8 is passed through as one
+// segment so the provider adapter can retain its existing permanent-error
+// classification instead of silently changing the response content.
+func splitText(content []byte, maxBytes int) [][]byte {
+	if maxBytes <= 0 || len(content) <= maxBytes || !utf8.Valid(content) {
+		return [][]byte{append([]byte(nil), content...)}
+	}
+	segments := make([][]byte, 0, (len(content)+maxBytes-1)/maxBytes)
+	for start := 0; start < len(content); {
+		end := start + maxBytes
+		if end >= len(content) {
+			segments = append(segments, append([]byte(nil), content[start:]...))
+			break
+		}
+		for end > start && !utf8.Valid(content[start:end]) {
+			end--
+		}
+		// maxBytes can be smaller than the first rune only for a malformed
+		// adapter declaration. Preserve the original response in that case.
+		if end == start {
+			return [][]byte{append([]byte(nil), content...)}
+		}
+		segments = append(segments, append([]byte(nil), content[start:end]...))
+		start = end
+	}
+	return segments
 }
 
 func (s Service) reconcile(ctx context.Context, event channel.ReplyEvent, record messaging.DeliveryRecord) error {
