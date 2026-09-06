@@ -11,4 +11,25 @@
 - `runtime-test` profile：本地 PostgreSQL/Redis migration 与恢复契约。
 - `docker-compose.backend-smoke.yml`：由 `bash scripts/backend_adapter_smoke.sh` 创建并自动销毁的 PostgreSQL、Redis、Qdrant、Vault smoke 环境。
 
+## 本地 Admin 控制面
+
+`gateway-worker` profile 还会启动只供内部使用的 `admin` 服务（默认宿主机端口 `58083`）。它需要独立的 HMAC 密钥，不能复用 Gateway 密钥。先选择一个已经初始化、未禁用的 tenant，再从仓库根目录创建本地文件型 Secret Provider 投放：
+
+~~~
+go run ./cmd/admin-bootstrap secret \
+  -secret-root deploy/compose/secrets \
+  -tenant-id <tenant-id>
+~~~
+
+命令会输出应写入忽略文件 `deploy/compose/.env.local` 的三项 `TRPC_ADMIN_*` 配置，但绝不输出原始密钥，也拒绝覆盖已有投放文件。获取目标 tenant 的当前 version 后，显式签发一个最长 15 分钟的本地测试 token：
+
+~~~
+go run ./cmd/admin-bootstrap token \
+  -secret-root deploy/compose/secrets \
+  -tenant-id <tenant-id> \
+  -tenant-version <current-version>
+~~~
+
+token 会输出到标准输出；应只在本机短期使用，并通过 `Authorization: Bearer <token>` 调用 Admin API。生产环境必须由 Vault/CSI 与身份系统分别投放密钥和签发 token，不能使用这个本地 bootstrap 工具。
+
 Compose 环境的数据只用于开发和测试。不要把默认 Token、默认密码或容器卷复制到真实环境。

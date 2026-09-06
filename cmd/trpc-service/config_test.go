@@ -338,6 +338,36 @@ func TestLoadGatewayConfigRequiresScopedAuthAndDurableDependencies(t *testing.T)
 	}
 }
 
+func TestLoadAdminConfigRequiresDedicatedAuthDependencies(t *testing.T) {
+	values := map[string]string{
+		"TRPC_POSTGRES_DSN":              "postgres://service:secret@postgres/service",
+		"TRPC_SECRET_ROOT":               "/var/run/secrets/trpc-agent-service",
+		"TRPC_ADMIN_PROBE_TENANT_ID":     "probe-tenant",
+		"TRPC_ADMIN_AUTH_SECRET_REF":     "secret://admin/auth",
+		"TRPC_ADMIN_AUTH_SECRET_VERSION": "3",
+		"TRPC_ADMIN_AUTH_CLOCK_SKEW":     "2s",
+		"TRPC_SHUTDOWN_TIMEOUT":          "30s",
+	}
+	config, err := loadAdminConfig(mapEnvironment(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AdminProbeTenant != "probe-tenant" || config.AdminAuthSecretVersion != 3 || config.AdminAuthClockSkew != 2*time.Second {
+		t.Fatalf("config=%+v", config)
+	}
+	for _, name := range []string{"TRPC_POSTGRES_DSN", "TRPC_SECRET_ROOT", "TRPC_ADMIN_PROBE_TENANT_ID", "TRPC_ADMIN_AUTH_SECRET_REF", "TRPC_ADMIN_AUTH_SECRET_VERSION"} {
+		copy := cloneEnvironment(values)
+		delete(copy, name)
+		if _, err := loadAdminConfig(mapEnvironment(copy)); err == nil {
+			t.Fatalf("missing %s accepted", name)
+		}
+	}
+	values["TRPC_ADMIN_AUTH_CLOCK_SKEW"] = "30s"
+	if _, err := loadAdminConfig(mapEnvironment(values)); err == nil {
+		t.Fatal("clock skew equal to shutdown timeout accepted")
+	}
+}
+
 func TestLoadGatewayConfigRejectsUnsafeLimits(t *testing.T) {
 	base := map[string]string{"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_SECRET_ROOT": "/secrets",
 		"TRPC_PAYLOAD_KEY_REF": "payload", "TRPC_PAYLOAD_KEY_VERSION": "1", "TRPC_GATEWAY_PROBE_TENANT_ID": "probe",
@@ -425,6 +455,13 @@ func TestLoadWorkerConfigOptionalDLPIsAllOrNothing(t *testing.T) {
 
 func TestRunWorkerRoleRejectsMissingDependenciesBeforeOpeningClients(t *testing.T) {
 	err := runWorkerRole(context.Background(), func(string) string { return "" }, testLogger())
+	if err == nil || !strings.Contains(err.Error(), "configuration rejected") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestRunAdminRoleRejectsMissingDependenciesBeforeOpeningClients(t *testing.T) {
+	err := runAdminRole(context.Background(), func(string) string { return "" }, testLogger())
 	if err == nil || !strings.Contains(err.Error(), "configuration rejected") {
 		t.Fatalf("error=%v", err)
 	}

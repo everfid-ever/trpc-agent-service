@@ -34,7 +34,7 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [artifact|preprocess|channel|channel-delivery|gateway|admin|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -73,6 +73,8 @@ func runRole(parent context.Context, getenv func(string) string, logger *roleLog
 		return runChannelDeliveryRole(parent, getenv, logger)
 	case "gateway":
 		return runGatewayRole(parent, getenv, logger)
+	case "admin":
+		return runAdminRole(parent, getenv, logger)
 	case "worker":
 		return runWorkerRole(parent, getenv, logger)
 	case "audit-relay":

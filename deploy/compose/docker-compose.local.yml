@@ -340,6 +340,32 @@ services:
       otel-collector:
         condition: service_started
 
+  admin:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+    profiles: ["gateway-worker"]
+    command: ["admin"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+    ports:
+      - "${TRPC_LOCAL_ADMIN_PORT:-58083}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
   worker:
     build:
       context: ../..

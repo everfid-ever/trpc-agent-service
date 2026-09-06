@@ -231,7 +231,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	defer cancelProcess()
 	stopSignals := worker.InstallSignalDrain(processCtx, lifecycle)
 	defer stopSignals()
-	errorsCh := make(chan error, 8)
+	errorsCh := make(chan error, 9)
 	consumerDone := make(chan error, 1)
 	var background sync.WaitGroup
 	start := func(name string, operation func(context.Context) error) {
@@ -245,6 +245,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	}
 	start("readiness monitor", monitor.Run)
 	start("broker backlog monitor", backlogMonitor.Run)
+	start("config invalidation relay", relay.TenantControlRelay{Outbox: payloads, Controls: publisher,
+		Kind: "config-invalidation", Owner: workerID + "-config-relay", BatchSize: configValue.WorkerReclaimLimit,
+		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,
+		RetryDelay: configValue.WorkerRetryWait, PollInterval: configValue.WorkerReclaimInterval,
+		Telemetry: telemetryProvider}.Run)
 	start("execution control consumer", func(ctx context.Context) error {
 		return controlQueue.ConsumeExecutionControl(ctx, relay.ExecutionControlConsumerOptions{ConsumerID: workerID + "-control"}, hints.ConsumeExecutionControl)
 	})
@@ -275,10 +280,21 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	})
 	consumeConfigInvalidation := func(ctx context.Context, delivery relay.TenantControlDelivery) error {
 		event := delivery.Event
-		if event.Kind != "config-invalidation" || !strings.HasPrefix(event.PayloadRef, "provider-profile://") {
+		if event.Kind != "config-invalidation" {
 			return nil
 		}
-		return credentialInvalidator.ConsumeProfileInvalidation(ctx, providerRepo, event.TenantID, event.AggregateID, event.Version, event.PayloadRef)
+		switch {
+		case strings.HasPrefix(event.PayloadRef, "provider-profile://"):
+			return credentialInvalidator.ConsumeProfileInvalidation(ctx, providerRepo, event.TenantID, event.AggregateID, event.Version, event.PayloadRef)
+		case strings.HasPrefix(event.PayloadRef, "config://"):
+			// Config snapshots are immutable and executions carry their exact
+			// version. Retiring only idle bundles therefore makes new work pick
+			// up the published snapshot without disrupting in-flight requests.
+			bundles.RetireTenant(event.TenantID)
+			return nil
+		default:
+			return nil
+		}
 	}
 	start("credential invalidation consumer", func(ctx context.Context) error {
 		return configControlQueue.ConsumeTenantControl(ctx, relay.TenantControlConsumerOptions{ConsumerID: workerID + "-config"}, consumeConfigInvalidation)

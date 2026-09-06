@@ -29,6 +29,7 @@ const (
 	PurposeBackendConnect Purpose = "backend_connect"
 	PurposePayloadEncrypt Purpose = "payload_encrypt"
 	PurposeGatewayAuth    Purpose = "gateway_auth"
+	PurposeAdminAuth      Purpose = "admin_auth"
 	PurposeAuditQueryAuth Purpose = "audit_query_auth"
 )
 
@@ -57,7 +58,7 @@ func validPurpose(value Purpose) bool {
 	switch value {
 	case PurposeChannelVerify, PurposeChannelSend, PurposeTenantIdentity, PurposeTenantSession,
 		PurposeModelCall, PurposeToolCall, PurposeBackendConnect, PurposePayloadEncrypt, PurposeGatewayAuth,
-		PurposeAuditQueryAuth:
+		PurposeAdminAuth, PurposeAuditQueryAuth:
 		return true
 	default:
 		return false

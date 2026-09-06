@@ -72,6 +72,10 @@ type productionConfig struct {
 	GatewayAuthClockSkew, GatewaySSEPollInterval, GatewayProtocolTimeout time.Duration
 	GatewaySSEMaxSubscribers                                             int64
 
+	AdminProbeTenant, AdminAuthSecretRef string
+	AdminAuthSecretVersion               int64
+	AdminAuthClockSkew                   time.Duration
+
 	AuditOwner                             string
 	AuditCompliancePostgresDSN             string
 	AuditBatchSize                         int
@@ -192,6 +196,48 @@ func loadGatewayConfig(getenv func(string) string) (productionConfig, error) {
 	if parseErr != nil || publicURL.Scheme != "https" || publicURL.Host == "" || publicURL.User != nil ||
 		(publicURL.Path != "" && publicURL.Path != "/") || publicURL.RawQuery != "" || publicURL.Fragment != "" {
 		return productionConfig{}, errors.New("invalid TRPC_GATEWAY_PUBLIC_BASE_URL")
+	}
+	return config, nil
+}
+
+func loadAdminConfig(getenv func(string) string) (productionConfig, error) {
+	if getenv == nil {
+		return productionConfig{}, errors.New("environment reader is required")
+	}
+	config := productionConfig{
+		ListenAddress:      valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
+		PostgresDSN:        strings.TrimSpace(getenv("TRPC_POSTGRES_DSN")),
+		SecretRoot:         strings.TrimSpace(getenv("TRPC_SECRET_ROOT")),
+		AdminProbeTenant:   strings.TrimSpace(getenv("TRPC_ADMIN_PROBE_TENANT_ID")),
+		AdminAuthSecretRef: strings.TrimSpace(getenv("TRPC_ADMIN_AUTH_SECRET_REF")),
+		ProbeTimeout:       5 * time.Second,
+		ProbeInterval:      15 * time.Second,
+		ShutdownTimeout:    30 * time.Second,
+		AdminAuthClockSkew: 30 * time.Second,
+	}
+	var err error
+	if config.AdminAuthSecretVersion, err = envInt64(getenv, "TRPC_ADMIN_AUTH_SECRET_VERSION", 0); err != nil || config.AdminAuthSecretVersion < 1 {
+		return productionConfig{}, errors.New("invalid TRPC_ADMIN_AUTH_SECRET_VERSION")
+	}
+	for _, item := range []struct {
+		name    string
+		target  *time.Duration
+		minimum time.Duration
+	}{
+		{"TRPC_PROBE_TIMEOUT", &config.ProbeTimeout, time.Millisecond},
+		{"TRPC_PROBE_INTERVAL", &config.ProbeInterval, time.Millisecond},
+		{"TRPC_SHUTDOWN_TIMEOUT", &config.ShutdownTimeout, time.Second},
+		{"TRPC_ADMIN_AUTH_CLOCK_SKEW", &config.AdminAuthClockSkew, time.Second},
+	} {
+		if *item.target, err = envDuration(getenv, item.name, *item.target); err != nil || *item.target < item.minimum {
+			return productionConfig{}, errors.New("invalid " + item.name)
+		}
+	}
+	if config.ListenAddress == "" || config.PostgresDSN == "" || config.SecretRoot == "" || config.AdminProbeTenant == "" || config.AdminAuthSecretRef == "" {
+		return productionConfig{}, errors.New("required admin dependency configuration is missing")
+	}
+	if config.AdminAuthClockSkew >= config.ShutdownTimeout {
+		return productionConfig{}, errors.New("invalid admin lifecycle timing")
 	}
 	return config, nil
 }
