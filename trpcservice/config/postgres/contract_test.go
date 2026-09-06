@@ -139,6 +139,31 @@ VALUES($1,$2,'bypass','wecom','corp-bypass',$3,'verify',1,'forged',1)`, tenantID
 	if _, err := db.ExecContext(ctx, `UPDATE config_snapshot SET payload='{}'::jsonb WHERE tenant_id=$1 AND config_version=$2`, tenantID, rolled.Snapshot.ConfigVersion); sqlState(err) != "55000" {
 		t.Fatalf("immutable update err=%v state=%s", err, sqlState(err))
 	}
+	candidate, err := repository.Stage(ctx, config.StageInput{TenantID: tenantID, ExpectedTenantVersion: rolled.Tenant.Version, Payload: payload(4), Metadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unchangedTenant, err := tenantRepository.Get(ctx, tenantID)
+	if err != nil || unchangedTenant.ActiveConfigVersion != rolled.Snapshot.ConfigVersion || unchangedTenant.Version != rolled.Tenant.Version {
+		t.Fatalf("stage changed tenant=%#v err=%v", unchangedTenant, err)
+	}
+	release, err := repository.CreateRelease(ctx, config.ReleaseCreateInput{ReleaseID: "release-contract", Percentage: 100, Salt: "0123456789abcdef", Metadata: metadata, Targets: []config.ReleaseTarget{{
+		TenantID: tenantID, BaselineConfigVersion: rolled.Snapshot.ConfigVersion, CandidateConfigVersion: candidate.ConfigVersion,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := repository.SelectEffective(ctx, tenantID, rolled.Snapshot.ConfigVersion)
+	if err != nil || selected.ConfigVersion != candidate.ConfigVersion {
+		t.Fatalf("release selected=%#v err=%v", selected, err)
+	}
+	if _, err = repository.RollbackRelease(ctx, config.ReleaseRollbackInput{ReleaseID: release.ReleaseID, ExpectedVersion: release.Version, Metadata: metadata}); err != nil {
+		t.Fatal(err)
+	}
+	selected, err = repository.SelectEffective(ctx, tenantID, rolled.Snapshot.ConfigVersion)
+	if err != nil || selected.ConfigVersion != rolled.Snapshot.ConfigVersion {
+		t.Fatalf("rollback selected=%#v err=%v", selected, err)
+	}
 }
 
 func openContractDB(t *testing.T) *sql.DB {

@@ -212,7 +212,7 @@ func loadAdminConfig(getenv func(string) string) (productionConfig, error) {
 		AdminAuthSecretRef: strings.TrimSpace(getenv("TRPC_ADMIN_AUTH_SECRET_REF")),
 		ProbeTimeout:       5 * time.Second,
 		ProbeInterval:      15 * time.Second,
-		ShutdownTimeout:    30 * time.Second,
+		ShutdownTimeout:    45 * time.Second,
 		AdminAuthClockSkew: 30 * time.Second,
 	}
 	var err error

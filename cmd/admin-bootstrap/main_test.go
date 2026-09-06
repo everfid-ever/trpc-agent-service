@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,7 +33,7 @@ func TestSecretThenTokenCreatesPrivateProjectionWithoutPrintingMaterial(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	stored, err := provider.Resolve(t.Context(), scope(value), ref(value))
+	stored, err := provider.Resolve(context.Background(), scope(value), ref(value))
 	if err != nil || !bytes.Equal(stored.Bytes, material[:32]) {
 		t.Fatalf("secret length=%d err=%v", len(stored.Bytes), err)
 	}

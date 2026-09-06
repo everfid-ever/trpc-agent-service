@@ -140,6 +140,7 @@ func issueToken(args []string, output io.Writer, random io.Reader, now func() ti
 	var tenantVersion int64
 	var subject string
 	var ttl time.Duration
+	var canManageReleases bool
 	flags.StringVar(&value.root, "secret-root", "", "private filesystem SecretProvider root")
 	flags.StringVar(&value.tenantID, "tenant-id", "", "existing active tenant ID")
 	flags.StringVar(&value.secretRef, "secret-ref", defaultSecretRef, "Admin secret reference")
@@ -147,6 +148,7 @@ func issueToken(args []string, output io.Writer, random io.Reader, now func() ti
 	flags.Int64Var(&tenantVersion, "tenant-version", 0, "current tenant version")
 	flags.StringVar(&subject, "subject", defaultSubject, "admin subject")
 	flags.DurationVar(&ttl, "ttl", 15*time.Minute, "token lifetime")
+	flags.BoolVar(&canManageReleases, "can-manage-releases", false, "grant platform release management for local use")
 	if err := flags.Parse(args); err != nil || len(flags.Args()) != 0 || validateSecretFlags("token", value) != nil ||
 		tenantVersion < 1 || strings.TrimSpace(subject) == "" || ttl <= 0 || ttl > 15*time.Minute {
 		return errors.New("usage: admin-bootstrap token -secret-root <dir> -tenant-id <tenant> -tenant-version <n> [-subject <sub>] [-ttl <=15m]")
@@ -166,7 +168,7 @@ func issueToken(args []string, output io.Writer, random io.Reader, now func() ti
 	}
 	issuedAt := now().UTC()
 	token, err := admin.SignToken(secret.Bytes, admin.Claims{Version: 1, TenantID: value.tenantID, TenantVersion: tenantVersion,
-		SubjectID: subject, CanManage: true, IssuedAt: issuedAt.Unix(), ExpiresAt: issuedAt.Add(ttl).Unix(),
+		SubjectID: subject, CanManage: true, CanManageReleases: canManageReleases, IssuedAt: issuedAt.Unix(), ExpiresAt: issuedAt.Add(ttl).Unix(),
 		TokenID: base64.RawURLEncoding.EncodeToString(tokenID)})
 	clear(tokenID)
 	if err != nil {

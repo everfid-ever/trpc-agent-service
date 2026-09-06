@@ -11,6 +11,22 @@ type BindingResolver interface {
 	ResolveExecutionBinding(context.Context, tenant.Context) (tenant.ExecutionBinding, error)
 }
 
+type PinnedBindingResolver interface {
+	BindingResolver
+	ResolveExecutionBindingAt(context.Context, tenant.Context, int64) (tenant.ExecutionBinding, error)
+}
+
+func resolveBinding(ctx context.Context, resolver BindingResolver, tc tenant.Context, version int64) (tenant.ExecutionBinding, error) {
+	if version < 1 {
+		return resolver.ResolveExecutionBinding(ctx, tc)
+	}
+	pinned, ok := resolver.(PinnedBindingResolver)
+	if !ok {
+		return tenant.ExecutionBinding{}, runtime.ErrCapabilityUnsupported
+	}
+	return pinned.ResolveExecutionBindingAt(ctx, tc, version)
+}
+
 // LocalDispatcher preserves production PrepareDispatch and Executor semantics
 // while replacing the broker with an in-process call.
 type LocalDispatcher struct {
@@ -26,7 +42,7 @@ func (d LocalDispatcher) Dispatch(ctx context.Context, in DispatchRequest) (Exec
 	if err := in.Tenant.Validate(); err != nil {
 		return ExecutionHandle{}, err
 	}
-	binding, err := d.Bindings.ResolveExecutionBinding(ctx, in.Tenant)
+	binding, err := resolveBinding(ctx, d.Bindings, in.Tenant, in.ConfigVersion)
 	if err != nil {
 		return ExecutionHandle{}, err
 	}

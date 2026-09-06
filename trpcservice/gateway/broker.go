@@ -18,7 +18,7 @@ func (d BrokerDispatcher) Dispatch(ctx context.Context, in DispatchRequest) (Exe
 	if err := in.Tenant.Validate(); err != nil {
 		return ExecutionHandle{}, err
 	}
-	binding, err := d.Bindings.ResolveExecutionBinding(ctx, in.Tenant)
+	binding, err := resolveBinding(ctx, d.Bindings, in.Tenant, in.ConfigVersion)
 	if err != nil {
 		return ExecutionHandle{}, err
 	}

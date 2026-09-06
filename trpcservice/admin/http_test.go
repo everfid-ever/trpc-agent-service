@@ -20,7 +20,59 @@ import (
 type headerPrincipalResolver struct{}
 
 func (headerPrincipalResolver) Resolve(r *http.Request) (Principal, error) {
-	return Principal{Authenticated: r.Header.Get("X-Authenticated") == "true", TenantID: r.Header.Get("X-Admin-Tenant"), SubjectID: "operator", CanManage: r.Header.Get("X-Can-Manage") != "false"}, nil
+	return Principal{Authenticated: r.Header.Get("X-Authenticated") == "true", TenantID: r.Header.Get("X-Admin-Tenant"), SubjectID: "operator", CanManage: r.Header.Get("X-Can-Manage") != "false", CanManageReleases: r.Header.Get("X-Can-Manage-Releases") == "true"}, nil
+}
+
+func TestAdminHTTPStagesCandidateAndRequiresReleasePrivilege(t *testing.T) {
+	handler, tenants := adminSetup(t)
+	payload := config.ConfigV1{SchemaVersion: 1, DefaultAgentAppID: "app", PolicyVersion: 1}
+	body, _ := json.Marshal(payload)
+	request := func(method, path string, value []byte) *http.Request {
+		req := httptest.NewRequest(method, path, bytes.NewReader(value))
+		req.Header.Set("X-Authenticated", "true")
+		req.Header.Set("X-Admin-Tenant", "tenant-a")
+		req.Header.Set("X-Reason-Code", "test")
+		req.Header.Set("X-Correlation-ID", "correlation")
+		req.Header.Set("X-Trace-ID", "trace")
+		return req
+	}
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, request(http.MethodPost, "/v1/tenants/tenant-a/configs/publish?expected_version=1", body))
+	if first.Code != http.StatusCreated {
+		t.Fatalf("publish=%d %s", first.Code, first.Body.String())
+	}
+	var baseline config.PublishResult
+	if err := json.Unmarshal(first.Body.Bytes(), &baseline); err != nil {
+		t.Fatal(err)
+	}
+	payload.PolicyVersion = 2
+	body, _ = json.Marshal(payload)
+	staged := httptest.NewRecorder()
+	handler.ServeHTTP(staged, request(http.MethodPost, "/v1/tenants/tenant-a/configs/stage?expected_version="+strconv.FormatInt(baseline.Tenant.Version, 10), body))
+	if staged.Code != http.StatusCreated {
+		t.Fatalf("stage=%d %s", staged.Code, staged.Body.String())
+	}
+	var candidate config.Snapshot
+	if err := json.Unmarshal(staged.Body.Bytes(), &candidate); err != nil {
+		t.Fatal(err)
+	}
+	current, err := tenants.Get(context.Background(), "tenant-a")
+	if err != nil || current.ActiveConfigVersion != baseline.Snapshot.ConfigVersion {
+		t.Fatalf("stage changed tenant=%#v err=%v", current, err)
+	}
+	releaseBody, _ := json.Marshal(config.ReleaseCreateInput{ReleaseID: "release-http", Percentage: 0, Salt: "0123456789abcdef", Targets: []config.ReleaseTarget{{TenantID: "tenant-a", BaselineConfigVersion: baseline.Snapshot.ConfigVersion, CandidateConfigVersion: candidate.ConfigVersion}}})
+	forbidden := httptest.NewRecorder()
+	handler.ServeHTTP(forbidden, request(http.MethodPost, "/v1/config-releases", releaseBody))
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("release privilege=%d", forbidden.Code)
+	}
+	allowed := request(http.MethodPost, "/v1/config-releases", releaseBody)
+	allowed.Header.Set("X-Can-Manage-Releases", "true")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, allowed)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("release=%d %s", created.Code, created.Body.String())
+	}
 }
 
 func adminSetup(t *testing.T) (*Handler, *tenantmemory.Repository) {

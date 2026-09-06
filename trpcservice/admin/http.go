@@ -28,6 +28,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "v1" && parts[1] == "config-releases" {
+		h.serveRelease(w, r, principal, parts)
+		return
+	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
 		http.NotFound(w, r)
 		return
@@ -54,6 +58,22 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			var result config.PublishResult
 			result, err = h.Service.Publish(r.Context(), principal, tenantID, expected, payload, metadata(r, principal))
+			if err == nil {
+				writeJSON(w, http.StatusCreated, result)
+				return
+			}
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 5 && parts[4] == "stage":
+		expected, ok := queryInt64(r, "expected_version")
+		if !ok {
+			http.Error(w, "invalid expected_version", http.StatusBadRequest)
+			return
+		}
+		payload, err := decodePayload(w, r)
+		if err == nil {
+			var result config.Snapshot
+			result, err = h.Service.Stage(r.Context(), principal, tenantID, expected, payload, metadata(r, principal))
 			if err == nil {
 				writeJSON(w, http.StatusCreated, result)
 				return
@@ -97,6 +117,58 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h Handler) serveRelease(w http.ResponseWriter, r *http.Request, principal Principal, parts []string) {
+	switch {
+	case r.Method == http.MethodPost && len(parts) == 2:
+		var input config.ReleaseCreateInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, err)
+			return
+		}
+		input.Metadata = metadata(r, principal)
+		value, err := h.Service.CreateRelease(r.Context(), principal, input)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, value)
+	case r.Method == http.MethodGet && len(parts) == 3:
+		value, err := h.Service.GetRelease(r.Context(), principal, parts[2])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	case r.Method == http.MethodPost && len(parts) == 4 && parts[3] == "rollout":
+		expected, ok1 := queryInt64(r, "expected_version")
+		percentage, ok2 := queryPercentage(r)
+		if !ok1 || !ok2 {
+			http.Error(w, "invalid rollout parameters", http.StatusBadRequest)
+			return
+		}
+		value, err := h.Service.UpdateRelease(r.Context(), principal, config.ReleaseUpdateInput{ReleaseID: parts[2], ExpectedVersion: expected, Percentage: percentage, Metadata: metadata(r, principal)})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	case r.Method == http.MethodPost && len(parts) == 4 && parts[3] == "rollback":
+		expected, ok := queryInt64(r, "expected_version")
+		if !ok {
+			http.Error(w, "invalid expected_version", http.StatusBadRequest)
+			return
+		}
+		value, err := h.Service.RollbackRelease(r.Context(), principal, config.ReleaseRollbackInput{ReleaseID: parts[2], ExpectedVersion: expected, Metadata: metadata(r, principal)})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 func decodePayload(w http.ResponseWriter, r *http.Request) (config.ConfigV1, error) {
 	body := http.MaxBytesReader(w, r.Body, 1<<20)
 	defer body.Close()
@@ -110,9 +182,28 @@ func decodePayload(w http.ResponseWriter, r *http.Request) (config.ConfigV1, err
 	}
 	return payload, nil
 }
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	defer body.Close()
+	decoder := json.NewDecoder(body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return config.ErrInvalid
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return config.ErrInvalid
+	}
+	return nil
+}
 func queryInt64(r *http.Request, key string) (int64, bool) {
 	value, err := strconv.ParseInt(r.URL.Query().Get(key), 10, 64)
 	return value, err == nil && value > 0
+}
+func queryPercentage(r *http.Request) (int, bool) {
+	value, err := strconv.Atoi(r.URL.Query().Get("percentage"))
+	return value, err == nil && value >= 0 && value <= 100
 }
 func metadata(r *http.Request, p Principal) tenant.ChangeMetadata {
 	return tenant.ChangeMetadata{ActorType: "admin", ActorID: p.SubjectID, ReasonCode: r.Header.Get("X-Reason-Code"), ReasonRef: r.Header.Get("X-Reason-Ref"), CorrelationID: r.Header.Get("X-Correlation-ID"), TraceID: r.Header.Get("X-Trace-ID")}

@@ -252,7 +252,8 @@ func (w Worker) dispatch(ctx context.Context, job Job) error {
 		Tenant: tenant.Context{TenantID: job.TenantID, TenantVersion: job.TenantVersion, AgentAppID: job.AgentAppID,
 			SubjectID: job.UserID, Channel: job.Channel, TrustedSource: "channel_binding:" + job.ChannelBindingID},
 		RequestID: job.RequestID, SessionID: job.SessionID, UserID: job.UserID, PayloadRef: payloadRef,
-		TraceParent: telemetry.EffectiveTraceParent(ctx, job.TraceParent),
+		TraceParent:   telemetry.EffectiveTraceParent(ctx, job.TraceParent),
+		ConfigVersion: job.ConfigVersion,
 	})
 	if err != nil {
 		return err

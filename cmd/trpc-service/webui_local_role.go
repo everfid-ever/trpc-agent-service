@@ -165,12 +165,14 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	inbox := messagingpostgres.NewWithPayloadKeyResolver(db, bootstrap.PayloadKey)
 	tasks := gatewaypostgres.NewTaskStore(db)
 	preprocessStore := preprocesspostgres.New(db)
+	tenantRepo := tenantpostgres.New(db)
+	configRepo := configpostgres.New(db, tenantRepo)
 	bindings := ingresspostgres.New(db)
 	resolver := ingress.Resolver{Store: bindings, Secrets: bootstrap.SecretStore, TTL: 30 * time.Second}
 	webuiMailbox := webuipostgres.New(db)
 	webuiAdapter := &webui.Adapter{Protocol: webui.Verifier{}, Mailbox: webuiMailbox}
 	endpoint, err := newChannelEndpoint(webuiAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
-		preprocessStore, payloads, 1, 1<<20, telemetryProvider)
+		preprocessStore, payloads, 1, 1<<20, telemetryProvider, configRepo)
 	if err != nil {
 		return errors.New("WebUI callback configuration rejected")
 	}
@@ -195,14 +197,14 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	adapters = append(adapters, feishuAdapter, wecomAdapter)
 	if configValue.FeishuEnabled {
 		feishuEndpoint, err = newChannelEndpoint(feishuAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
-			preprocessStore, payloads, 1, 1<<20, telemetryProvider)
+			preprocessStore, payloads, 1, 1<<20, telemetryProvider, configRepo)
 		if err != nil {
 			return errors.New("Feishu callback configuration rejected")
 		}
 	}
 	if configValue.WeComEnabled {
 		wecomEndpoint, err = newChannelEndpoint(wecomAdapter, resolver, identity.Mapper{Secrets: bootstrap.SecretStore},
-			preprocessStore, payloads, 1, 1<<20, telemetryProvider)
+			preprocessStore, payloads, 1, 1<<20, telemetryProvider, configRepo)
 		if err != nil {
 			return errors.New("WeCom callback configuration rejected")
 		}
@@ -222,9 +224,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		return errors.New("relay publisher configuration rejected")
 	}
 
-	tenantRepo := tenantpostgres.New(db)
 	appRepo := agentpostgres.New(db)
-	configRepo := configpostgres.New(db, tenantRepo)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
 	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Credentials: generation.New(bootstrap.SecretStore), Subject: "worker-model"}
 	governanceStore := governancepostgres.New(db)

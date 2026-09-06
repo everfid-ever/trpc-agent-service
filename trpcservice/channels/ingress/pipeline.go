@@ -9,6 +9,7 @@ import (
 
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/identity"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
@@ -21,6 +22,13 @@ type IdentityMapper interface {
 
 type Verifier interface {
 	VerifyAndDecode(context.Context, channel.CallbackRequest) (VerifiedIngress, error)
+}
+
+// ConfigSelector chooses the immutable snapshot at the callback acceptance
+// boundary. The resulting version is persisted with the preprocess job, so a
+// later rollout update cannot alter an accepted provider message.
+type ConfigSelector interface {
+	SelectEffective(context.Context, string, int64) (config.Snapshot, error)
 }
 
 type AcceptedEvent struct {
@@ -37,6 +45,7 @@ type Pipeline struct {
 	Payloads     messaging.PayloadStore
 	KeyVersion   int64
 	Telemetry    telemetry.Provider
+	Configs      ConfigSelector
 }
 
 func (p Pipeline) Accept(ctx context.Context, request channel.CallbackRequest) ([]AcceptedEvent, error) {
@@ -78,6 +87,10 @@ func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, eve
 	if err != nil {
 		return AcceptedEvent{}, err
 	}
+	configVersion, err := p.selectConfig(ctx, verified.Binding)
+	if err != nil {
+		return AcceptedEvent{}, err
+	}
 	messageType := event.MessageType
 	if messageType == "text" {
 		messageType = ""
@@ -89,7 +102,7 @@ func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, eve
 	normalized, err := json.Marshal(preprocess.NormalizedInput{ExternalMessageID: event.ExternalMessageID,
 		ExternalUserID: event.ExternalUserID, ExternalChatID: event.ExternalChatID,
 		ChannelBindingID: bindingID, ExternalAccountID: accountID,
-		ConfigVersion: verified.Binding.BindingVersion,
+		ConfigVersion: configVersion,
 		MessageType:   messageType, Text: event.Text, MediaRefs: event.MediaRefs})
 	if err != nil {
 		return AcceptedEvent{}, err
@@ -107,7 +120,7 @@ func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, eve
 		Inbox: messaging.ClaimInboxRequest{InboxKey: key, AgentAppID: verified.Binding.AgentAppID, SessionID: ids.SessionID,
 			ExternalChatID: event.ExternalChatID, ExternalUserID: event.ExternalUserID, PayloadDigest: contentDigest,
 			KeyVersion: keyVersion, InitialState: messaging.InboxPreprocessPending},
-		TenantVersion: verified.Binding.TenantVersion, ConfigVersion: verified.Binding.BindingVersion,
+		TenantVersion: verified.Binding.TenantVersion, ConfigVersion: configVersion,
 		ChannelBindingID: verified.Binding.ChannelBindingID, UserID: ids.UserID, TraceParent: telemetry.EffectiveTraceParent(ctx, traceParent),
 	})
 	if err != nil {
@@ -117,6 +130,26 @@ func (p Pipeline) acceptEvent(ctx context.Context, verified VerifiedIngress, eve
 		return AcceptedEvent{}, runtime.ErrIdempotencyCollision
 	}
 	return AcceptedEvent{RequestID: requestID, PayloadRef: payloadRef, PreprocessJobID: job.JobID}, nil
+}
+
+func (p Pipeline) selectConfig(ctx context.Context, binding channel.VerifiedBinding) (int64, error) {
+	if p.Configs == nil {
+		return binding.BindingVersion, nil
+	}
+	snapshot, err := p.Configs.SelectEffective(ctx, binding.TenantID, binding.BindingVersion)
+	if err != nil {
+		return 0, err
+	}
+	for _, candidate := range snapshot.Payload.ChannelBindings {
+		if candidate.BindingID == binding.ChannelBindingID && candidate.Channel == binding.Channel &&
+			candidate.ExternalAccountID == binding.ExternalAccountID && candidate.AgentAppID == binding.AgentAppID {
+			return snapshot.ConfigVersion, nil
+		}
+	}
+	// Verification always uses the baseline secret. A candidate that changes
+	// the authenticated channel identity must be introduced by the dedicated
+	// route rotation flow, not by a percentage release.
+	return 0, config.ErrTenantScope
 }
 
 func validProviderContent(event channel.ProviderEvent) bool {

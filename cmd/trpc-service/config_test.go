@@ -368,6 +368,17 @@ func TestLoadAdminConfigRequiresDedicatedAuthDependencies(t *testing.T) {
 	}
 }
 
+func TestLoadAdminConfigDefaultLifecycleTimingIsValid(t *testing.T) {
+	config, err := loadAdminConfig(mapEnvironment(map[string]string{
+		"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_SECRET_ROOT": "/secrets",
+		"TRPC_ADMIN_PROBE_TENANT_ID": "probe-tenant", "TRPC_ADMIN_AUTH_SECRET_REF": "secret://admin/auth",
+		"TRPC_ADMIN_AUTH_SECRET_VERSION": "1",
+	}))
+	if err != nil || config.AdminAuthClockSkew >= config.ShutdownTimeout {
+		t.Fatalf("config=%+v err=%v", config, err)
+	}
+}
+
 func TestLoadGatewayConfigRejectsUnsafeLimits(t *testing.T) {
 	base := map[string]string{"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_SECRET_ROOT": "/secrets",
 		"TRPC_PAYLOAD_KEY_REF": "payload", "TRPC_PAYLOAD_KEY_VERSION": "1", "TRPC_GATEWAY_PROBE_TENANT_ID": "probe",

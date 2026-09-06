@@ -11,14 +11,36 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("migrations=%d, want one acceptance baseline", len(all))
+	if len(all) != 2 {
+		t.Fatalf("migrations=%d, want baseline plus additive releases migration", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
 		t.Fatalf("migration=%#v", migration)
 	}
 	return migration
+}
+
+func TestConfigReleaseMigrationIsTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[1]
+	if migration.Version != "000002" || migration.Name != "config_release" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if _, err := transactionBody(migration.Up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionBody(migration.Down); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"CREATE TABLE public.config_release", "CREATE TABLE public.config_release_target", "config_release_target_effective_idx"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("release migration lacks %q", clause)
+		}
+	}
 }
 
 func TestServiceSchemaBaselineContainsFinalPlatformContract(t *testing.T) {

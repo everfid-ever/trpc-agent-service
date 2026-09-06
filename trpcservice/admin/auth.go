@@ -29,14 +29,15 @@ const (
 // It deliberately has a separate format and signing key from Gateway tokens,
 // so a data-plane token can never acquire configuration-management rights.
 type Claims struct {
-	Version       int    `json:"v"`
-	TenantID      string `json:"tenant_id"`
-	TenantVersion int64  `json:"tenant_version"`
-	SubjectID     string `json:"sub"`
-	CanManage     bool   `json:"can_manage"`
-	IssuedAt      int64  `json:"iat"`
-	ExpiresAt     int64  `json:"exp"`
-	TokenID       string `json:"jti"`
+	Version           int    `json:"v"`
+	TenantID          string `json:"tenant_id"`
+	TenantVersion     int64  `json:"tenant_version"`
+	SubjectID         string `json:"sub"`
+	CanManage         bool   `json:"can_manage"`
+	CanManageReleases bool   `json:"can_manage_releases,omitempty"`
+	IssuedAt          int64  `json:"iat"`
+	ExpiresAt         int64  `json:"exp"`
+	TokenID           string `json:"jti"`
 }
 
 // TenantVersionCheck binds issued tokens to the tenant's authoritative
@@ -94,7 +95,7 @@ func (r *HMACPrincipalResolver) Resolve(request *http.Request) (Principal, error
 			return Principal{}, ErrForbidden
 		}
 	}
-	return Principal{Authenticated: true, TenantID: claims.TenantID, SubjectID: claims.SubjectID, CanManage: claims.CanManage}, nil
+	return Principal{Authenticated: true, TenantID: claims.TenantID, SubjectID: claims.SubjectID, CanManage: claims.CanManage, CanManageReleases: claims.CanManageReleases}, nil
 }
 
 func (r *HMACPrincipalResolver) claimsFromRequest(request *http.Request) (Claims, error) {

@@ -28,9 +28,30 @@ func (s *configStub) GetCurrent(context.Context, string) (config.Snapshot, error
 func (s *configStub) Rollback(context.Context, config.RollbackInput) (config.PublishResult, error) {
 	return config.PublishResult{}, nil
 }
+func (s *configStub) Stage(context.Context, config.StageInput) (config.Snapshot, error) {
+	return config.Snapshot{}, nil
+}
+func (s *configStub) CreateRelease(context.Context, config.ReleaseCreateInput) (config.Release, error) {
+	return config.Release{}, nil
+}
+func (s *configStub) GetRelease(context.Context, string) (config.Release, error) {
+	return config.Release{}, nil
+}
+func (s *configStub) UpdateRelease(context.Context, config.ReleaseUpdateInput) (config.Release, error) {
+	return config.Release{}, nil
+}
+func (s *configStub) RollbackRelease(context.Context, config.ReleaseRollbackInput) (config.Release, error) {
+	return config.Release{}, nil
+}
+func (s *configStub) SelectEffective(context.Context, string, int64) (config.Snapshot, error) {
+	return config.Snapshot{}, nil
+}
 func (s *configStub) ResolveExecutionBinding(context.Context, tenant.Context) (tenant.ExecutionBinding, error) {
 	s.calls++
 	return tenant.ExecutionBinding{AgentAppVersion: 1, AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1}, nil
+}
+func (s *configStub) ResolveExecutionBindingAt(ctx context.Context, tc tenant.Context, _ int64) (tenant.ExecutionBinding, error) {
+	return s.ResolveExecutionBinding(ctx, tc)
 }
 
 func TestHTTPRouteResolverUsesSignedPrincipalScope(t *testing.T) {

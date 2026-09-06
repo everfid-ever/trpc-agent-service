@@ -29,4 +29,7 @@ type DispatchRequest struct {
 	UserID      string
 	PayloadRef  string
 	TraceParent string
+	// ConfigVersion is set only by a durable trusted ingress boundary. It
+	// freezes a configuration selected when the callback was accepted.
+	ConfigVersion int64
 }
