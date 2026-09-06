@@ -189,7 +189,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: bootstrap.SecretStore}
 	feishuCredentials := &feishu.CredentialProvider{Secrets: sendCredentials, Client: providerHTTP}
 	wecomTokens := &wecom.TokenProvider{Secrets: sendCredentials, Client: providerHTTP}
-	feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{
+	feishuAdapter := &feishu.Adapter{Protocol: feishuprotocol.Verifier{}, Sender: feishu.OfficialSender{Tokens: feishuCredentials, Client: providerHTTP, Clients: &feishu.ClientCache{
 		Credentials: feishuCredentials,
 		NewClient:   func(appID, appSecret string) *lark.Client { return lark.NewClient(appID, appSecret) },
 	}}}

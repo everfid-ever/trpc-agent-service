@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/wecom/protocol"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
 const (
@@ -29,6 +31,9 @@ const (
 
 type TextSender interface {
 	SendText(context.Context, channel.ReplyDestination, string, string, string) (string, error)
+}
+type ImageSender interface {
+	SendImage(context.Context, channel.ReplyDestination, string, []byte, string, string) (string, error)
 }
 
 type Adapter struct {
@@ -114,13 +119,23 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 	if request.ContentDigest != hex.EncodeToString(sum[:]) {
 		return channel.DeliveryResult{}, runtime.ErrVersionMismatch
 	}
-	if request.ContentType != "" && request.ContentType != "text/plain" {
-		return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
-	}
 	destination := channel.ReplyDestination{TenantID: request.Event.TenantID, Channel: request.Target.Channel,
 		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID,
 		ConfigVersion: request.Event.ConfigVersion}
-	messageID, err := a.Sender.SendText(ctx, destination, request.Target.ExternalUserID, string(request.Content), request.ClientRequestID)
+	contentType, err := messaging.NormalizeContentType(request.ContentType)
+	if err != nil {
+		return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: err, Class: "content_type_unsupported"}
+	}
+	var messageID string
+	if contentType == messaging.ContentTypeText {
+		messageID, err = a.Sender.SendText(ctx, destination, request.Target.ExternalUserID, string(request.Content), request.ClientRequestID)
+	} else {
+		sender, ok := a.Sender.(ImageSender)
+		if !ok || !strings.HasPrefix(contentType, "image/") {
+			return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
+		}
+		messageID, err = sender.SendImage(ctx, destination, request.Target.ExternalUserID, request.Content, contentType, request.ClientRequestID)
+	}
 	if err != nil {
 		return channel.DeliveryResult{}, err
 	}
@@ -130,7 +145,10 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 	return channel.DeliveryResult{ProviderMessageID: messageID, Delivered: true}, nil
 }
 
-func (a *Adapter) Capabilities() channel.Capabilities { return channel.Capabilities{Text: true} }
+func (a *Adapter) Capabilities() channel.Capabilities {
+	_, image := a.Sender.(ImageSender)
+	return channel.Capabilities{Text: true, Image: image}
+}
 
 // MaxTextBytes reflects the provider's per-message text content limit. The
 // delivery service uses this value to segment a terminal reply durably.
@@ -168,7 +186,7 @@ func (s OfficialSender) SendText(ctx context.Context, destination channel.ReplyD
 		if token == "" || agentID <= 0 {
 			return "", runtime.ErrVersionMismatch
 		}
-		messageID, invalidToken, err := s.send(ctx, token, agentID, externalUserID, text)
+		messageID, invalidToken, err := s.send(ctx, token, agentID, externalUserID, "text", text, "")
 		if invalidToken && attempt == 0 {
 			continue
 		}
@@ -177,20 +195,107 @@ func (s OfficialSender) SendText(ctx context.Context, destination channel.ReplyD
 	return "", channel.RetryableDeliveryError{Err: runtime.ErrBackendUnavailable}
 }
 
-func (s OfficialSender) send(ctx context.Context, token string, agentID int64, externalUserID, text string) (string, bool, error) {
-	body, err := json.Marshal(struct {
-		ToUser      string `json:"touser"`
-		MessageType string `json:"msgtype"`
-		AgentID     int64  `json:"agentid"`
-		Text        struct {
-			Content string `json:"content"`
-		} `json:"text"`
-		Safe                   int `json:"safe"`
-		EnableDuplicateCheck   int `json:"enable_duplicate_check"`
-		DuplicateCheckInterval int `json:"duplicate_check_interval"`
-	}{ToUser: externalUserID, MessageType: "text", AgentID: agentID, Text: struct {
-		Content string `json:"content"`
-	}{Content: text}, EnableDuplicateCheck: 1, DuplicateCheckInterval: 1800})
+func (s OfficialSender) SendImage(ctx context.Context, destination channel.ReplyDestination, externalUserID string, image []byte, contentType, clientRequestID string) (string, error) {
+	if s.Tokens == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || destination.ExternalAccountID == "" || destination.ConfigVersion < 1 ||
+		externalUserID == "" || len(image) == 0 || !strings.HasPrefix(contentType, "image/") || clientRequestID == "" {
+		return "", runtime.ErrInvariantViolation
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		token, agentID, err := s.Tokens.ResolveWeComAccessToken(ctx, destination, attempt == 1)
+		if err != nil {
+			return "", err
+		}
+		mediaID, invalidToken, err := s.uploadImage(ctx, token, image, contentType)
+		if invalidToken && attempt == 0 {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		messageID, invalidToken, err := s.send(ctx, token, agentID, externalUserID, "image", "", mediaID)
+		if invalidToken && attempt == 0 {
+			continue
+		}
+		return messageID, err
+	}
+	return "", channel.RetryableDeliveryError{Err: runtime.ErrBackendUnavailable}
+}
+
+func (s OfficialSender) uploadImage(ctx context.Context, token string, image []byte, contentType string) (string, bool, error) {
+	baseURL := strings.TrimRight(s.BaseURL, "/")
+	if baseURL == "" {
+		baseURL = defaultAPIBaseURL
+	}
+	endpoint, err := url.Parse(baseURL + "/cgi-bin/media/upload")
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return "", false, runtime.ErrInvariantViolation
+	}
+	query := endpoint.Query()
+	query.Set("access_token", token)
+	query.Set("type", "image")
+	endpoint.RawQuery = query.Encode()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("media", "reply."+strings.TrimPrefix(contentType, "image/"))
+	if err != nil {
+		return "", false, err
+	}
+	if _, err = part.Write(image); err != nil {
+		return "", false, err
+	}
+	if err = writer.Close(); err != nil {
+		return "", false, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), &body)
+	if err != nil {
+		return "", false, runtime.ErrInvariantViolation
+	}
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	client := s.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", false, ctx.Err()
+		}
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrBackendUnavailable}
+	}
+	if response == nil || response.Body == nil {
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrBackendUnavailable}
+	}
+	defer response.Body.Close()
+	var result struct {
+		ErrorCode    int64  `json:"errcode"`
+		ErrorMessage string `json:"errmsg"`
+		MediaID      string `json:"media_id"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrInvalidEnvelope}
+	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 && result.ErrorCode == 0 && result.MediaID != "" {
+		return result.MediaID, false, nil
+	}
+	providerErr := providerError(response.StatusCode, result.ErrorCode, result.ErrorMessage)
+	invalid := result.ErrorCode == 40014 || result.ErrorCode == 42001 || result.ErrorCode == 42007 || response.StatusCode == http.StatusUnauthorized
+	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 || result.ErrorCode == -1 || result.ErrorCode == 45009 {
+		return "", invalid, channel.RetryableDeliveryError{Err: providerErr, RetryAfter: retryAfter(response.Header)}
+	}
+	if invalid {
+		return "", true, channel.RetryableDeliveryError{Err: providerErr}
+	}
+	return "", false, channel.PermanentDeliveryError{Err: providerErr, Class: "provider_rejected"}
+}
+
+func (s OfficialSender) send(ctx context.Context, token string, agentID int64, externalUserID, messageType, text, mediaID string) (string, bool, error) {
+	payload := map[string]any{"touser": externalUserID, "msgtype": messageType, "agentid": agentID, "enable_duplicate_check": 1, "duplicate_check_interval": 1800}
+	if messageType == "text" {
+		payload["text"] = map[string]string{"content": text}
+	} else {
+		payload["image"] = map[string]string{"media_id": mediaID}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", false, err
 	}

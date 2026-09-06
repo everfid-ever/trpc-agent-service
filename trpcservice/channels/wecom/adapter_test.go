@@ -111,6 +111,21 @@ func TestDeliverUsesFrozenUserTargetAndSenderClassification(t *testing.T) {
 	}
 }
 
+func TestAdapterDeliversImageOnlyThroughImageSender(t *testing.T) {
+	sender := &imageRecordingSender{recordingSender: recordingSender{messageID: "wecom-image"}}
+	adapter := &wecom.Adapter{Sender: sender}
+	content := []byte("image-bytes")
+	sum := sha256.Sum256(content)
+	request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding", ConfigVersion: 1}, ClientRequestID: "stable-image",
+		Target: channel.DeliveryTarget{Channel: "wecom", ExternalAccountID: "ww_corp", ExternalUserID: "zhangsan"}, Content: content, ContentDigest: hex.EncodeToString(sum[:]), ContentType: "image/png"}
+	if _, err := adapter.Deliver(context.Background(), request); err != nil || sender.contentType != "image/png" || sender.clientRequestID != "stable-image" || !bytes.Equal(sender.content, content) {
+		t.Fatalf("sender=%#v err=%v", sender, err)
+	}
+	if !adapter.Capabilities().Image {
+		t.Fatalf("capabilities=%#v", adapter.Capabilities())
+	}
+}
+
 func TestAdapterDeliveryContract(t *testing.T) {
 	contracttest.RunDelivery(t, func(testing.TB) contracttest.DeliveryHarness {
 		sender := &recordingSender{messageID: "wecom-reply"}
@@ -205,12 +220,50 @@ func TestOfficialSenderTreatsTransportFailureAsAmbiguous(t *testing.T) {
 	}
 }
 
+func TestOfficialSenderUploadsImageBeforeSending(t *testing.T) {
+	var sent map[string]any
+	client := httpClientFunc(func(request *http.Request) (*http.Response, error) {
+		response := `{"errcode":0,"errmsg":"ok"}`
+		switch request.URL.Path {
+		case "/cgi-bin/media/upload":
+			if err := request.ParseMultipartForm(1 << 20); err != nil {
+				return nil, err
+			}
+			response = `{"errcode":0,"errmsg":"ok","media_id":"media-image"}`
+		case "/cgi-bin/message/send":
+			_ = json.NewDecoder(request.Body).Decode(&sent)
+			response = `{"errcode":0,"errmsg":"ok","msgid":"image-reply"}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(response)), Request: request}, nil
+	})
+	sender := wecom.OfficialSender{Tokens: &recordingTokens{}, Client: client, BaseURL: "https://unit.test"}
+	messageID, err := sender.SendImage(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "ww_corp", ConfigVersion: 1}, "zhangsan", []byte("image"), "image/png", "stable-image")
+	if err != nil || messageID != "image-reply" || sent["msgtype"] != "image" {
+		t.Fatalf("message=%q sent=%#v err=%v", messageID, sent, err)
+	}
+	image, ok := sent["image"].(map[string]any)
+	if !ok || image["media_id"] != "media-image" {
+		t.Fatalf("image payload=%#v", sent)
+	}
+}
+
 type recordingSender struct {
 	destination                                channel.ReplyDestination
 	text                                       string
 	externalUserID, clientRequestID, messageID string
 	calls                                      int
 	err                                        error
+}
+
+type imageRecordingSender struct {
+	recordingSender
+	content     []byte
+	contentType string
+}
+
+func (s *imageRecordingSender) SendImage(_ context.Context, destination channel.ReplyDestination, externalUserID string, image []byte, contentType, clientRequestID string) (string, error) {
+	s.destination, s.externalUserID, s.clientRequestID, s.contentType, s.content = destination, externalUserID, clientRequestID, contentType, append([]byte(nil), image...)
+	return s.messageID, s.err
 }
 
 func (s *recordingSender) SendText(_ context.Context, destination channel.ReplyDestination, externalUserID, text, clientRequestID string) (string, error) {

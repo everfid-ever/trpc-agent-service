@@ -1,6 +1,7 @@
 package feishu_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -96,6 +97,30 @@ func TestDeliverUsesStableUUIDAndClassifiedSender(t *testing.T) {
 	sender.err = channel.RetryableDeliveryError{Err: errors.New("rate limited")}
 	if _, err := adapter.Deliver(context.Background(), request); err == nil {
 		t.Fatal("classified sender error was swallowed")
+	}
+}
+
+func TestAdapterDeliversCardAndImageOnlyThroughRichSender(t *testing.T) {
+	sender := &richRecordingSender{recordingSender: recordingSender{messageID: "om_rich"}}
+	adapter := &feishu.Adapter{Sender: sender}
+	for _, test := range []struct {
+		contentType string
+		content     []byte
+		kind        string
+	}{
+		{contentType: "application/vnd.trpc.card+json", content: []byte(`{"header":{"title":"Card"}}`), kind: "card"},
+		{contentType: "image/png", content: []byte("png"), kind: "image"},
+	} {
+		sum := sha256.Sum256(test.content)
+		request := channel.DeliveryRequest{Event: channel.ReplyEvent{TenantID: "tenant", ChannelBindingID: "binding", ConfigVersion: 1}, ClientRequestID: "stable-" + test.kind,
+			Target: channel.DeliveryTarget{Channel: "feishu", ExternalAccountID: "cli_app", ExternalMessageID: "om_source"}, Content: test.content, ContentDigest: hex.EncodeToString(sum[:]), ContentType: test.contentType}
+		if _, err := adapter.Deliver(context.Background(), request); err != nil || sender.kind != test.kind || sender.uuid != request.ClientRequestID || !bytes.Equal(sender.content, test.content) {
+			t.Fatalf("kind=%s sender=%#v err=%v", test.kind, sender, err)
+		}
+	}
+	capabilities := adapter.Capabilities()
+	if !capabilities.Card || !capabilities.Image {
+		t.Fatalf("capabilities=%#v", capabilities)
 	}
 }
 
@@ -208,6 +233,39 @@ func TestClientCacheReusesSDKClientAndTenantToken(t *testing.T) {
 	}
 }
 
+func TestOfficialSenderUploadsImageBeforeReplying(t *testing.T) {
+	var replyBody string
+	httpClient := httpClientFunc(func(request *http.Request) (*http.Response, error) {
+		response := `{"code":0,"msg":"ok","tenant_access_token":"sdk-token","expire":7200}`
+		switch request.URL.Path {
+		case "/open-apis/im/v1/images":
+			if err := request.ParseMultipartForm(1 << 20); err != nil {
+				return nil, err
+			}
+			response = `{"code":0,"msg":"ok","data":{"image_key":"img_uploaded"}}`
+		case "/open-apis/im/v1/messages/om_source/reply":
+			body, _ := io.ReadAll(request.Body)
+			replyBody = string(body)
+			response = `{"code":0,"msg":"ok","data":{"message_id":"om_image"}}`
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(response)), Request: request}, nil
+	})
+	clients := &feishu.ClientCache{Credentials: staticCredentials{}, NewClient: func(appID, secret string) *lark.Client {
+		return lark.NewClient(appID, secret, lark.WithOpenBaseUrl("https://unit.test"), lark.WithOAuthBaseUrl("https://unit.test"), lark.WithHttpClient(httpClient))
+	}}
+	sender := feishu.OfficialSender{Clients: clients, Tokens: mediaTokenStub{}, Client: httpClient}
+	messageID, err := sender.ReplyImage(context.Background(), channel.ReplyDestination{TenantID: "tenant", ChannelBindingID: "binding", ExternalAccountID: "cli_app", ConfigVersion: 1}, "om_source", []byte("image"), "image/png", "stable-image")
+	var reply struct {
+		Content string `json:"content"`
+		Message string `json:"msg_type"`
+		UUID    string `json:"uuid"`
+	}
+	_ = json.Unmarshal([]byte(replyBody), &reply)
+	if err != nil || messageID != "om_image" || reply.Message != "image" || !strings.Contains(reply.Content, `"image_key":"img_uploaded"`) || reply.UUID != "stable-image" {
+		t.Fatalf("message=%q reply=%s err=%v", messageID, replyBody, err)
+	}
+}
+
 type recordingSender struct {
 	destination     channel.ReplyDestination
 	replyMessageID  string
@@ -217,7 +275,28 @@ type recordingSender struct {
 	err             error
 }
 
+type richRecordingSender struct {
+	recordingSender
+	kind    string
+	content []byte
+}
+
+func (s *richRecordingSender) ReplyCard(_ context.Context, destination channel.ReplyDestination, replyMessageID string, card []byte, uuid string) (string, error) {
+	s.destination, s.replyMessageID, s.uuid, s.kind, s.content = destination, replyMessageID, uuid, "card", append([]byte(nil), card...)
+	return s.messageID, s.err
+}
+func (s *richRecordingSender) ReplyImage(_ context.Context, destination channel.ReplyDestination, replyMessageID string, image []byte, _ string, uuid string) (string, error) {
+	s.destination, s.replyMessageID, s.uuid, s.kind, s.content = destination, replyMessageID, uuid, "image", append([]byte(nil), image...)
+	return s.messageID, s.err
+}
+
 type staticCredentials struct{ appID string }
+
+type mediaTokenStub struct{}
+
+func (mediaTokenStub) ResolveFeishuMediaAccessToken(context.Context, channel.ReplyDestination, bool) (string, error) {
+	return "media-token", nil
+}
 
 func (s staticCredentials) ResolveFeishuSendCredentials(context.Context, channel.ReplyDestination) (feishu.ClientCredentials, error) {
 	appID := s.appID

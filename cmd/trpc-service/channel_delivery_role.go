@@ -68,7 +68,7 @@ func runChannelDeliveryRole(parent context.Context, getenv func(string) string, 
 	sendCredentials := credentials.Resolver{Locator: credentialpostgres.New(db), Secrets: secretProvider}
 	providerHTTP := &http.Client{Timeout: configValue.ChannelProviderTimeout}
 	feishuCredentials := &feishu.CredentialProvider{Secrets: sendCredentials, Client: providerHTTP}
-	feishuAdapter := &feishu.Adapter{Sender: feishu.OfficialSender{Clients: &feishu.ClientCache{Credentials: feishuCredentials,
+	feishuAdapter := &feishu.Adapter{Sender: feishu.OfficialSender{Tokens: feishuCredentials, Client: providerHTTP, Clients: &feishu.ClientCache{Credentials: feishuCredentials,
 		NewClient: func(appID, appSecret string) *lark.Client {
 			return lark.NewClient(appID, appSecret, lark.WithHttpClient(providerHTTP))
 		}}}}

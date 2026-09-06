@@ -2,11 +2,16 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,12 +22,19 @@ import (
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/channels/feishu/protocol"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 )
 
 const routeKeyQuery = "route_key"
 
 type TextSender interface {
 	ReplyText(context.Context, channel.ReplyDestination, string, string, string) (string, error)
+}
+type CardSender interface {
+	ReplyCard(context.Context, channel.ReplyDestination, string, []byte, string) (string, error)
+}
+type ImageSender interface {
+	ReplyImage(context.Context, channel.ReplyDestination, string, []byte, string, string) (string, error)
 }
 
 type Adapter struct {
@@ -108,13 +120,30 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 	if request.ContentDigest != hex.EncodeToString(sum[:]) {
 		return channel.DeliveryResult{}, runtime.ErrVersionMismatch
 	}
-	if request.ContentType != "" && request.ContentType != "text/plain" {
-		return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
-	}
 	destination := channel.ReplyDestination{TenantID: request.Event.TenantID, Channel: request.Target.Channel,
 		ChannelBindingID: request.Event.ChannelBindingID, ExternalAccountID: request.Target.ExternalAccountID,
 		ConfigVersion: request.Event.ConfigVersion}
-	messageID, err := a.Sender.ReplyText(ctx, destination, request.Target.ExternalMessageID, string(request.Content), request.ClientRequestID)
+	contentType, err := messaging.NormalizeContentType(request.ContentType)
+	if err != nil {
+		return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: err, Class: "content_type_unsupported"}
+	}
+	var messageID string
+	switch contentType {
+	case messaging.ContentTypeText:
+		messageID, err = a.Sender.ReplyText(ctx, destination, request.Target.ExternalMessageID, string(request.Content), request.ClientRequestID)
+	case messaging.ContentTypeCard:
+		sender, ok := a.Sender.(CardSender)
+		if !ok {
+			return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
+		}
+		messageID, err = sender.ReplyCard(ctx, destination, request.Target.ExternalMessageID, request.Content, request.ClientRequestID)
+	default:
+		sender, ok := a.Sender.(ImageSender)
+		if !ok {
+			return channel.DeliveryResult{}, channel.PermanentDeliveryError{Err: runtime.ErrCapabilityUnsupported, Class: "content_type_unsupported"}
+		}
+		messageID, err = sender.ReplyImage(ctx, destination, request.Target.ExternalMessageID, request.Content, contentType, request.ClientRequestID)
+	}
 	if err != nil {
 		return channel.DeliveryResult{}, err
 	}
@@ -124,7 +153,11 @@ func (a *Adapter) Deliver(ctx context.Context, request channel.DeliveryRequest) 
 	return channel.DeliveryResult{ProviderMessageID: messageID, Delivered: true}, nil
 }
 
-func (a *Adapter) Capabilities() channel.Capabilities { return channel.Capabilities{Text: true} }
+func (a *Adapter) Capabilities() channel.Capabilities {
+	_, card := a.Sender.(CardSender)
+	_, image := a.Sender.(ImageSender)
+	return channel.Capabilities{Text: true, Card: card, Image: image}
+}
 
 type ClientCredentials struct {
 	AppID, AppSecret string
@@ -198,10 +231,30 @@ func (c *ClientCache) ResolveFeishuClient(ctx context.Context, destination chann
 
 type OfficialSender struct {
 	Clients ClientProvider
+	Tokens  MediaAccessTokenProvider
+	Client  HTTPClient
+	BaseURL string
 }
 
 func (s OfficialSender) ReplyText(ctx context.Context, destination channel.ReplyDestination, replyMessageID, text, uuid string) (string, error) {
 	if s.Clients == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || replyMessageID == "" || text == "" || uuid == "" {
+		return "", runtime.ErrInvariantViolation
+	}
+	content, _ := json.Marshal(struct {
+		Text string `json:"text"`
+	}{Text: text})
+	return s.reply(ctx, destination, replyMessageID, "text", content, uuid)
+}
+
+func (s OfficialSender) ReplyCard(ctx context.Context, destination channel.ReplyDestination, replyMessageID string, card []byte, uuid string) (string, error) {
+	if !json.Valid(card) {
+		return "", channel.PermanentDeliveryError{Err: runtime.ErrInvalidEnvelope, Class: "invalid_card"}
+	}
+	return s.reply(ctx, destination, replyMessageID, "interactive", card, uuid)
+}
+
+func (s OfficialSender) reply(ctx context.Context, destination channel.ReplyDestination, replyMessageID, messageType string, content []byte, uuid string) (string, error) {
+	if s.Clients == nil || destination.TenantID == "" || destination.ChannelBindingID == "" || replyMessageID == "" || len(content) == 0 || uuid == "" {
 		return "", runtime.ErrInvariantViolation
 	}
 	client, err := s.Clients.ResolveFeishuClient(ctx, destination)
@@ -211,10 +264,7 @@ func (s OfficialSender) ReplyText(ctx context.Context, destination channel.Reply
 	if client == nil {
 		return "", runtime.ErrVersionMismatch
 	}
-	content, _ := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
-	body := larkim.NewReplyMessageReqBodyBuilder().Content(string(content)).MsgType("text").Uuid(uuid).Build()
+	body := larkim.NewReplyMessageReqBodyBuilder().Content(string(content)).MsgType(messageType).Uuid(uuid).Build()
 	req := larkim.NewReplyMessageReqBuilder().MessageId(replyMessageID).Body(body).Build()
 	resp, err := client.Im.Message.Reply(ctx, req)
 	if err != nil {
@@ -248,6 +298,105 @@ func (s OfficialSender) ReplyText(ctx context.Context, destination channel.Reply
 		return "", channel.AmbiguousDeliveryError{Err: runtime.ErrBackendUnavailable}
 	}
 	return *resp.Data.MessageId, nil
+}
+
+func (s OfficialSender) ReplyImage(ctx context.Context, destination channel.ReplyDestination, replyMessageID string, image []byte, contentType, uuid string) (string, error) {
+	if s.Tokens == nil || replyMessageID == "" || len(image) == 0 || !strings.HasPrefix(contentType, "image/") || uuid == "" {
+		return "", runtime.ErrInvariantViolation
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		token, err := s.Tokens.ResolveFeishuMediaAccessToken(ctx, destination, attempt == 1)
+		if err != nil {
+			return "", err
+		}
+		key, invalid, err := s.uploadImage(ctx, token, image, contentType)
+		if invalid && attempt == 0 {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		content, _ := json.Marshal(map[string]string{"image_key": key})
+		return s.reply(ctx, destination, replyMessageID, "image", content, uuid)
+	}
+	return "", channel.RetryableDeliveryError{Err: runtime.ErrBackendUnavailable}
+}
+
+func (s OfficialSender) uploadImage(ctx context.Context, token string, image []byte, contentType string) (string, bool, error) {
+	base := strings.TrimRight(s.BaseURL, "/")
+	if base == "" {
+		base = defaultFeishuAPIBaseURL
+	}
+	endpoint, err := url.Parse(base + "/open-apis/im/v1/images")
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		return "", false, runtime.ErrInvariantViolation
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err = writer.WriteField("image_type", "message"); err != nil {
+		return "", false, err
+	}
+	part, err := writer.CreateFormFile("image", "reply."+strings.TrimPrefix(contentType, "image/"))
+	if err != nil {
+		return "", false, err
+	}
+	if _, err = part.Write(image); err != nil {
+		return "", false, err
+	}
+	if err = writer.Close(); err != nil {
+		return "", false, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), &body)
+	if err != nil {
+		return "", false, runtime.ErrInvariantViolation
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	client := s.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", false, ctx.Err()
+		}
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrBackendUnavailable}
+	}
+	if response == nil || response.Body == nil {
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrBackendUnavailable}
+	}
+	defer response.Body.Close()
+	var value struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ImageKey string `json:"image_key"`
+		} `json:"data"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&value); err != nil {
+		return "", false, channel.AmbiguousDeliveryError{Err: runtime.ErrInvalidEnvelope}
+	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 && value.Code == 0 && value.Data.ImageKey != "" {
+		return value.Data.ImageKey, false, nil
+	}
+	providerErr := fmt.Errorf("feishu image upload code=%d status=%d: %s", value.Code, response.StatusCode, value.Msg)
+	invalid := value.Code == 99991663 || value.Code == 99991664 || value.Code == 99991671 || response.StatusCode == http.StatusUnauthorized
+	if response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500 || value.Code == 99991400 || value.Code == 99991401 {
+		return "", invalid, channel.RetryableDeliveryError{Err: providerErr, RetryAfter: retryAfterSeconds(response.Header)}
+	}
+	if invalid {
+		return "", true, channel.RetryableDeliveryError{Err: providerErr}
+	}
+	return "", false, channel.PermanentDeliveryError{Err: providerErr, Class: "provider_rejected"}
+}
+
+func retryAfterSeconds(headers http.Header) time.Duration {
+	seconds, err := strconv.Atoi(headers.Get("Retry-After"))
+	if err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return time.Second
 }
 
 func mapValue(values map[string]string, name string) string {
