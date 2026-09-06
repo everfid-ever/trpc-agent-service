@@ -174,8 +174,57 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 		t.Fatalf("model calls=%d", calls)
 	}
 	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
-	if err != nil || result.KeyVersion != 7 {
-		t.Fatalf("result key version=%d err=%v", result.KeyVersion, err)
+	if err != nil || result.KeyVersion != 7 || result.ContentType != messaging.ContentTypeText {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestRunnerExecutorPersistsExplicitRichOutboundContent(t *testing.T) {
+	envelope := runtime.ExecutionEnvelope{SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1,
+		AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1,
+		RequestID: "rich-request", SessionID: "session", UserID: "user", Channel: "fake", InputSeq: 1,
+		PayloadRef: "payload://rich-request", CreatedAt: time.Now().UTC()}
+	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion, AgentAppID: envelope.AgentAppID,
+		AgentAppVersion: envelope.AgentAppVersion, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest,
+		ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
+	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: key, TenantVersion: envelope.TenantVersion,
+		AgentAppVersion: envelope.AgentAppVersion, ContentDigest: envelope.AgentContentDigest, AppName: "tenant-a/app",
+		AgentKind: agentapp.AgentKindLLM, Instruction: "answer", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1}})
+	mock := mockmodel.New()
+	factory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: mock}}
+	bundles := profilememory.NewBundleManager(func(ctx context.Context, requested profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
+		resolved, err := profiles.Resolve(ctx, requested)
+		if err != nil {
+			return nil, nil, err
+		}
+		root, err := factory.Build(ctx, resolved)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &serviceagent.Bundle{AppName: resolved.AppName, Root: root}, nil, nil
+	})
+	payloads := messagingmemory.New()
+	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+		PayloadRef: envelope.PayloadRef, ContentDigest: "payload-digest", Content: []byte(`{"text":"hello"}`), KeyVersion: 7}); err != nil {
+		t.Fatal(err)
+	}
+	card := []byte(`{"schema":"2.0","body":{"text":"hello"}}`)
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessionmemory.New(), Payloads: payloads,
+		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
+			return "runner", "event://" + value.ID, nil
+		},
+		OutputRenderer: OutboundRendererFunc(func(_ context.Context, got runtime.ExecutionEnvelope, modelContent string) (OutboundContent, error) {
+			if got.RequestID != envelope.RequestID || modelContent == "" {
+				t.Fatalf("renderer input envelope=%#v model=%q", got, modelContent)
+			}
+			return OutboundContent{Content: card, ContentType: messaging.ContentTypeCard}, nil
+		})}
+	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
+	if err != nil || result.ContentType != messaging.ContentTypeCard || !bytes.Equal(result.Content, card) {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

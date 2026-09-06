@@ -58,6 +58,7 @@ type RunnerExecutor struct {
 	Inputs            InputDecoder
 	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
+	OutputRenderer    OutboundRenderer
 	Governance        governance.RunGuard
 	Confirmations     governance.ConfirmationCoordinator
 	ContinuationTools ConfirmedToolResolver
@@ -481,7 +482,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if latest.CancelRequested {
 		return runtime.ErrCancelRequested
 	}
-	resultRef, err := encodeResultRef(ctx, w.EncodeResult, envelope, content)
+	outbound, err := renderOutbound(ctx, w.OutputRenderer, envelope, content)
+	if err != nil {
+		return fmt.Errorf("render outbound result: %w", err)
+	}
+	resultRef, err := encodeResultRef(ctx, w.EncodeResult, envelope, string(outbound.Content))
 	if err != nil {
 		return err
 	}
@@ -489,8 +494,8 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if !ok {
 		return runtime.ErrCapabilityUnsupported
 	}
-	resultDigest := sha256.Sum256([]byte(content))
-	if err := resultStore.PutResult(ctx, messaging.ResultRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID, ResultRef: resultRef, ContentDigest: hex.EncodeToString(resultDigest[:]), Content: []byte(content), KeyVersion: payload.KeyVersion}); err != nil {
+	resultDigest := sha256.Sum256(outbound.Content)
+	if err := resultStore.PutResult(ctx, messaging.ResultRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID, ResultRef: resultRef, ContentDigest: hex.EncodeToString(resultDigest[:]), Content: outbound.Content, ContentType: outbound.ContentType, KeyVersion: payload.KeyVersion}); err != nil {
 		return err
 	}
 	if beforeCommit != nil {
