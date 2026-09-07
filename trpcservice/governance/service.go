@@ -27,6 +27,24 @@ type RunGuard interface {
 	Record(context.Context, Decision) error
 }
 
+// ModelCandidateGuard validates every immutable model profile which can run
+// for a request before the bundle is acquired. It is optional to preserve the
+// narrow RunGuard contract used by test and extension implementations.
+type ModelCandidateGuard interface {
+	ValidateModelCandidates(context.Context, RunPermit, []VersionedRef) (Decision, error)
+}
+
+// ModelUsage records a portion of one request's usage under its actual model
+// profile. A single agent run can make several model calls around tool use.
+type ModelUsage struct {
+	Model VersionedRef
+	Usage Usage
+}
+
+type MultiModelRunGuard interface {
+	FinishModels(context.Context, RunPermit, []ModelUsage, []byte) (Decision, error)
+}
+
 type Service struct {
 	Repository  Repository
 	Ledger      Ledger
@@ -101,26 +119,84 @@ func (s Service) Record(ctx context.Context, decision Decision) error {
 	return s.Decisions.RecordDecision(ctx, decision)
 }
 
+func (s Service) ValidateModelCandidates(ctx context.Context, permit RunPermit, candidates []VersionedRef) (Decision, error) {
+	decision := Decision{DecisionID: StableDecisionID(permit.Policy.TenantID, permit.Decision.RequestID, "model_candidates", permit.Policy.Version),
+		TenantID: permit.Policy.TenantID, RequestID: permit.Decision.RequestID, Stage: "model_candidates", Action: ActionAllow,
+		ReasonCode: ReasonAllowed, PolicyVersion: permit.Policy.Version, ReservationID: permit.Reservation.ReservationID}
+	if len(candidates) == 0 || candidates[0] != permit.Model {
+		return Decision{}, runtime.ErrInvariantViolation
+	}
+	for _, candidate := range candidates {
+		if !ModelAllowed(permit.Policy, candidate) {
+			decision.Action, decision.ReasonCode = ActionDeny, ReasonModelDenied
+			if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+				return Decision{}, err
+			}
+			return decision, nil
+		}
+	}
+	if permit.Policy.Policy.Budget.MaxCostMicrosPerRun == 0 {
+		return decision, nil
+	}
+	pricing, err := s.Repository.GetPricing(ctx, permit.Policy.TenantID, permit.Policy.Policy.PricingVersion)
+	if err != nil || !pricingUsable(pricing, s.now()) {
+		decision.Action, decision.ReasonCode = ActionDeny, ReasonPricingUnavailable
+		if recordErr := s.Decisions.RecordDecision(ctx, decision); recordErr != nil {
+			return Decision{}, recordErr
+		}
+		return decision, nil
+	}
+	for _, candidate := range candidates {
+		if _, err := PriceUsage(pricing, candidate, Usage{}, s.now()); err != nil {
+			decision.Action, decision.ReasonCode = ActionDeny, ReasonPricingUnavailable
+			if recordErr := s.Decisions.RecordDecision(ctx, decision); recordErr != nil {
+				return Decision{}, recordErr
+			}
+			return decision, nil
+		}
+	}
+	return decision, nil
+}
+
 func (s Service) Finish(ctx context.Context, permit RunPermit, usage Usage, output []byte) (Decision, error) {
+	return s.FinishModels(ctx, permit, []ModelUsage{{Model: permit.Model, Usage: usage}}, output)
+}
+
+func (s Service) FinishModels(ctx context.Context, permit RunPermit, usages []ModelUsage, output []byte) (Decision, error) {
 	if permit.Decision.Action != ActionAllow || permit.Reservation.ReservationID == "" {
 		return Decision{}, runtime.ErrInvariantViolation
 	}
-	actualCost := int64(0)
-	if (permit.Policy.Policy.Budget.MaxInputTokens > 0 || permit.Policy.Policy.Budget.MaxOutputTokens > 0 || permit.Policy.Policy.Budget.MaxCostMicrosPerRun > 0) && usage.InputTokens+usage.OutputTokens == 0 {
+	var aggregate Usage
+	for _, value := range usages {
+		if value.Model.ID == "" || value.Model.Version < 1 || value.Usage.InputTokens < 0 || value.Usage.OutputTokens < 0 || value.Usage.CachedInputTokens < 0 {
+			return Decision{}, runtime.ErrInvariantViolation
+		}
+		aggregate.InputTokens += value.Usage.InputTokens
+		aggregate.OutputTokens += value.Usage.OutputTokens
+		aggregate.CachedInputTokens += value.Usage.CachedInputTokens
+	}
+	if len(usages) == 0 || ((permit.Policy.Policy.Budget.MaxInputTokens > 0 || permit.Policy.Policy.Budget.MaxOutputTokens > 0 || permit.Policy.Policy.Budget.MaxCostMicrosPerRun > 0) && aggregate.InputTokens+aggregate.OutputTokens == 0) {
 		return Decision{}, runtime.ErrCapabilityUnsupported
 	}
+	actualCost := int64(0)
 	if permit.Policy.Policy.Budget.MaxCostMicrosPerRun > 0 {
 		pricing, err := s.Repository.GetPricing(ctx, permit.Policy.TenantID, permit.Policy.Policy.PricingVersion)
 		if err != nil {
 			return Decision{}, err
 		}
-		actualCost, err = PriceUsage(pricing, permit.Model, usage, s.now())
-		if err != nil {
-			return Decision{}, err
+		for _, value := range usages {
+			cost, priceErr := PriceUsage(pricing, value.Model, value.Usage, s.now())
+			if priceErr != nil {
+				return Decision{}, priceErr
+			}
+			if cost > int64(^uint64(0)>>1)-actualCost {
+				return Decision{}, runtime.ErrInvariantViolation
+			}
+			actualCost += cost
 		}
 	}
 	settled, err := s.Ledger.Settle(ctx, SettleRequest{TenantID: permit.Policy.TenantID, ReservationID: permit.Reservation.ReservationID,
-		RequestID: permit.Reservation.RequestID, Stage: "model", UsageKind: "tokens", ExpectedVersion: permit.Reservation.Version, Usage: usage, ActualCostMicros: actualCost})
+		RequestID: permit.Reservation.RequestID, Stage: "model", UsageKind: "tokens", ExpectedVersion: permit.Reservation.Version, Usage: aggregate, ActualCostMicros: actualCost})
 	if err != nil {
 		return Decision{}, err
 	}
@@ -184,3 +260,5 @@ func pricingUsable(snapshot PricingSnapshot, at time.Time) bool {
 }
 
 var _ RunGuard = Service{}
+var _ ModelCandidateGuard = Service{}
+var _ MultiModelRunGuard = Service{}

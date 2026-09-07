@@ -11,8 +11,8 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 4 {
-		t.Fatalf("migrations=%d, want baseline plus additive release, memory, and outbound content migrations", len(all))
+	if len(all) != 5 {
+		t.Fatalf("migrations=%d, want baseline plus release, memory, outbound content, and model fallback migrations", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
@@ -83,6 +83,28 @@ func TestOutboundContentTypeMigrationIsTransactionWrapped(t *testing.T) {
 	for _, clause := range []string{"result_payload_content_type_check", "interaction_payload_content_type_check", "application/vnd.trpc.card+json"} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("outbound content migration lacks %q", clause)
+		}
+	}
+}
+
+func TestAgentFallbackModelsMigrationIsTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[4]
+	if migration.Version != "000005" || migration.Name != "agent_fallback_models" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if _, err := transactionBody(migration.Up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionBody(migration.Down); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"fallback_model_refs", "jsonb_typeof(fallback_model_refs) = 'array'", "agent_kind = 'llm'"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("fallback model migration lacks %q", clause)
 		}
 	}
 }

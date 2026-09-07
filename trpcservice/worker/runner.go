@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,6 +115,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if err != nil {
 		return fmt.Errorf("resolve execution model: %w", err)
 	}
+	modelCandidates, err := executionModelCandidates(ctx, w.Profiles, snapshot)
+	if err != nil {
+		return fmt.Errorf("resolve execution model candidates: %w", err)
+	}
 	appName := snapshot.AppName
 	if appName == "" {
 		appName = envelope.TenantID + "/" + envelope.AgentAppID
@@ -206,6 +211,19 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 		if permit.Decision.Action != governance.ActionAllow {
 			return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeDenied, permit.Decision)
+		}
+		if validator, ok := w.Governance.(governance.ModelCandidateGuard); ok {
+			decision, validateErr := validator.ValidateModelCandidates(ctx, permit, modelCandidates)
+			if validateErr != nil {
+				_ = w.Governance.Refund(ctx, permit, "model_candidates_invalid")
+				return fmt.Errorf("validate model candidates: %w", validateErr)
+			}
+			if decision.Action != governance.ActionAllow {
+				if refundErr := w.Governance.Refund(ctx, permit, "model_candidates_denied"); refundErr != nil {
+					return refundErr
+				}
+				return w.commitGovernanceTerminal(ctx, turn, envelope, head, fence, beforeCommit, runtime.OutcomeDenied, decision)
+			}
 		}
 	}
 
@@ -467,7 +485,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	content := runResult.Content
 	if w.Governance != nil {
-		decision, finishErr := w.Governance.Finish(ctx, permit, runResult.Usage, []byte(content))
+		decision, finishErr := finishGovernanceRun(ctx, w.Governance, permit, runResult, []byte(content))
 		if finishErr != nil {
 			decision = governance.Decision{DecisionID: governance.StableDecisionID(envelope.TenantID, envelope.RequestID, "settlement", envelope.PolicyVersion), TenantID: envelope.TenantID,
 				RequestID: envelope.RequestID, Stage: "settlement", Action: governance.ActionDeny, ReasonCode: governance.ReasonUsageUnavailable, PolicyVersion: envelope.PolicyVersion, ReservationID: permit.Reservation.ReservationID}
@@ -647,10 +665,40 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 }
 
 type runnerResult struct {
-	Content        string
-	Usage          governance.Usage
-	ToolCalls      []model.ToolCall
-	GraphInterrupt *graphContinuationCoordinate
+	Content           string
+	Usage             governance.Usage
+	ModelUsage        map[governance.VersionedRef]governance.Usage
+	UnattributedUsage governance.Usage
+	ToolCalls         []model.ToolCall
+	GraphInterrupt    *graphContinuationCoordinate
+}
+
+func finishGovernanceRun(ctx context.Context, guard governance.RunGuard, permit governance.RunPermit, result runnerResult, output []byte) (governance.Decision, error) {
+	if len(result.ModelUsage) == 0 {
+		return guard.Finish(ctx, permit, result.Usage, output)
+	}
+	multi, ok := guard.(governance.MultiModelRunGuard)
+	if !ok {
+		return governance.Decision{}, runtime.ErrCapabilityUnsupported
+	}
+	refs := make([]governance.VersionedRef, 0, len(result.ModelUsage))
+	for ref := range result.ModelUsage {
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].ID == refs[j].ID {
+			return refs[i].Version < refs[j].Version
+		}
+		return refs[i].ID < refs[j].ID
+	})
+	usages := make([]governance.ModelUsage, 0, len(refs)+1)
+	for _, ref := range refs {
+		usages = append(usages, governance.ModelUsage{Model: ref, Usage: result.ModelUsage[ref]})
+	}
+	if result.UnattributedUsage.InputTokens != 0 || result.UnattributedUsage.OutputTokens != 0 || result.UnattributedUsage.CachedInputTokens != 0 {
+		usages = append(usages, governance.ModelUsage{Model: permit.Model, Usage: result.UnattributedUsage})
+	}
+	return multi.FinishModels(ctx, permit, usages, output)
 }
 
 type graphContinuationCoordinate struct {
@@ -673,6 +721,8 @@ func consumeRunnerEvents(ctx context.Context, events <-chan *event.Event) (runne
 func consumeRunnerEventsWithProgress(ctx context.Context, events <-chan *event.Event, onDelta func(string)) (runnerResult, error) {
 	var content strings.Builder
 	var resultUsage governance.Usage
+	modelUsage := make(map[governance.VersionedRef]governance.Usage)
+	var unattributedUsage governance.Usage
 	var toolCalls []model.ToolCall
 	var graphInterrupt *graphContinuationCoordinate
 	usageEvents := make(map[string]struct{})
@@ -686,7 +736,7 @@ func consumeRunnerEventsWithProgress(ctx context.Context, events <-chan *event.E
 				if !completed && graphInterrupt == nil {
 					return runnerResult{}, runtime.ErrBackendUnavailable
 				}
-				return runnerResult{Content: content.String(), Usage: resultUsage, ToolCalls: toolCalls, GraphInterrupt: graphInterrupt}, nil
+				return runnerResult{Content: content.String(), Usage: resultUsage, ModelUsage: modelUsage, UnattributedUsage: unattributedUsage, ToolCalls: toolCalls, GraphInterrupt: graphInterrupt}, nil
 			}
 			if value == nil {
 				continue
@@ -704,6 +754,18 @@ func consumeRunnerEventsWithProgress(ctx context.Context, events <-chan *event.E
 						resultUsage.InputTokens += int64(value.Usage.PromptTokens)
 						resultUsage.OutputTokens += int64(value.Usage.CompletionTokens)
 						resultUsage.CachedInputTokens += int64(value.Usage.PromptTokensDetails.CachedTokens)
+						usage := governance.Usage{InputTokens: int64(value.Usage.PromptTokens), OutputTokens: int64(value.Usage.CompletionTokens), CachedInputTokens: int64(value.Usage.PromptTokensDetails.CachedTokens)}
+						if ref, ok := serviceagent.ModelProfileRefFromResponse(value.Response.Model); ok {
+							current := modelUsage[governance.VersionedRef{ID: ref.ID, Version: ref.Version}]
+							current.InputTokens += usage.InputTokens
+							current.OutputTokens += usage.OutputTokens
+							current.CachedInputTokens += usage.CachedInputTokens
+							modelUsage[governance.VersionedRef{ID: ref.ID, Version: ref.Version}] = current
+						} else {
+							unattributedUsage.InputTokens += usage.InputTokens
+							unattributedUsage.OutputTokens += usage.OutputTokens
+							unattributedUsage.CachedInputTokens += usage.CachedInputTokens
+						}
 					}
 				}
 				for _, choice := range value.Choices {
@@ -848,6 +910,38 @@ func executionModelRef(ctx context.Context, resolver profile.ExecutionProfileRes
 		return ref, nil
 	}
 	return governance.VersionedRef{}, runtime.ErrCapabilityUnsupported
+}
+
+func executionModelCandidates(ctx context.Context, resolver profile.ExecutionProfileResolver,
+	snapshot profile.ExecutionProfileSnapshot,
+) ([]governance.VersionedRef, error) {
+	seen := make(map[governance.VersionedRef]struct{})
+	var result []governance.VersionedRef
+	err := walkExecutionProfiles(ctx, resolver, snapshot, 0, make(map[profile.ExecutionProfileKey]bool),
+		func(value profile.ExecutionProfileSnapshot) error {
+			if value.AgentKind != agentapp.AgentKindLLM {
+				return nil
+			}
+			refs := append([]profile.VersionedRef{value.ModelProfileRef}, value.FallbackModelRefs...)
+			for _, candidate := range refs {
+				ref := governance.VersionedRef{ID: candidate.ID, Version: candidate.Version}
+				if ref.ID == "" || ref.Version < 1 {
+					return runtime.ErrVersionMismatch
+				}
+				if _, exists := seen[ref]; !exists {
+					seen[ref] = struct{}{}
+					result = append(result, ref)
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	if len(result) == 0 {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return result, nil
 }
 
 func walkExecutionProfiles(ctx context.Context, resolver profile.ExecutionProfileResolver, snapshot profile.ExecutionProfileSnapshot,

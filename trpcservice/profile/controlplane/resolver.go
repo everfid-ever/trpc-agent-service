@@ -129,16 +129,18 @@ func (r Resolver) resolve(ctx context.Context, key profile.ExecutionProfileKey, 
 	}
 
 	if revision.AgentKind == agentapp.AgentKindLLM {
-		modelProfile, err := r.Models.GetModel(ctx, key.TenantID, revision.ModelProfileID, revision.ModelProfileVersion)
-		if err != nil {
-			return profile.ExecutionProfileSnapshot{}, err
-		}
-		if modelProfile.TenantID != key.TenantID || modelProfile.ProfileID != revision.ModelProfileID ||
-			modelProfile.Version != revision.ModelProfileVersion {
-			return profile.ExecutionProfileSnapshot{}, runtime.ErrTenantScope
-		}
-		if modelProfile.Status == "disabled" {
-			return profile.ExecutionProfileSnapshot{}, runtime.ErrCapabilityUnsupported
+		refs := append([]agentapp.VersionedRef{{ID: revision.ModelProfileID, Version: revision.ModelProfileVersion}}, revision.FallbackModelRefs...)
+		for _, ref := range refs {
+			modelProfile, err := r.Models.GetModel(ctx, key.TenantID, ref.ID, ref.Version)
+			if err != nil {
+				return profile.ExecutionProfileSnapshot{}, err
+			}
+			if modelProfile.TenantID != key.TenantID || modelProfile.ProfileID != ref.ID || modelProfile.Version != ref.Version {
+				return profile.ExecutionProfileSnapshot{}, runtime.ErrTenantScope
+			}
+			if modelProfile.Status == "disabled" {
+				return profile.ExecutionProfileSnapshot{}, runtime.ErrCapabilityUnsupported
+			}
 		}
 	}
 
@@ -207,11 +209,20 @@ func project(key profile.ExecutionProfileKey, app agentapp.AgentApp, revision ag
 		ContentDigest: revision.ContentDigest, AppName: key.TenantID + "/" + key.AgentAppID,
 		AgentKind: revision.AgentKind, AgentSpec: revision.AgentSpec, Description: revision.Description,
 		Instruction: revision.Instruction, GlobalInstruction: revision.GlobalInstruction,
-		ModelProfileRef: profile.VersionedRef{ID: revision.ModelProfileID, Version: revision.ModelProfileVersion},
-		ToolRefs:        tools, SkillRefs: append([]profile.SkillRef(nil), revision.SkillRefs...), KnowledgeRefs: knowledge,
+		ModelProfileRef:   profile.VersionedRef{ID: revision.ModelProfileID, Version: revision.ModelProfileVersion},
+		FallbackModelRefs: modelRefs(revision.FallbackModelRefs),
+		ToolRefs:          tools, SkillRefs: append([]profile.SkillRef(nil), revision.SkillRefs...), KnowledgeRefs: knowledge,
 		GenerationConfig: cloneMap(revision.GenerationConfig), RuntimePolicy: cloneMap(revision.RuntimePolicy),
 		BackendRequirements: requirements,
 	}
+}
+
+func modelRefs(input []agentapp.VersionedRef) []profile.VersionedRef {
+	result := make([]profile.VersionedRef, len(input))
+	for index, ref := range input {
+		result[index] = profile.VersionedRef{ID: ref.ID, Version: ref.Version}
+	}
+	return result
 }
 
 func cloneMap(input map[string]any) map[string]any {

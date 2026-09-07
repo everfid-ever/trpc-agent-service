@@ -39,6 +39,7 @@ type ExecutionProfileSnapshot struct {
 	Instruction         string
 	GlobalInstruction   string
 	ModelProfileRef     VersionedRef
+	FallbackModelRefs   []VersionedRef
 	ToolRefs            []VersionedRef
 	SkillRefs           []SkillRef
 	KnowledgeRefs       []VersionedRef

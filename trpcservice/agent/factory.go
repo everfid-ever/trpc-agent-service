@@ -141,11 +141,19 @@ func (f Factory) build(ctx context.Context, snapshot profile.ExecutionProfileSna
 }
 
 func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfileSnapshot, name string, insideGraph bool) (agentcore.Agent, bool, error) {
-	resolvedModel, err := f.Models.ResolveModel(ctx, snapshot.Key.TenantID, snapshot.ModelProfileRef)
-	if err != nil {
-		return nil, false, err
+	refs := append([]profile.VersionedRef{snapshot.ModelProfileRef}, snapshot.FallbackModelRefs...)
+	models := make([]model.Model, 0, len(refs))
+	for _, ref := range refs {
+		resolved, err := f.Models.ResolveModel(ctx, snapshot.Key.TenantID, ref)
+		if err != nil {
+			return nil, false, err
+		}
+		models = append(models, instrumentModel(f.Telemetry, resolved))
 	}
-	resolvedModel = instrumentModel(f.Telemetry, resolvedModel)
+	resolvedModel := models[0]
+	if len(models) > 1 {
+		resolvedModel = newFailoverModel(refs, models)
+	}
 	modelCallbacks := f.Callbacks.Model
 	toolCallbacks := f.Callbacks.Tool
 	if telemetry.Enabled(f.Telemetry) {

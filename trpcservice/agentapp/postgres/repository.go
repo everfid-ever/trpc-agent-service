@@ -94,7 +94,11 @@ func (r *Repository) CreateDraft(ctx context.Context, in agentapp.CreateDraftInp
 	if err != nil {
 		return agentapp.Revision{}, agentapp.ErrInvalid
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO agent_app_revision(tenant_id,agent_app_id,revision,state,draft_version,agent_kind,schema_version,agent_spec,description,instruction,global_instruction,model_profile_id,model_profile_version,generation_config,runtime_policy) VALUES($1,$2,$3,'draft',1,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb) RETURNING created_at,updated_at`, value.TenantID, value.AgentAppID, value.Revision, value.AgentKind, value.SchemaVersion, string(agentSpec), value.Description, value.Instruction, value.GlobalInstruction, nullableString(value.ModelProfileID), nullablePositive(value.ModelProfileVersion), string(generation), string(policy)).Scan(&value.CreatedAt, &value.UpdatedAt)
+	fallbacks, err := json.Marshal(value.FallbackModelRefs)
+	if err != nil {
+		return agentapp.Revision{}, agentapp.ErrInvalid
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO agent_app_revision(tenant_id,agent_app_id,revision,state,draft_version,agent_kind,schema_version,agent_spec,description,instruction,global_instruction,model_profile_id,model_profile_version,fallback_model_refs,generation_config,runtime_policy) VALUES($1,$2,$3,'draft',1,$4,$5,$6::jsonb,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb) RETURNING created_at,updated_at`, value.TenantID, value.AgentAppID, value.Revision, value.AgentKind, value.SchemaVersion, string(agentSpec), value.Description, value.Instruction, value.GlobalInstruction, nullableString(value.ModelProfileID), nullablePositive(value.ModelProfileVersion), string(fallbacks), string(generation), string(policy)).Scan(&value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
@@ -150,7 +154,11 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 	if err != nil {
 		return agentapp.Revision{}, agentapp.ErrInvalid
 	}
-	err = tx.QueryRowContext(ctx, `UPDATE agent_app_revision SET draft_version=draft_version+1,agent_kind=$4,schema_version=$5,agent_spec=$6::jsonb,description=$7,instruction=$8,global_instruction=$9,model_profile_id=$10,model_profile_version=$11,generation_config=$12::jsonb,runtime_policy=$13::jsonb,updated_at=now() WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3 RETURNING draft_version,created_at,updated_at`, value.TenantID, value.AgentAppID, value.Revision, value.AgentKind, value.SchemaVersion, string(agentSpec), value.Description, value.Instruction, value.GlobalInstruction, nullableString(value.ModelProfileID), nullablePositive(value.ModelProfileVersion), string(generation), string(policy)).Scan(&value.DraftVersion, &value.CreatedAt, &value.UpdatedAt)
+	fallbacks, err := json.Marshal(value.FallbackModelRefs)
+	if err != nil {
+		return agentapp.Revision{}, agentapp.ErrInvalid
+	}
+	err = tx.QueryRowContext(ctx, `UPDATE agent_app_revision SET draft_version=draft_version+1,agent_kind=$4,schema_version=$5,agent_spec=$6::jsonb,description=$7,instruction=$8,global_instruction=$9,model_profile_id=$10,model_profile_version=$11,fallback_model_refs=$12::jsonb,generation_config=$13::jsonb,runtime_policy=$14::jsonb,updated_at=now() WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3 RETURNING draft_version,created_at,updated_at`, value.TenantID, value.AgentAppID, value.Revision, value.AgentKind, value.SchemaVersion, string(agentSpec), value.Description, value.Instruction, value.GlobalInstruction, nullableString(value.ModelProfileID), nullablePositive(value.ModelProfileVersion), string(fallbacks), string(generation), string(policy)).Scan(&value.DraftVersion, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
@@ -180,18 +188,21 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 }
 func (r *Repository) GetRevision(ctx context.Context, tenantID, appID string, revision int64) (agentapp.Revision, error) {
 	var value agentapp.Revision
-	var agentSpec, generation, policy []byte
+	var agentSpec, fallbacks, generation, policy []byte
 	var digest sql.NullString
 	var published sql.NullTime
 	var modelProfileID sql.NullString
 	var modelProfileVersion sql.NullInt64
-	err := r.db.QueryRowContext(ctx, `SELECT tenant_id,agent_app_id,revision,state,draft_version,agent_kind,schema_version,agent_spec,description,instruction,global_instruction,model_profile_id,model_profile_version,generation_config,runtime_policy,content_digest,published_at,created_at,updated_at FROM agent_app_revision WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, tenantID, appID, revision).Scan(&value.TenantID, &value.AgentAppID, &value.Revision, &value.State, &value.DraftVersion, &value.AgentKind, &value.SchemaVersion, &agentSpec, &value.Description, &value.Instruction, &value.GlobalInstruction, &modelProfileID, &modelProfileVersion, &generation, &policy, &digest, &published, &value.CreatedAt, &value.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, `SELECT tenant_id,agent_app_id,revision,state,draft_version,agent_kind,schema_version,agent_spec,description,instruction,global_instruction,model_profile_id,model_profile_version,fallback_model_refs,generation_config,runtime_policy,content_digest,published_at,created_at,updated_at FROM agent_app_revision WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, tenantID, appID, revision).Scan(&value.TenantID, &value.AgentAppID, &value.Revision, &value.State, &value.DraftVersion, &value.AgentKind, &value.SchemaVersion, &agentSpec, &value.Description, &value.Instruction, &value.GlobalInstruction, &modelProfileID, &modelProfileVersion, &fallbacks, &generation, &policy, &digest, &published, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
 	value.ModelProfileID = modelProfileID.String
 	value.ModelProfileVersion = modelProfileVersion.Int64
 	if err = json.Unmarshal(agentSpec, &value.AgentSpec); err != nil {
+		return agentapp.Revision{}, agentapp.ErrInvalid
+	}
+	if err = json.Unmarshal(fallbacks, &value.FallbackModelRefs); err != nil {
 		return agentapp.Revision{}, agentapp.ErrInvalid
 	}
 	if err = json.Unmarshal(generation, &value.GenerationConfig); err != nil {

@@ -86,6 +86,7 @@ type Revision struct {
 	GlobalInstruction   string
 	ModelProfileID      string
 	ModelProfileVersion int64
+	FallbackModelRefs   []VersionedRef
 	ToolRefs            []VersionedRef
 	SkillRefs           []SkillRef
 	KnowledgeRefs       []VersionedRef
@@ -109,8 +110,19 @@ func (r Revision) ValidateDraft() error {
 		if r.Instruction == "" || r.ModelProfileID == "" || r.ModelProfileVersion < 1 || !r.AgentSpec.empty() {
 			return fmt.Errorf("%w: invalid llm revision", ErrInvalid)
 		}
+		seenFallbacks := map[string]struct{}{fmt.Sprintf("%s\x00%d", r.ModelProfileID, r.ModelProfileVersion): {}}
+		for _, ref := range r.FallbackModelRefs {
+			key := fmt.Sprintf("%s\x00%d", ref.ID, ref.Version)
+			if ref.ID == "" || ref.Version < 1 || ref.Required {
+				return fmt.Errorf("%w: invalid fallback model reference", ErrInvalid)
+			}
+			if _, exists := seenFallbacks[key]; exists {
+				return fmt.Errorf("%w: duplicate fallback model reference %q", ErrInvalid, ref.ID)
+			}
+			seenFallbacks[key] = struct{}{}
+		}
 	} else {
-		if r.ModelProfileID != "" || r.ModelProfileVersion != 0 {
+		if r.ModelProfileID != "" || r.ModelProfileVersion != 0 || len(r.FallbackModelRefs) != 0 {
 			return fmt.Errorf("%w: composite agent cannot own a model profile", ErrInvalid)
 		}
 		if err := r.AgentSpec.validate(r.AgentKind); err != nil {
@@ -279,13 +291,14 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		GlobalInstruction   string
 		ModelProfileID      string
 		ModelProfileVersion int64
+		FallbackModelRefs   []VersionedRef
 		ToolRefs            []VersionedRef
 		SkillRefs           []SkillRef
 		KnowledgeRefs       []VersionedRef
 		GenerationConfig    map[string]any
 		RuntimePolicy       map[string]any
 	}{r.AgentKind, r.SchemaVersion, r.AgentSpec, r.Description, r.Instruction,
-		r.GlobalInstruction, r.ModelProfileID, r.ModelProfileVersion,
+		r.GlobalInstruction, r.ModelProfileID, r.ModelProfileVersion, r.FallbackModelRefs,
 		tools, skills, knowledge, r.GenerationConfig, r.RuntimePolicy}
 	b, err := json.Marshal(input)
 	if err != nil {
@@ -297,6 +310,7 @@ func (r Revision) ComputeContentDigest() (string, error) {
 
 func cloneRevision(r Revision) Revision {
 	r.ToolRefs = cloneRefs(r.ToolRefs)
+	r.FallbackModelRefs = cloneRefs(r.FallbackModelRefs)
 	r.SkillRefs = append([]SkillRef(nil), r.SkillRefs...)
 	r.KnowledgeRefs = cloneRefs(r.KnowledgeRefs)
 	r.AgentSpec = cloneAgentSpec(r.AgentSpec)
