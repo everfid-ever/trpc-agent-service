@@ -12,6 +12,7 @@
 | --- | --- | --- | --- | --- |
 | Compose 契约 | `docker compose -f deploy/compose/docker-compose.local.yml config --quiet` | Docker Compose v2 | 退出码 0 | 本地 |
 | Admission | `bash scripts/ci_admission.sh`；race 使用 `--race` | Go 1.21.x；或等价 Go 1.21 容器/CI runner | format、依赖边界、build、vet、test 全部通过 | 本地/CI |
+| 最终无凭据验收 | `bash scripts/ci_admission.sh --demo` | Go 1.21、Docker Desktop/CI Docker daemon、curl | 空 PostgreSQL 只记录 `000001`；demo bootstrap、fake chat、SSE delta、health/ready 全部通过 | 本地/CI |
 | 后端 adapter | `bash scripts/backend_adapter_smoke.sh` | Docker Desktop | PostgreSQL、Redis、Qdrant、Vault contract 通过；临时资源自动清理 | 本地 |
 | PostgreSQL/Redis runtime slice | `docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis` 后执行 `--profile runtime-test run --rm runtime-test` | Docker Desktop | migration 与真实 PostgreSQL/Redis slice 通过 | 本地 |
 | WebUI + 模型 | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；confirmation 只执行一次 | 本地 + 真实模型 |

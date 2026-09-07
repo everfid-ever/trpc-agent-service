@@ -2,7 +2,7 @@
 
 `bash scripts/quickstart.sh --demo`（或 `./start.sh --demo`）是一个可重复的本地验收入口。它只使用 Docker Desktop、仓库中的代码和 `docker-compose.backend-smoke.yml` 提供的 PostgreSQL/Redis；不读取 DeepSeek、IM 或 Secret 文件。
 
-该入口会构建服务镜像、在空 PostgreSQL 应用嵌入式 schema migration、发布固定 Demo Tenant/App/Revision/Policy/Config，并以 `fake-deterministic-v1` 启动 `demo-server`。随后它必须通过 `/healthz`、`/readyz`，让普通 `POST /v1/chat` 返回固定的 `demo: deterministic fake response`，并让带 `"stream":true` 的请求以 SSE 依序送出固定的 `demo: ` 与 `deterministic fake response` delta。重复运行会复用相同的控制面 ID 和已发布 revision。
+该入口会构建服务镜像、在空 PostgreSQL 应用嵌入式 schema migration，并断言 `schema_migrations` 只记录压缩后的 `000001`；随后发布固定 Demo Tenant/App/Revision/Policy/Config，并以 `fake-deterministic-v1` 启动 `demo-server`。随后它必须通过 `/healthz`、`/readyz`，让普通 `POST /v1/chat` 返回固定的 `demo: deterministic fake response`，并让带 `"stream":true` 的请求以 SSE 依序送出固定的 `demo: ` 与 `deterministic fake response` delta。重复运行会复用相同的控制面 ID 和已发布 revision。
 
 ## 已覆盖
 

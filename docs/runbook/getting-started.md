@@ -43,6 +43,8 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
 4. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据：
 
    ```bash
+   # 无凭据的最终验收：空库单一基线、fake chat 与 SSE
+   bash scripts/ci_admission.sh --demo
    bash scripts/ci_admission.sh
    bash scripts/backend_adapter_smoke.sh
    bash scripts/local_multinode_smoke.sh

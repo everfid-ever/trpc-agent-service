@@ -72,6 +72,9 @@ cp deploy/compose/.env.local.example deploy/compose/.env.local
 # 静态检查、单测、迁移与依赖边界
 bash scripts/ci_admission.sh
 
+# 无凭据最终验收：空库单一基线、fake chat 与 SSE
+bash scripts/ci_admission.sh --demo
+
 # race 检查
 bash scripts/ci_admission.sh --race
 

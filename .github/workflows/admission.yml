@@ -49,3 +49,16 @@ jobs:
         run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
       - name: Run isolated backend smoke
         run: bash scripts/backend_adapter_smoke.sh
+
+  credential-free-final-acceptance:
+    name: Empty DB, fake provider and SSE final acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.13'
+          cache: false
+      - name: Run static gate and credential-free demo acceptance
+        run: bash scripts/ci_admission.sh --demo
