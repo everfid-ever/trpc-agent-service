@@ -391,6 +391,12 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	events, err = run.Run(runCtx, envelope.UserID, envelope.SessionID, message, runOptions...)
 	if err != nil {
+		if violation := runtime.ExecutionBudgetViolation(runCtx); violation != nil {
+			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, violation)
+		}
+		if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, context.DeadlineExceeded)
+		}
 		return fmt.Errorf("run agent graph: %w", err)
 	}
 	var progress *progressEmitter
@@ -407,10 +413,16 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		if violation := runtime.ExecutionBudgetViolation(runCtx); violation != nil {
 			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, violation)
 		}
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, context.DeadlineExceeded)
 		}
 		return fmt.Errorf("consume agent graph events: %w", err)
+	}
+	if violation := runtime.ExecutionBudgetViolation(runCtx); violation != nil {
+		return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, violation)
+	}
+	if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, context.DeadlineExceeded)
 	}
 	if continuation != nil {
 		if err := addUsage(&runResult.Usage, usageOffset); err != nil {

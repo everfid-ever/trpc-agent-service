@@ -38,6 +38,17 @@ func (r staticModelResolver) ResolveModel(context.Context, string, profile.Versi
 	return r.model, nil
 }
 
+// overBudgetModel deliberately consumes a second slot from the run context.
+// The Factory's budgetedModel wrapper consumes the first one, so this is an
+// end-to-end check that an LLM budget rejection becomes a durable terminal.
+type overBudgetModel struct{}
+
+func (overBudgetModel) GenerateContent(ctx context.Context, _ *model.Request) (<-chan *model.Response, error) {
+	return nil, runtime.ConsumeLLMCall(ctx)
+}
+
+func (overBudgetModel) Info() model.Info { return model.Info{Name: "over-budget"} }
+
 type cancelledTaskStub struct{ taskStub }
 
 func (s cancelledTaskStub) GetExecution(context.Context, gateway.ExecutionKey) (gateway.ExecutionStatus, error) {
@@ -181,6 +192,54 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	result, err := payloads.GetResult(context.Background(), envelope.TenantID, envelope.RequestID)
 	if err != nil || result.KeyVersion != 7 || result.ContentType != messaging.ContentTypeText {
 		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestRunnerExecutorCommitsModelBudgetExhaustion(t *testing.T) {
+	envelope := runtime.ExecutionEnvelope{SchemaVersion: 1, TenantID: "tenant-a", TenantVersion: 1, AgentAppID: "app", AgentAppVersion: 1,
+		AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1, RequestID: "budget-request", SessionID: "session",
+		UserID: "user", Channel: "fake", InputSeq: 1, PayloadRef: "payload://budget-request", CreatedAt: time.Now().UTC(),
+		ExecutionBudget: runtime.ExecutionBudget{MaxLLMCalls: 1}}
+	key := profile.ExecutionProfileKey{TenantID: envelope.TenantID, TenantVersion: envelope.TenantVersion, AgentAppID: envelope.AgentAppID,
+		AgentAppVersion: envelope.AgentAppVersion, AgentAppRevision: envelope.AgentAppRevision, ContentDigest: envelope.AgentContentDigest,
+		ConfigVersion: envelope.ConfigVersion, PolicyVersion: envelope.PolicyVersion}
+	profiles := profilememory.NewResolver(profile.ExecutionProfileSnapshot{Key: key, TenantVersion: envelope.TenantVersion,
+		AgentAppVersion: envelope.AgentAppVersion, ContentDigest: envelope.AgentContentDigest, AppName: "tenant-a/app",
+		AgentKind: agentapp.AgentKindLLM, Instruction: "answer", ModelProfileRef: profile.VersionedRef{ID: "mock", Version: 1},
+		ExecutionBudget: profile.ExecutionBudgetV1{MaxLLMCalls: 1}})
+	factory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: overBudgetModel{}}}
+	bundles := profilememory.NewBundleManager(func(ctx context.Context, requested profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
+		resolved, err := profiles.Resolve(ctx, requested)
+		if err != nil {
+			return nil, nil, err
+		}
+		root, err := factory.Build(ctx, resolved)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &serviceagent.Bundle{AppName: resolved.AppName, Root: root}, nil, nil
+	})
+	payloads := messagingmemory.New()
+	if err := payloads.PutPayload(context.Background(), messaging.PayloadRecord{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+		PayloadRef: envelope.PayloadRef, ContentDigest: "payload-digest", Content: []byte(`{"text":"hello"}`), KeyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	sessions := sessionmemory.New()
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, Payloads: payloads,
+		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
+			return "runner", "event://" + value.ID, nil
+		}}
+	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
+		t.Fatalf("execute = %v, want budget terminal", err)
+	}
+	terminal, err := sessions.GetTerminalByInputSeq(context.Background(), sessionstore.TerminalKey{SessionKey: sessionstore.SessionKey{
+		TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}, InputSeq: envelope.InputSeq})
+	if err != nil || terminal.Outcome != runtime.OutcomeFailed {
+		t.Fatalf("terminal=%#v err=%v", terminal, err)
+	}
+	_, outbox, _ := sessions.SnapshotEffects(sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID})
+	if len(outbox) != 1 || outbox[0].PayloadRef != "execution-budget://tenant-a/budget-request/max_llm_calls" {
+		t.Fatalf("outbox=%#v", outbox)
 	}
 }
 
