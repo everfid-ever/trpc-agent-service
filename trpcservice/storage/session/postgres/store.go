@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type DB interface {
@@ -18,18 +20,26 @@ type DB interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-type Store struct{ db DB }
+type Store struct {
+	db        DB
+	telemetry telemetry.Provider
+}
 
-func New(db DB) *Store { return &Store{db: db} }
+func New(db DB) *Store { return NewWithTelemetry(db, nil) }
 
-func (s *Store) OpenForRun(ctx context.Context, in sessionstore.OpenForRunRequest) (sessionstore.SessionHead, error) {
+func NewWithTelemetry(db DB, provider telemetry.Provider) *Store {
+	return &Store{db: db, telemetry: telemetry.OrNoop(provider)}
+}
+
+func (s *Store) OpenForRun(ctx context.Context, in sessionstore.OpenForRunRequest) (head sessionstore.SessionHead, resultErr error) {
+	done := s.measure(ctx, telemetry.OperationSessionOpen)
+	defer func() { done(resultErr) }()
 	if in.TenantID == "" || in.AgentAppID == "" || in.SessionID == "" {
 		return sessionstore.SessionHead{}, runtime.ErrTenantScope
 	}
 	if in.RequestID == "" || in.InputSeq < 1 || in.Fence < 1 {
 		return sessionstore.SessionHead{}, runtime.ErrCommitConflict
 	}
-	var head sessionstore.SessionHead
 	var state []byte
 	head.SessionKey = in.SessionKey
 	err := s.db.QueryRowContext(ctx, `SELECT h.version,h.last_fence,h.last_session_seq,h.next_input_seq,h.state_json
@@ -69,7 +79,9 @@ type outboxJSON struct {
 	EventSeq                                      uint64
 }
 
-func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnRequest) (sessionstore.CommitTurnResult, error) {
+func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnRequest) (result sessionstore.CommitTurnResult, resultErr error) {
+	done := s.measure(ctx, telemetry.OperationSessionCommit)
+	defer func() { done(resultErr) }()
 	if err := sessionstore.ValidateCommit(in); err != nil {
 		return sessionstore.CommitTurnResult{}, err
 	}
@@ -112,7 +124,6 @@ func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnReques
 	if err != nil {
 		return sessionstore.CommitTurnResult{}, err
 	}
-	var result sessionstore.CommitTurnResult
 	var resultRef, replyCursor sql.NullString
 	var alreadyTerminal bool
 	err = s.db.QueryRowContext(ctx, `SELECT commit_id,outcome,input_seq,session_version,result_ref,reply_cursor,already_terminal
@@ -131,8 +142,9 @@ FROM commit_turn($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::j
 	return result, nil
 }
 
-func (s *Store) GetTerminalByInputSeq(ctx context.Context, key sessionstore.TerminalKey) (sessionstore.CommitTurnResult, error) {
-	var result sessionstore.CommitTurnResult
+func (s *Store) GetTerminalByInputSeq(ctx context.Context, key sessionstore.TerminalKey) (result sessionstore.CommitTurnResult, resultErr error) {
+	done := s.measure(ctx, telemetry.OperationSessionTerminal)
+	defer func() { done(resultErr) }()
 	err := s.db.QueryRowContext(ctx, `SELECT commit_id,outcome,input_seq,session_version,COALESCE(result_ref,''),COALESCE(reply_cursor,'')
 FROM session_commit WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 AND input_seq=$4
 AND outcome IN ('succeeded','denied','failed','cancelled','confirmation_denied','confirmation_timeout')`,
@@ -144,8 +156,9 @@ AND outcome IN ('succeeded','denied','failed','cancelled','confirmation_denied',
 	return result, nil
 }
 
-func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) (uint64, error) {
-	var fence uint64
+func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) (fence uint64, resultErr error) {
+	done := s.measure(ctx, telemetry.OperationSessionReadFence)
+	defer func() { done(resultErr) }()
 	err := s.db.QueryRowContext(ctx, `SELECT last_fence FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, key.TenantID, key.AgentAppID, key.SessionID).Scan(&fence)
 	if err != nil {
 		return 0, translate(err)
@@ -153,8 +166,9 @@ func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) 
 	return fence, nil
 }
 
-func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (sessionstore.SessionSnapshot, error) {
-	var snapshot sessionstore.SessionSnapshot
+func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (snapshot sessionstore.SessionSnapshot, resultErr error) {
+	done := s.measure(ctx, telemetry.OperationSessionLoad)
+	defer func() { done(resultErr) }()
 	snapshot.Head.SessionKey = key
 	var state []byte
 	err := s.db.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,state_json FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, key.TenantID, key.AgentAppID, key.SessionID).
@@ -178,6 +192,18 @@ func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (s
 		snapshot.Events = append(snapshot.Events, append([]byte(nil), raw...))
 	}
 	return snapshot, rows.Err()
+}
+
+func (s *Store) measure(ctx context.Context, operation telemetry.Operation) func(error) {
+	started := time.Now()
+	return func(err error) {
+		outcome := telemetry.OutcomeSuccess
+		if err != nil {
+			outcome = telemetry.OutcomeError
+		}
+		s.telemetry.Histogram(telemetry.MetricSessionBackendDuration).Record(ctx, time.Since(started).Seconds(),
+			telemetry.DestinationAttribute(telemetry.DestinationPostgreSQL), telemetry.OperationAttribute(operation), telemetry.OutcomeAttribute(outcome))
+	}
 }
 
 func nullable(value string) any {

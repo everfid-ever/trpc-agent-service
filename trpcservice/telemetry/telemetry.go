@@ -23,20 +23,26 @@ const (
 	OperationChannelPreprocess Operation = "channel.preprocess"
 	OperationModelGenerate     Operation = "model.generate"
 	OperationToolExecute       Operation = "tool.execute"
+	OperationSessionOpen       Operation = "session.open"
+	OperationSessionCommit     Operation = "session.commit"
+	OperationSessionTerminal   Operation = "session.get_terminal"
+	OperationSessionReadFence  Operation = "session.read_fence"
+	OperationSessionLoad       Operation = "session.load"
 )
 
 type MetricDescriptor string
 
 const (
-	MetricAuditExportTotal    MetricDescriptor = "trpc_audit_export_total"
-	MetricAuditExportDuration MetricDescriptor = "trpc_audit_export_duration_seconds"
-	MetricAuditOutboxLag      MetricDescriptor = "trpc_audit_outbox_lag_seconds"
-	MetricAuditOutboxBacklog  MetricDescriptor = "trpc_audit_outbox_active_backlog"
-	MetricAuditAutoscalingLag MetricDescriptor = "trpc_audit_outbox_lag_max_seconds"
-	MetricBrokerBacklog       MetricDescriptor = "trpc_broker_backlog_total"
-	MetricBrokerDeliveryLag   MetricDescriptor = "trpc_broker_delivery_lag_max_seconds"
-	MetricOperationTotal      MetricDescriptor = "trpc_operation_total"
-	MetricOperationDuration   MetricDescriptor = "trpc_operation_duration_seconds"
+	MetricAuditExportTotal       MetricDescriptor = "trpc_audit_export_total"
+	MetricAuditExportDuration    MetricDescriptor = "trpc_audit_export_duration_seconds"
+	MetricAuditOutboxLag         MetricDescriptor = "trpc_audit_outbox_lag_seconds"
+	MetricAuditOutboxBacklog     MetricDescriptor = "trpc_audit_outbox_active_backlog"
+	MetricAuditAutoscalingLag    MetricDescriptor = "trpc_audit_outbox_lag_max_seconds"
+	MetricBrokerBacklog          MetricDescriptor = "trpc_broker_backlog_total"
+	MetricBrokerDeliveryLag      MetricDescriptor = "trpc_broker_delivery_lag_max_seconds"
+	MetricOperationTotal         MetricDescriptor = "trpc_operation_total"
+	MetricOperationDuration      MetricDescriptor = "trpc_operation_duration_seconds"
+	MetricSessionBackendDuration MetricDescriptor = "trpc_session_backend_duration_seconds"
 )
 
 type Component string
@@ -192,7 +198,8 @@ func ValidOperation(value Operation) bool {
 	switch value {
 	case OperationGatewaySubmit, OperationRelayDispatch, OperationRelayReply, OperationRelayWakeup,
 		OperationRelayControl, OperationAuditExport, OperationWorkerExecute, OperationChannelDeliver,
-		OperationChannelIngress, OperationChannelPreprocess, OperationModelGenerate, OperationToolExecute:
+		OperationChannelIngress, OperationChannelPreprocess, OperationModelGenerate, OperationToolExecute,
+		OperationSessionOpen, OperationSessionCommit, OperationSessionTerminal, OperationSessionReadFence, OperationSessionLoad:
 		return true
 	default:
 		return false
@@ -211,7 +218,7 @@ func ValidComponent(value Component) bool {
 
 func ValidMetricDescriptor(value MetricDescriptor) bool {
 	switch value {
-	case MetricAuditExportTotal, MetricAuditExportDuration, MetricAuditOutboxLag, MetricOperationTotal, MetricOperationDuration:
+	case MetricAuditExportTotal, MetricAuditExportDuration, MetricAuditOutboxLag, MetricOperationTotal, MetricOperationDuration, MetricSessionBackendDuration:
 		return true
 	default:
 		return false

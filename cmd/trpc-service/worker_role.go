@@ -145,7 +145,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		guard := governance.ScannerContentGuard{Scanner: scanner}
 		runGovernance.InputGuard, runGovernance.OutputGuard = guard, guard
 	}
-	sessions := sessionpostgres.New(db)
+	sessions := sessionpostgres.NewWithTelemetry(db, telemetryProvider)
 	memoryCache := memorystore.NewCache(memorypostgres.New(db), 5*time.Second)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	agentFactory.Confirmations, agentFactory.ToolResults = governanceStore, payloads
