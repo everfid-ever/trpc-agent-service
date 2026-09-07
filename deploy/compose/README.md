@@ -32,4 +32,6 @@ go run ./cmd/admin-bootstrap token \
 
 token 会输出到标准输出；应只在本机短期使用，并通过 `Authorization: Bearer <token>` 调用 Admin API。生产环境必须由 Vault/CSI 与身份系统分别投放密钥和签发 token，不能使用这个本地 bootstrap 工具。
 
+Admin Console 的会话 Cookie 默认带 `Secure`，即使 TLS 在反向代理终止也不会降级。仅 Docker Desktop 本地 HTTP 验收可显式设 `TRPC_ADMIN_ALLOW_INSECURE_SESSION_COOKIE=true`；该开关不得用于 ingress 或公开端口。
+
 Compose 环境的数据只用于开发和测试。不要把默认 Token、默认密码或容器卷复制到真实环境。

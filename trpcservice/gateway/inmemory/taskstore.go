@@ -66,7 +66,7 @@ func (s *TaskStore) PrepareDispatch(ctx context.Context, in gateway.PrepareDispa
 }
 
 func envelope(in gateway.PrepareDispatchRequest, seq uint64, createdAt time.Time) runtime.ExecutionEnvelope {
-	return runtime.ExecutionEnvelope{SchemaVersion: runtime.CurrentEnvelopeSchemaVersion, TenantID: in.Tenant.TenantID, TenantVersion: in.Tenant.TenantVersion, AgentAppID: in.Tenant.AgentAppID, AgentAppVersion: in.Binding.AgentAppVersion, AgentAppRevision: in.Binding.AgentAppRevision, AgentContentDigest: in.Binding.AgentContentDigest, ConfigVersion: in.Binding.ConfigVersion, PolicyVersion: in.Binding.PolicyVersion, RequestID: in.RequestID, SessionID: in.SessionID, UserID: in.UserID, Channel: in.Tenant.Channel, InputSeq: seq, PayloadRef: in.PayloadRef, TraceParent: in.TraceParent, CreatedAt: createdAt}
+	return runtime.ExecutionEnvelope{SchemaVersion: runtime.CurrentEnvelopeSchemaVersion, TenantID: in.Tenant.TenantID, TenantVersion: in.Tenant.TenantVersion, AgentAppID: in.Tenant.AgentAppID, AgentAppVersion: in.Binding.AgentAppVersion, AgentAppRevision: in.Binding.AgentAppRevision, AgentContentDigest: in.Binding.AgentContentDigest, ConfigVersion: in.Binding.ConfigVersion, PolicyVersion: in.Binding.PolicyVersion, ExecutionBudget: in.Binding.ExecutionBudget, RequestID: in.RequestID, SessionID: in.SessionID, UserID: in.UserID, Channel: in.Tenant.Channel, InputSeq: seq, PayloadRef: in.PayloadRef, TraceParent: in.TraceParent, CreatedAt: createdAt}
 }
 
 func (s *TaskStore) GetExecution(ctx context.Context, key gateway.ExecutionKey) (gateway.ExecutionStatus, error) {

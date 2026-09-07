@@ -34,6 +34,48 @@ type ExecutionEnvelope struct {
 	CreatedAt          time.Time       `json:"created_at"`
 }
 
+// MarshalJSON preserves schema-v1 compatibility for deployments that have
+// not enabled execution budgets. An older worker rejects unknown JSON fields,
+// so the additive budget field must be absent, rather than encoded as {},
+// until a non-zero budget is deliberately published after that fleet is
+// upgraded. New workers treat an absent field as the all-zero (unlimited)
+// budget.
+func (e ExecutionEnvelope) MarshalJSON() ([]byte, error) {
+	type wireEnvelope struct {
+		SchemaVersion      uint16           `json:"schema_version"`
+		TenantID           string           `json:"tenant_id"`
+		TenantVersion      int64            `json:"tenant_version"`
+		AgentAppID         string           `json:"agent_app_id"`
+		AgentAppVersion    int64            `json:"agent_app_version"`
+		AgentAppRevision   int64            `json:"agent_app_revision"`
+		AgentContentDigest string           `json:"agent_content_digest"`
+		ConfigVersion      int64            `json:"config_version"`
+		PolicyVersion      int64            `json:"policy_version"`
+		ExecutionBudget    *ExecutionBudget `json:"execution_budget,omitempty"`
+		RequestID          string           `json:"request_id"`
+		SessionID          string           `json:"session_id"`
+		UserID             string           `json:"user_id"`
+		Channel            string           `json:"channel"`
+		InputSeq           uint64           `json:"input_seq"`
+		PayloadRef         string           `json:"payload_ref"`
+		TraceParent        string           `json:"traceparent,omitempty"`
+		CreatedAt          time.Time        `json:"created_at"`
+	}
+	var budget *ExecutionBudget
+	if e.ExecutionBudget != (ExecutionBudget{}) {
+		value := e.ExecutionBudget
+		budget = &value
+	}
+	return json.Marshal(wireEnvelope{
+		SchemaVersion: e.SchemaVersion, TenantID: e.TenantID, TenantVersion: e.TenantVersion,
+		AgentAppID: e.AgentAppID, AgentAppVersion: e.AgentAppVersion, AgentAppRevision: e.AgentAppRevision,
+		AgentContentDigest: e.AgentContentDigest, ConfigVersion: e.ConfigVersion, PolicyVersion: e.PolicyVersion,
+		ExecutionBudget: budget, RequestID: e.RequestID, SessionID: e.SessionID, UserID: e.UserID,
+		Channel: e.Channel, InputSeq: e.InputSeq, PayloadRef: e.PayloadRef, TraceParent: e.TraceParent,
+		CreatedAt: e.CreatedAt,
+	})
+}
+
 // Validate performs structural validation only. Trust is established by
 // comparing the envelope with the authoritative task record.
 func (e ExecutionEnvelope) Validate() error {

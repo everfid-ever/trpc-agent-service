@@ -17,8 +17,9 @@ var consoleAssets embed.FS
 // not mint credentials: operators paste an existing short-lived Admin token,
 // which is verified before being put in an HttpOnly, Strict cookie.
 type Console struct {
-	API        http.Handler
-	Principals PrincipalResolver
+	API                        http.Handler
+	Principals                 PrincipalResolver
+	AllowInsecureSessionCookie bool
 }
 
 func (c Console) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +75,10 @@ func (c Console) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: strings.TrimSpace(input.Token), Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: int((15 * time.Minute).Seconds())})
+	// TLS commonly terminates at the ingress, so r.TLS is not a reliable
+	// signal. Secure is the safe default; the role may explicitly opt into an
+	// insecure cookie only for a local development environment.
+	http.SetCookie(w, &http.Cookie{Name: adminSessionCookie, Value: strings.TrimSpace(input.Token), Path: "/", HttpOnly: true, Secure: !c.AllowInsecureSessionCookie, SameSite: http.SameSiteStrictMode, MaxAge: int((15 * time.Minute).Seconds())})
 	w.WriteHeader(http.StatusNoContent)
 }
 

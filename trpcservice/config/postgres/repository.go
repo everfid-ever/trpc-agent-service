@@ -429,13 +429,14 @@ func (r *Repository) resolveExecutionBinding(ctx context.Context, tc tenant.Cont
 		return tenant.ExecutionBinding{}, config.ErrInvalid
 	}
 	var digest, state string
-	if err := r.db.QueryRowContext(ctx, `SELECT content_digest,state FROM agent_app_revision WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, tc.TenantID, tc.AgentAppID, revision).Scan(&digest, &state); err != nil {
+	var budget runtime.ExecutionBudget
+	if err := r.db.QueryRowContext(ctx, `SELECT content_digest,state,max_llm_calls,max_tool_calls,max_parallel_tools,execution_timeout_seconds FROM agent_app_revision WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, tc.TenantID, tc.AgentAppID, revision).Scan(&digest, &state, &budget.MaxLLMCalls, &budget.MaxToolCalls, &budget.MaxParallelTools, &budget.ExecutionTimeoutSeconds); err != nil {
 		return tenant.ExecutionBinding{}, classify(err)
 	}
 	if state != string(agentapp.RevisionPublished) {
 		return tenant.ExecutionBinding{}, config.ErrInvalid
 	}
-	result := tenant.ExecutionBinding{AgentAppVersion: appVersion, AgentAppRevision: revision, AgentContentDigest: digest, ConfigVersion: snapshot.ConfigVersion, PolicyVersion: snapshot.Payload.PolicyVersion}
+	result := tenant.ExecutionBinding{AgentAppVersion: appVersion, AgentAppRevision: revision, AgentContentDigest: digest, ConfigVersion: snapshot.ConfigVersion, PolicyVersion: snapshot.Payload.PolicyVersion, ExecutionBudget: budget}
 	return result, result.Validate()
 }
 

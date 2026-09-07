@@ -48,6 +48,8 @@
 3. 数据变更遵从 `expand → dual-read/write → backfill → contract`。contract 删除必须晚于回滚观察窗；二进制回滚保留 expand schema。
 4. 先只放一个无状态 role 副本，观察 15–30 分钟；门禁为 readiness、错误率、oldest backlog、stale fence、delivery retry/ambiguous、audit lag 与跨租户拒绝，不以 HTTP 2xx 单独判定。
 
+`ExecutionEnvelope` 的 JSON decoder 对未知字段 fail-closed。执行预算的 `execution_budget` 是 schema-v1 的可选扩展：全零预算会省略该字段，允许新 Gateway 与 N-1 Worker 共存；**发布非零预算前必须先完成全部 Worker 升级**，再升级 Gateway 并发布对应 revision。不得在旧 Worker 尚在消费时启用该字段，也不得将 Broker 的解码错误重试为无预算执行。
+
 ### 租户级灰度与回滚
 
 配置发布走租户 CAS 和不可变 `ConfigSnapshot`：先用 `/configs/validate` 验证，再用带 `expected_version` 的 `/configs/publish` 发布 allowlist 租户。执行 Envelope 固定 App revision、Config、Policy 和 secret generation；因此在途请求继续使用旧版本，新请求才使用新版本。

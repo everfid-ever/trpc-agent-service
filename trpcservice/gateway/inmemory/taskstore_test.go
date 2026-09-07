@@ -48,3 +48,16 @@ func TestTaskStoreCancelIsDurableIntentNotPrematureTerminal(t *testing.T) {
 func gatewayTestBinding() tenant.ExecutionBinding {
 	return tenant.ExecutionBinding{AgentAppVersion: 1, AgentAppRevision: 1, AgentContentDigest: "digest", ConfigVersion: 1, PolicyVersion: 1}
 }
+
+func TestTaskStoreFreezesBindingBudgetInEnvelope(t *testing.T) {
+	store := NewTaskStore()
+	binding := gatewayTestBinding()
+	binding.ExecutionBudget = runtime.ExecutionBudget{MaxLLMCalls: 2, ExecutionTimeoutSeconds: 30}
+	prepared, err := store.PrepareDispatch(context.Background(), gateway.PrepareDispatchRequest{
+		Tenant:  tenant.Context{TenantID: "tenant", TenantVersion: 1, AgentAppID: "app", SubjectID: "user", Channel: "fake", TrustedSource: "test"},
+		Binding: binding, RequestID: "budget-request", SessionID: "session", UserID: "user", PayloadRef: "payload://budget-request",
+	})
+	if err != nil || prepared.Envelope.ExecutionBudget != binding.ExecutionBudget {
+		t.Fatalf("prepared=%#v err=%v", prepared, err)
+	}
+}

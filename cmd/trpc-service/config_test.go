@@ -389,6 +389,22 @@ func TestLoadAdminConfigDefaultLifecycleTimingIsValid(t *testing.T) {
 	}
 }
 
+func TestLoadAdminConfigOnlyAllowsInsecureSessionCookieExplicitly(t *testing.T) {
+	values := map[string]string{
+		"TRPC_POSTGRES_DSN": "postgres://example", "TRPC_SECRET_ROOT": "/secrets",
+		"TRPC_ADMIN_PROBE_TENANT_ID": "probe-tenant", "TRPC_ADMIN_AUTH_SECRET_REF": "file://admin",
+		"TRPC_ADMIN_AUTH_SECRET_VERSION": "1", "TRPC_ADMIN_ALLOW_INSECURE_SESSION_COOKIE": "true",
+	}
+	config, err := loadAdminConfig(mapEnvironment(values))
+	if err != nil || !config.AdminAllowInsecureSessionCookie {
+		t.Fatalf("config=%#v err=%v", config, err)
+	}
+	values["TRPC_ADMIN_ALLOW_INSECURE_SESSION_COOKIE"] = "invalid"
+	if _, err := loadAdminConfig(mapEnvironment(values)); err == nil {
+		t.Fatal("invalid insecure-cookie override accepted")
+	}
+}
+
 func TestLoadGatewayConfigRejectsUnsafeLimits(t *testing.T) {
 	base := map[string]string{"TRPC_POSTGRES_DSN": "postgres://service:secret@postgres/service", "TRPC_SECRET_ROOT": "/secrets",
 		"TRPC_PAYLOAD_KEY_REF": "payload", "TRPC_PAYLOAD_KEY_VERSION": "1", "TRPC_GATEWAY_PROBE_TENANT_ID": "probe",

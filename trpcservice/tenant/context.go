@@ -6,6 +6,8 @@ package tenant
 import (
 	"errors"
 	"fmt"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
 // TenantContext is the server-established security and routing identity.
@@ -31,6 +33,10 @@ type ExecutionBinding struct {
 	AgentContentDigest string
 	ConfigVersion      int64
 	PolicyVersion      int64
+	// ExecutionBudget comes from the exact published revision accepted by this
+	// binding. PrepareDispatch copies it only into the Envelope, the single
+	// cross-process execution contract.
+	ExecutionBudget runtime.ExecutionBudget
 }
 
 var (
@@ -56,6 +62,9 @@ func (b ExecutionBinding) Validate() error {
 	if b.AgentAppVersion < 1 || b.AgentAppRevision < 1 ||
 		b.AgentContentDigest == "" || b.ConfigVersion < 1 || b.PolicyVersion < 1 {
 		return fmt.Errorf("%w: all versions and the digest are required", ErrInvalidBinding)
+	}
+	if err := b.ExecutionBudget.Validate(); err != nil {
+		return fmt.Errorf("%w: execution budget is invalid", ErrInvalidBinding)
 	}
 	return nil
 }

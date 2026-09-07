@@ -75,6 +75,7 @@ type productionConfig struct {
 	AdminProbeTenant, AdminAuthSecretRef string
 	AdminAuthSecretVersion               int64
 	AdminAuthClockSkew                   time.Duration
+	AdminAllowInsecureSessionCookie      bool
 
 	AuditOwner                             string
 	AuditCompliancePostgresDSN             string
@@ -218,6 +219,9 @@ func loadAdminConfig(getenv func(string) string) (productionConfig, error) {
 	var err error
 	if config.AdminAuthSecretVersion, err = envInt64(getenv, "TRPC_ADMIN_AUTH_SECRET_VERSION", 0); err != nil || config.AdminAuthSecretVersion < 1 {
 		return productionConfig{}, errors.New("invalid TRPC_ADMIN_AUTH_SECRET_VERSION")
+	}
+	if config.AdminAllowInsecureSessionCookie, err = envBool(getenv, "TRPC_ADMIN_ALLOW_INSECURE_SESSION_COOKIE", false); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_ADMIN_ALLOW_INSECURE_SESSION_COOKIE")
 	}
 	for _, item := range []struct {
 		name    string

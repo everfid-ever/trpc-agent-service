@@ -368,7 +368,8 @@ func (r *Repository) resolveExecutionBinding(ctx context.Context, tc tenant.Cont
 	if err != nil {
 		return tenant.ExecutionBinding{}, err
 	}
-	result := tenant.ExecutionBinding{AgentAppVersion: app.Version, AgentAppRevision: revision.Revision, AgentContentDigest: revision.ContentDigest, ConfigVersion: snapshot.ConfigVersion, PolicyVersion: snapshot.Payload.PolicyVersion}
+	result := tenant.ExecutionBinding{AgentAppVersion: app.Version, AgentAppRevision: revision.Revision, AgentContentDigest: revision.ContentDigest, ConfigVersion: snapshot.ConfigVersion, PolicyVersion: snapshot.Payload.PolicyVersion,
+		ExecutionBudget: runtime.ExecutionBudget{MaxLLMCalls: revision.ExecutionBudget.MaxLLMCalls, MaxToolCalls: revision.ExecutionBudget.MaxToolCalls, MaxParallelTools: revision.ExecutionBudget.MaxParallelTools, ExecutionTimeoutSeconds: revision.ExecutionBudget.ExecutionTimeoutSeconds}}
 	return result, result.Validate()
 }
 

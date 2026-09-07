@@ -38,7 +38,7 @@ func TestConsoleServesLoginAndUsesSameOriginSessionForCatalog(t *testing.T) {
 	login := httptest.NewRequest(http.MethodPost, "/admin/session", bytes.NewBufferString(`{"token":"valid-token"}`))
 	logged := httptest.NewRecorder()
 	console.ServeHTTP(logged, login)
-	if logged.Code != http.StatusNoContent || len(logged.Result().Cookies()) != 1 || !logged.Result().Cookies()[0].HttpOnly {
+	if logged.Code != http.StatusNoContent || len(logged.Result().Cookies()) != 1 || !logged.Result().Cookies()[0].HttpOnly || !logged.Result().Cookies()[0].Secure {
 		t.Fatalf("login=%d cookies=%#v", logged.Code, logged.Result().Cookies())
 	}
 	catalog := httptest.NewRequest(http.MethodGet, "/v1/admin/catalog", nil)
@@ -47,6 +47,16 @@ func TestConsoleServesLoginAndUsesSameOriginSessionForCatalog(t *testing.T) {
 	console.ServeHTTP(response, catalog)
 	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte(`"tenant_id":"tenant-a"`)) {
 		t.Fatalf("catalog=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestConsoleOnlyAllowsInsecureCookieWhenExplicitlyConfigured(t *testing.T) {
+	principals := consolePrincipalResolver{}
+	console := Console{API: Handler{Principals: principals}, Principals: principals, AllowInsecureSessionCookie: true}
+	logged := httptest.NewRecorder()
+	console.ServeHTTP(logged, httptest.NewRequest(http.MethodPost, "/admin/session", bytes.NewBufferString(`{"token":"valid-token"}`)))
+	if logged.Code != http.StatusNoContent || len(logged.Result().Cookies()) != 1 || logged.Result().Cookies()[0].Secure {
+		t.Fatalf("login=%d cookies=%#v", logged.Code, logged.Result().Cookies())
 	}
 }
 
