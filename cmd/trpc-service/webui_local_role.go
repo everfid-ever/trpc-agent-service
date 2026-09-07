@@ -55,7 +55,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/progress"
+	progressredis "github.com/liuzengh/trpc-agent-service/trpcservice/progress/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider/modelclient"
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
@@ -148,6 +148,14 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err := redis.Ping(parent).Err(); err != nil {
 		return errors.New("redis unavailable")
 	}
+	progressPublisher, err := progressredis.NewPublisher(redis, progressredis.Config{Environment: configValue.RedisEnvironment})
+	if err != nil {
+		return errors.New("WebUI progress publisher configuration rejected")
+	}
+	progressSubscriber, err := progressredis.NewSubscriber(redis, progressredis.Config{Environment: configValue.RedisEnvironment})
+	if err != nil {
+		return errors.New("WebUI progress subscriber configuration rejected")
+	}
 	malware := clamav.Scanner{Address: configValue.ClamAVAddress, MaxBytes: 10 << 20}
 	if err := malware.Probe(parent); err != nil {
 		return errors.New("malware scanner unavailable")
@@ -177,9 +185,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	if err != nil {
 		return errors.New("WebUI callback configuration rejected")
 	}
-	progressHub := progress.NewHub()
 	browser := webui.BrowserHandler{Callback: endpoint, Routes: bindings, Secrets: bootstrap.SecretStore,
-		Messages: webuiMailbox, Results: payloads, ReplyRoutes: inbox, Progress: progressHub}
+		Messages: webuiMailbox, Results: payloads, ReplyRoutes: inbox, Progress: progressSubscriber}
 	adapters := []channel.Adapter{webuiAdapter}
 	var feishuEndpoint, wecomEndpoint http.Handler
 	// The local profiles share one PostgreSQL volume, so the delivery catalog
@@ -256,7 +263,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
 		Sessions: sessionpostgres.New(db), Payloads: payloads, Artifacts: artifactpostgres.New(db),
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
-		Progress:   progressHub,
+		Progress:   progressPublisher,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
 	workerConsumer := worker.Consumer{WorkerID: configValue.instanceName("worker"), Shards: []broker.Shard{0, 1, 2, 3}, Broker: streamBroker,
@@ -350,6 +357,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	start("preprocess", func(ctx context.Context) error {
 		return runPreprocessLoop(ctx, preprocessor.RunOnce, 100*time.Millisecond, 100, logger)
 	})
+	start("progress publisher", progressPublisher.Run)
 	start("confirmation expiry reconciler", func(ctx context.Context) error {
 		reconciler := governance.ConfirmationExpiryReconciler{Coordinator: governanceStore, BatchSize: 100}
 		ticker := time.NewTicker(time.Second)

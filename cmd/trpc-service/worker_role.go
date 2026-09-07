@@ -33,6 +33,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
 	profilememory "github.com/liuzengh/trpc-agent-service/trpcservice/profile/inmemory"
+	progressredis "github.com/liuzengh/trpc-agent-service/trpcservice/progress/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider/modelclient"
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
@@ -149,8 +150,13 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	agentFactory.Confirmations, agentFactory.ToolResults = governanceStore, payloads
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
+	progressPublisher, err := progressredis.NewPublisher(redis, progressredis.Config{Environment: configValue.RedisEnvironment})
+	if err != nil {
+		return errors.New("progress publisher configuration rejected")
+	}
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef,
+		Progress:          progressPublisher,
 		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
 	dispatchBroker, err := brokerredis.New(redis, brokerredis.Config{Environment: configValue.RedisEnvironment, Group: configValue.WorkerGroup,
@@ -248,6 +254,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	}
 	start("readiness monitor", monitor.Run)
 	start("broker backlog monitor", backlogMonitor.Run)
+	start("progress publisher", progressPublisher.Run)
 	start("config invalidation relay", relay.TenantControlRelay{Outbox: payloads, Controls: publisher,
 		Kind: "config-invalidation", Owner: workerID + "-config-relay", BatchSize: configValue.WorkerReclaimLimit,
 		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,

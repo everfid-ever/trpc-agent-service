@@ -34,10 +34,15 @@ func (f PublisherFunc) TryPublish(event Event) { f(event) }
 type Hub struct {
 	mu          sync.Mutex
 	nextID      uint64
-	subscribers map[uint64]chan Event
+	subscribers map[uint64]subscriber
 }
 
-func NewHub() *Hub { return &Hub{subscribers: make(map[uint64]chan Event)} }
+type subscriber struct {
+	tenantID string
+	stream   chan Event
+}
+
+func NewHub() *Hub { return &Hub{subscribers: make(map[uint64]subscriber)} }
 
 func (h *Hub) TryPublish(event Event) {
 	if h == nil || event.SchemaVersion != 1 || event.TenantID == "" || event.RequestID == "" || event.Sequence < 1 {
@@ -46,8 +51,11 @@ func (h *Hub) TryPublish(event Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, subscriber := range h.subscribers {
+		if subscriber.tenantID != event.TenantID {
+			continue
+		}
 		select {
-		case subscriber <- event:
+		case subscriber.stream <- event:
 		default:
 		}
 	}
@@ -55,8 +63,8 @@ func (h *Hub) TryPublish(event Event) {
 
 // Subscribe returns a bounded, independently droppable event feed and its
 // idempotent cancellation function.
-func (h *Hub) Subscribe(buffer int) (<-chan Event, func()) {
-	if h == nil {
+func (h *Hub) Subscribe(tenantID string, buffer int) (<-chan Event, func()) {
+	if h == nil || tenantID == "" {
 		return nil, func() {}
 	}
 	if buffer < 1 {
@@ -66,7 +74,7 @@ func (h *Hub) Subscribe(buffer int) (<-chan Event, func()) {
 	h.nextID++
 	id := h.nextID
 	stream := make(chan Event, buffer)
-	h.subscribers[id] = stream
+	h.subscribers[id] = subscriber{tenantID: tenantID, stream: stream}
 	h.mu.Unlock()
 	var once sync.Once
 	return stream, func() {
@@ -74,7 +82,7 @@ func (h *Hub) Subscribe(buffer int) (<-chan Event, func()) {
 			h.mu.Lock()
 			if current, ok := h.subscribers[id]; ok {
 				delete(h.subscribers, id)
-				close(current)
+				close(current.stream)
 			}
 			h.mu.Unlock()
 		})

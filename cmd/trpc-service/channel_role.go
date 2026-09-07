@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	redisclient "github.com/redis/go-redis/v9"
 
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
@@ -27,6 +28,7 @@ import (
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
 	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
+	progressredis "github.com/liuzengh/trpc-agent-service/trpcservice/progress/redis"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
@@ -60,6 +62,19 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetMaxIdleConns(8)
 	db.SetMaxOpenConns(32)
+	var progressRedis *redisclient.Client
+	var progressSubscriber *progressredis.Subscriber
+	if configValue.WebUIEnabled {
+		progressRedis = redisclient.NewClient(&redisclient.Options{Addr: configValue.RedisAddress, Password: configValue.RedisPassword, DB: configValue.RedisDB})
+		defer progressRedis.Close()
+		if err := progressRedis.Ping(parent).Err(); err != nil {
+			return errors.New("WebUI progress Redis unavailable")
+		}
+		progressSubscriber, err = progressredis.NewSubscriber(progressRedis, progressredis.Config{Environment: configValue.RedisEnvironment})
+		if err != nil {
+			return errors.New("WebUI progress subscriber configuration rejected")
+		}
+	}
 	secretProvider, err := secretfs.New(configValue.SecretRoot, 64<<10)
 	if err != nil {
 		return errors.New("secret provider configuration rejected")
@@ -99,7 +114,7 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 		}
 		callbackRoutes = append(callbackRoutes, httpcallback.Route{Pattern: "/callbacks/webui", Endpoint: webuiEndpoint})
 		webuiBrowser = webui.BrowserHandler{Callback: webuiEndpoint, Routes: bindingStore, Secrets: secretProvider,
-			Messages: webuiMailbox, Results: payloads}
+			Messages: webuiMailbox, Results: payloads, ReplyRoutes: payloads, Progress: progressSubscriber}
 	}
 	callbackMux, err := httpcallback.NewMux(callbackRoutes...)
 	if err != nil {
@@ -108,7 +123,7 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 
 	lifecycle := worker.NewLifecycle()
 	migrationReadiness := migrations.NewRunner(db)
-	monitor, err := health.NewMonitor(lifecycle, []health.Dependency{
+	dependencies := []health.Dependency{
 		{Name: "postgres", Probe: db.PingContext},
 		{Name: "postgres_schema", Probe: migrationReadiness.Ready},
 		{Name: "secret_provider", Probe: secretProvider.ProbeRoot},
@@ -117,7 +132,11 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 			clear(value.Bytes)
 			return resolveErr
 		}},
-	}, configValue.ProbeTimeout, configValue.ProbeInterval)
+	}
+	if progressRedis != nil {
+		dependencies = append(dependencies, health.Dependency{Name: "webui_progress_redis", Probe: progressRedis.Ping})
+	}
+	monitor, err := health.NewMonitor(lifecycle, dependencies, configValue.ProbeTimeout, configValue.ProbeInterval)
 	if err != nil {
 		return errors.New("readiness configuration rejected")
 	}

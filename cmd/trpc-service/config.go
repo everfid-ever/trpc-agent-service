@@ -393,6 +393,17 @@ func loadChannelConfig(getenv func(string) string) (productionConfig, error) {
 	if config.WebUIEnabled, err = envBool(getenv, "TRPC_WEBUI_ENABLED", false); err != nil {
 		return productionConfig{}, errors.New("invalid TRPC_WEBUI_ENABLED")
 	}
+	if config.WebUIEnabled {
+		config.RedisAddress = strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS"))
+		config.RedisPassword = getenv("TRPC_REDIS_PASSWORD")
+		config.RedisEnvironment = strings.TrimSpace(getenv("TRPC_REDIS_ENVIRONMENT"))
+		if config.RedisDB, err = envInt(getenv, "TRPC_REDIS_DB", 0); err != nil || config.RedisDB < 0 {
+			return productionConfig{}, errors.New("invalid TRPC_REDIS_DB")
+		}
+		if config.RedisAddress == "" || config.RedisEnvironment == "" {
+			return productionConfig{}, errors.New("WebUI progress requires Redis configuration")
+		}
+	}
 	if config.PayloadKeyVersion, err = envInt64(getenv, "TRPC_PAYLOAD_KEY_VERSION", 0); err != nil || config.PayloadKeyVersion < 1 {
 		return productionConfig{}, errors.New("invalid TRPC_PAYLOAD_KEY_VERSION")
 	}

@@ -29,7 +29,7 @@ type BrowserHandler struct {
 	Results     messaging.ResultStore
 	ReplyRoutes messaging.ReplyRouteStore
 	Progress    interface {
-		Subscribe(int) (<-chan progress.Event, func())
+		Subscribe(string, int) (<-chan progress.Event, func())
 	}
 	Confirmations interface {
 		GetConfirmation(context.Context, string, string) (governance.Confirmation, error)
@@ -144,12 +144,15 @@ func (h BrowserHandler) streamProgress(writer http.ResponseWriter, request *http
 		http.Error(writer, "streaming unavailable", http.StatusInternalServerError)
 		return
 	}
-	stream, unsubscribe := h.Progress.Subscribe(32)
+	stream, unsubscribe := h.Progress.Subscribe(route.TenantID, 32)
 	defer unsubscribe()
+	response := http.NewResponseController(writer)
+	refreshWriteDeadline := func() { _ = response.SetWriteDeadline(time.Now().Add(5 * time.Second)) }
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Connection", "keep-alive")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	refreshWriteDeadline()
 	_, _ = io.WriteString(writer, "retry: 1000\n\n")
 	flusher.Flush()
 	for {
@@ -172,6 +175,7 @@ func (h BrowserHandler) streamProgress(writer http.ResponseWriter, request *http
 			if encodeErr != nil {
 				continue
 			}
+			refreshWriteDeadline()
 			if _, writeErr := fmt.Fprintf(writer, "event: progress\ndata: %s\n\n", encoded); writeErr != nil {
 				return
 			}

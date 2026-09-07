@@ -166,7 +166,7 @@ func TestLoadProductionConfigIgnoresPreprocessOnlyOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadChannelConfigHasOnlyCallbackDependencies(t *testing.T) {
+func TestLoadChannelConfigAddsRedisOnlyForWebUIProgress(t *testing.T) {
 	values := map[string]string{
 		"TRPC_POSTGRES_DSN":              "postgres://service:secret@postgres/service",
 		"TRPC_SECRET_ROOT":               "/var/run/secrets/trpc-agent-service",
@@ -176,13 +176,16 @@ func TestLoadChannelConfigHasOnlyCallbackDependencies(t *testing.T) {
 		"TRPC_CHANNEL_CANDIDATE_TTL":     "45s",
 		"TRPC_CHANNEL_CALLBACK_MAX_BODY": "2097152",
 		"TRPC_WEBUI_ENABLED":             "true",
+		"TRPC_REDIS_ADDRESS":             "redis:6379",
+		"TRPC_REDIS_DB":                  "2",
+		"TRPC_REDIS_ENVIRONMENT":         "production",
 	}
 	config, err := loadChannelConfig(mapEnvironment(values))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.RedisAddress != "" || config.S3Bucket != "" || config.ClamAVAddress != "" || config.DLPEndpoint != "" {
-		t.Fatalf("channel role picked up unrelated dependencies: %+v", config)
+	if config.RedisAddress != "redis:6379" || config.RedisDB != 2 || config.RedisEnvironment != "production" || config.S3Bucket != "" || config.ClamAVAddress != "" || config.DLPEndpoint != "" {
+		t.Fatalf("channel role dependencies=%+v", config)
 	}
 	if config.ChannelProbeTenant != "probe-tenant" || config.ChannelCandidateTTL != 45*time.Second || config.ChannelCallbackMaxBody != 2<<20 || !config.WebUIEnabled {
 		t.Fatalf("unexpected channel configuration: %+v", config)
@@ -192,6 +195,13 @@ func TestLoadChannelConfigHasOnlyCallbackDependencies(t *testing.T) {
 		delete(copy, name)
 		if _, err := loadChannelConfig(mapEnvironment(copy)); err == nil {
 			t.Fatalf("missing %s accepted", name)
+		}
+	}
+	for _, name := range []string{"TRPC_REDIS_ADDRESS", "TRPC_REDIS_ENVIRONMENT"} {
+		copy := cloneEnvironment(values)
+		delete(copy, name)
+		if _, err := loadChannelConfig(mapEnvironment(copy)); err == nil {
+			t.Fatalf("WebUI missing %s accepted", name)
 		}
 	}
 }
