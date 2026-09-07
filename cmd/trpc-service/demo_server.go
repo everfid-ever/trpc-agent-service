@@ -98,6 +98,7 @@ type demoModelResolver interface {
 
 type demoChatRequest struct {
 	Message string `json:"message"`
+	Stream  bool   `json:"stream"`
 }
 
 func newDemoHTTPHandler(models demoModelResolver, ready func(context.Context) error) http.Handler {
@@ -139,9 +140,14 @@ func newDemoHTTPHandler(models demoModelResolver, ready func(context.Context) er
 			http.Error(writer, "demo model unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		responses, err := resolved.GenerateContent(request.Context(), &model.Request{Messages: []model.Message{model.NewUserMessage(input.Message)}})
+		responses, err := resolved.GenerateContent(request.Context(), &model.Request{Messages: []model.Message{model.NewUserMessage(input.Message)},
+			GenerationConfig: model.GenerationConfig{Stream: input.Stream}})
 		if err != nil {
 			http.Error(writer, "demo model failed", http.StatusBadGateway)
+			return
+		}
+		if input.Stream {
+			writeDemoChatStream(writer, responses)
 			return
 		}
 		var text strings.Builder
@@ -168,4 +174,51 @@ func newDemoHTTPHandler(models demoModelResolver, ready func(context.Context) er
 		_ = json.NewEncoder(writer).Encode(map[string]string{"id": responseID, "model": modelName, "response": text.String()})
 	})
 	return mux
+}
+
+// writeDemoChatStream keeps the demo transport deliberately small while
+// exercising the exact Model streaming contract used by the fake provider.
+// Each model delta is an independent SSE event so curl and browser clients can
+// verify incremental delivery without relying on an upstream model API.
+func writeDemoChatStream(writer http.ResponseWriter, responses <-chan *model.Response) {
+	flusher, ok := writer.(http.Flusher)
+	if !ok {
+		http.Error(writer, "streaming unavailable", http.StatusInternalServerError)
+		return
+	}
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	for response := range responses {
+		if response == nil {
+			continue
+		}
+		for _, choice := range response.Choices {
+			delta := choice.Delta.Content
+			if delta == "" {
+				delta = choice.Message.Content
+			}
+			if delta == "" {
+				continue
+			}
+			encoded, err := json.Marshal(struct {
+				ID    string `json:"id"`
+				Model string `json:"model"`
+				Delta string `json:"delta"`
+				Done  bool   `json:"done"`
+			}{ID: response.ID, Model: response.Model, Delta: delta, Done: response.Done})
+			if err != nil {
+				http.Error(writer, "demo stream encoding failed", http.StatusInternalServerError)
+				return
+			}
+			if _, err := fmt.Fprintf(writer, "event: delta\ndata: %s\n\n", encoded); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+	if _, err := io.WriteString(writer, "event: done\ndata: {}\n\n"); err == nil {
+		flusher.Flush()
+	}
 }

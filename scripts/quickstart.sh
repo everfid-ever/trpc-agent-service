@@ -12,6 +12,7 @@ run_demo() {
   local demo_network
   local demo_label
   local chat_response
+  local stream_response
   local postgres_id
   local redis_id
   local postgres_health
@@ -52,7 +53,7 @@ run_demo() {
     -p "127.0.0.1:${demo_port}:8080" \
     -e 'TRPC_POSTGRES_DSN=postgres://trpc:trpc_test_password@postgres:5432/postgres?sslmode=disable' \
     -e 'TRPC_LISTEN_ADDRESS=:8080' "$demo_image" demo-server >/dev/null
-  echo "[5/5] Checking health, readiness, and the first deterministic chat response"
+  echo "[5/5] Checking health, readiness, deterministic chat, and streamed deltas"
   for attempt in $(seq 1 30); do
     if curl --fail --silent "http://127.0.0.1:${demo_port}/healthz" >/dev/null && \
       curl --fail --silent "http://127.0.0.1:${demo_port}/readyz" >/dev/null; then
@@ -64,12 +65,19 @@ run_demo() {
   chat_response="$(curl --fail --silent --show-error -H 'Content-Type: application/json' \
     --data '{"message":"quickstart acceptance"}' "http://127.0.0.1:${demo_port}/v1/chat")"
   [[ "$chat_response" == *'"response":"demo: deterministic fake response"'* ]] || { echo "Unexpected fake chat response: $chat_response" >&2; exit 1; }
+  stream_response="$(curl --fail --silent --show-error --no-buffer -H 'Content-Type: application/json' \
+    --data '{"message":"quickstart streaming acceptance","stream":true}' "http://127.0.0.1:${demo_port}/v1/chat")"
+  [[ "$stream_response" == *'event: delta'* && "$stream_response" == *'"delta":"demo: "'* && \
+    "$stream_response" == *'"delta":"deterministic fake response"'* && "$stream_response" == *'event: done'* ]] || {
+      echo "Unexpected fake stream response: $stream_response" >&2; exit 1;
+    }
   trap - ERR
   cat <<EOF
 Demo acceptance complete
   HTTP: http://127.0.0.1:${demo_port}
   Health: /healthz and /readyz passed
   Chat: /v1/chat returned the deterministic fake response
+  Stream: /v1/chat emitted the deterministic fake delta sequence over SSE
   Coverage: docs/runbook/demo-fake-coverage.md
   Stop: docker rm -f ${demo_container} && docker compose -p ${demo_project} -f deploy/compose/docker-compose.backend-smoke.yml down -v
 EOF

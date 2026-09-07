@@ -29,6 +29,29 @@ func (demoResponseModel) GenerateContent(_ context.Context, _ *model.Request) (<
 
 func (demoResponseModel) Info() model.Info { return model.Info{Name: "fake-deterministic-v1"} }
 
+type demoStreamingModel struct{}
+
+func (demoStreamingModel) GenerateContent(_ context.Context, request *model.Request) (<-chan *model.Response, error) {
+	if request == nil || !request.GenerationConfig.Stream {
+		return nil, context.Canceled
+	}
+	responses := make(chan *model.Response, 2)
+	responses <- &model.Response{ID: "demo-stream", Model: "fake-deterministic-v1",
+		Choices: []model.Choice{{Delta: model.Message{Role: model.RoleAssistant, Content: "first "}}}}
+	responses <- &model.Response{ID: "demo-stream", Model: "fake-deterministic-v1", Done: true,
+		Choices: []model.Choice{{Delta: model.Message{Role: model.RoleAssistant, Content: "second"}}}}
+	close(responses)
+	return responses, nil
+}
+
+func (demoStreamingModel) Info() model.Info { return model.Info{Name: "fake-deterministic-v1"} }
+
+type demoStreamingResolver struct{}
+
+func (demoStreamingResolver) ResolveModel(context.Context, string, profile.VersionedRef) (model.Model, error) {
+	return demoStreamingModel{}, nil
+}
+
 func TestDemoHTTPHandlerServesHealthReadinessAndFakeChat(t *testing.T) {
 	handler := newDemoHTTPHandler(demoModelStub{}, func(context.Context) error { return nil })
 	for _, path := range []string{"/healthz", "/readyz"} {
@@ -51,5 +74,23 @@ func TestDemoHTTPHandlerRejectsInvalidChat(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"unexpected":true}`)))
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestDemoHTTPHandlerStreamsModelDeltasAsSSE(t *testing.T) {
+	handler := newDemoHTTPHandler(demoStreamingResolver{}, func(context.Context) error { return nil })
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(`{"message":"same input","stream":true}`)))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d content-type=%q", response.Code, response.Header().Get("Content-Type"))
+	}
+	body := response.Body.String()
+	for _, expected := range []string{
+		`event: delta`, `"id":"demo-stream"`, `"delta":"first "`, `"done":false`,
+		`"delta":"second"`, `"done":true`, "event: done\ndata: {}",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("stream body missing %q: %s", expected, body)
+		}
 	}
 }
