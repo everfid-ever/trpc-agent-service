@@ -218,16 +218,18 @@ func (r *Repository) GetRevision(ctx context.Context, tenantID, appID string, re
 		v := published.Time
 		value.PublishedAt = &v
 	}
-	toolRows, err := r.db.QueryContext(ctx, `SELECT tool_id,tool_version,required FROM agent_app_revision_tool WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3 ORDER BY tool_id`, tenantID, appID, revision)
+	toolRows, err := r.db.QueryContext(ctx, `SELECT tool_id,tool_version,content_digest,required FROM agent_app_revision_tool WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3 ORDER BY tool_id`, tenantID, appID, revision)
 	if err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
 	for toolRows.Next() {
 		var ref agentapp.VersionedRef
-		if err = toolRows.Scan(&ref.ID, &ref.Version, &ref.Required); err != nil {
+		var digest sql.NullString
+		if err = toolRows.Scan(&ref.ID, &ref.Version, &digest, &ref.Required); err != nil {
 			toolRows.Close()
 			return agentapp.Revision{}, err
 		}
+		ref.ContentDigest = digest.String
 		value.ToolRefs = append(value.ToolRefs, ref)
 	}
 	if err = toolRows.Err(); err != nil {
@@ -350,7 +352,7 @@ func writeRefs(ctx context.Context, tx *sql.Tx, value agentapp.Revision) error {
 		}
 	}
 	for _, ref := range value.ToolRefs {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_app_revision_tool(tenant_id,agent_app_id,revision,tool_id,tool_version,required) VALUES($1,$2,$3,$4,$5,$6)`, value.TenantID, value.AgentAppID, value.Revision, ref.ID, ref.Version, ref.Required); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_app_revision_tool(tenant_id,agent_app_id,revision,tool_id,tool_version,content_digest,required) VALUES($1,$2,$3,$4,$5,$6,$7)`, value.TenantID, value.AgentAppID, value.Revision, ref.ID, ref.Version, nullableString(ref.ContentDigest), ref.Required); err != nil {
 			return classify(err)
 		}
 	}

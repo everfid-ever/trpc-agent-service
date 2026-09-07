@@ -5,8 +5,9 @@ package profile
 import "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 
 type VersionedRef struct {
-	ID      string
-	Version int64
+	ID            string
+	Version       int64
+	ContentDigest string
 }
 
 type SkillRef = agentapp.SkillRef

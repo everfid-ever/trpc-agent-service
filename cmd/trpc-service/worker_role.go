@@ -430,7 +430,7 @@ func buildToolCatalog(endpoints []mcpEndpoint) (*servicetool.Catalog, error) {
 	registrations := make([]servicetool.Registration, 0, len(endpoints))
 	for _, endpoint := range endpoints {
 		registration, err := toolmcp.NewRegistration(endpoint.TenantID, endpoint.ToolID, endpoint.Version, toolmcp.Config{
-			Transport: endpoint.Transport, ServerURL: endpoint.ServerURL, RemoteToolName: endpoint.ToolID, Timeout: endpoint.Timeout,
+			Transport: endpoint.Transport, ServerURL: endpoint.ServerURL, RemoteToolName: endpoint.ToolID, ExpectedDeclarationDigest: endpoint.DeclarationDigest, Timeout: endpoint.Timeout,
 			SecretHeader: endpoint.SecretHeader, SecretPrefix: endpoint.SecretPrefix,
 		}, secrets.SecretRef{Ref: endpoint.SecretRef, Version: endpoint.SecretVersion})
 		if err != nil {

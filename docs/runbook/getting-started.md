@@ -2,7 +2,7 @@
 
 本仓库只提供本地 Docker Desktop 验收入口。PostgreSQL、Redis、Vault、Qdrant、Jaeger 和 OpenTelemetry Collector 都运行在本机容器中；不需要 Kubernetes、云主机、Prometheus Alertmanager 或外部运维资源。
 
-DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu 与 WeCom smoke 会使用开发者自行创建的应用和临时 HTTPS tunnel；它们同样只服务于本机 Docker 验收。
+DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu、WeCom 与 MCP smoke 会使用开发者自行创建的凭据和受控端点；它们同样只服务于本机 Docker 验收。
 
 验收者首选先运行 `./start.sh --demo`，验证无凭据启动与 deterministic fake model。它不需要任何 Secret 文件；覆盖范围和豁免项见 [Fake Demo 覆盖面](demo-fake-coverage.md)。真实 DeepSeek、Feishu 与 WeCom 验证均是后续可选项。
 
@@ -46,7 +46,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
      'SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1'
    ```
 
-   预期最后一条命令输出 `000001`。然后打开 <http://localhost:58081/webui/>，按第 2 节完成一次文本和 durable confirmation 验收。
+   预期最后一条命令输出 `000001`。然后打开 <http://localhost:58081/webui/>，按第 3 节完成一次文本和 durable confirmation 验收。
 
 5. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据；其中多节点与依赖恢复需要第 3 步的 DeepSeek Key：
 
@@ -59,7 +59,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    bash scripts/local_dependency_recovery_smoke.sh
    ```
 
-6. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 3 节或第 4 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
+6. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 4 节或第 5 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
 
 验收结束后执行 `./stop.sh` 可保留本地数据便于排查。确需重新从空库开始时，才执行下列破坏性命令；它只会删除名为 `trpc-agent-local` 的 Compose project 所创建的卷：
 
@@ -74,7 +74,28 @@ docker compose -f deploy/compose/docker-compose.local.yml --profile webui down -
 - 真实 WebUI、IM、多节点与依赖恢复验证才需要一个可用的 DeepSeek API Key；
 - 本机端口 `55432`、`56379`、`58081`、`56686`、`59464` 未被占用。
 
-## 2. 启动本地 WebUI
+## 2. 可选：配置一个审阅后的 MCP 工具
+
+MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。
+
+先在隔离的审阅环境取得目标 MCP `tools/list` 中**单个工具对象**，保存为不含凭据的 JSON 文件（字段为 `name`、`description`、`inputSchema`，可选 `outputSchema`）。本仓库的离线命令将其规范化为运行时使用的 declaration digest：
+
+```bash
+go run ./cmd/trpc-service mcp-declaration-digest \
+  --declaration-file /absolute/path/to/reviewed-weather-tool.json
+```
+
+把输出写进 `.env.local` 的 `TRPC_MCP_ENDPOINTS` 对应项的 `declaration_digest`；再运行下列同样离线的命令。其第三列就是创建/更新 Draft Revision 时 `tool_refs[].content_digest` 必须使用的 binding digest：
+
+```bash
+set -a; source deploy/compose/.env.local; set +a
+go run ./cmd/trpc-service mcp-binding-digests
+# weather_lookup  1  <64-char-binding-digest>
+```
+
+发布 Revision 后，Worker 会在构建 Bundle 时用可信 ExecutionContext 执行 discovery，验证远端 declaration digest；每次调用也会通过同一受限端点、SecretRef 和结果大小门禁。改动 URL、超时、认证引用、远端名称或 declaration 都会使旧 Revision fail closed，必须发布带新 binding digest 的 Revision。
+
+## 3. 启动本地 WebUI
 
 在仓库根目录执行：
 
@@ -131,7 +152,7 @@ docker compose -f deploy/compose/docker-compose.local.yml stop \
 
 `webui-multinode` 使用独立 Compose project 与显式节点 ID，不受此限制。
 
-## 3. 可选：真实 Feishu 本地验收
+## 4. 可选：真实 Feishu 本地验收
 
 此 smoke 运行完整的 Feishu Webhook、验签、durable ingress、Redis Worker、DeepSeek 调用和 Feishu Reply API。数据库、Worker 和可观测性组件仍全部运行在 Docker Desktop；唯一的外部依赖是开发者自己的 Feishu 应用、DeepSeek Key 和临时 HTTPS tunnel。
 
@@ -187,7 +208,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile feishu-local up -d --force-recreate feishu-local
 ```
 
-## 4. 可选：真实 WeCom 本地验收
+## 5. 可选：真实 WeCom 本地验收
 
 此 smoke 运行完整的企业微信回调验签（GET URL 验证与加密消息）、durable ingress、Redis Worker、DeepSeek 调用和企业微信 `message/send` Reply API。数据库、Worker 和可观测性组件仍全部运行在 Docker Desktop；唯一的外部依赖是开发者自己的企业微信自建应用、DeepSeek Key 和临时 HTTPS tunnel。
 
@@ -229,7 +250,7 @@ https://<temporary-host>.trycloudflare.com/callbacks/wecom?route_key=local-wecom
 
 排查顺序：
 
-1. `docker compose -f deploy/compose/docker-compose.local.yml --profile wecom-local logs wecom-local`：`WeCom local configuration is incomplete` 表示 `wecom.env` 缺字段或 `WECOM_AGENT_ID` 不是正整数；`existing WeCom local control plane is incompatible; recreate the Compose volume` 表示已持久化的绑定与当前 Corp ID 冲突，需按第 5 节清理卷后重建。
+1. `docker compose -f deploy/compose/docker-compose.local.yml --profile wecom-local logs wecom-local`：`WeCom local configuration is incomplete` 表示 `wecom.env` 缺字段或 `WECOM_AGENT_ID` 不是正整数；`existing WeCom local control plane is incompatible; recreate the Compose volume` 表示已持久化的绑定与当前 Corp ID 冲突，需按第 6 节清理卷后重建。
 2. `docker logs trpc-wecom-tunnel`：Quick Tunnel 重启会生成新域名，必须把新 URL 重新保存到企业微信。
 3. 回复失败且日志出现 `60020` 等 errcode：在企业微信管理后台“企业可信 IP”中放行本机出口 IP，否则 `gettoken` 会被拒绝。
 
@@ -241,7 +262,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile wecom-local up -d --force-recreate wecom-local
 ```
 
-## 5. 多节点 Docker 验收
+## 6. 多节点 Docker 验收
 
 多租户/节点化代码不会因本地验收而被简化。`webui-multinode` profile 先建立同一套本地 tenant、ConfigSnapshot、Graph 与 scoped secret fixture，再启动两个独立容器；两个容器共享 PostgreSQL 和 Redis、分别使用唯一 Worker/relay/delivery consumer ID。
 
@@ -271,7 +292,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile webui down -v
 ```
 
-## 6. 本地验证命令
+## 7. 本地验证命令
 
 ```bash
 # 纯 Go 静态、单元与 race 检查（Go 1.21）
@@ -287,14 +308,14 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile runtime-test run --rm runtime-test
 ```
 
-`backend_adapter_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 3、4 节中开发者亲自完成的 Feishu 与 WeCom real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为云对象存储、DLP 或生产集群已通过。
+`backend_adapter_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 4、5 节中开发者亲自完成的 Feishu 与 WeCom real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为云对象存储、DLP 或生产集群已通过。
 
 每个验证项的命令、所需资源和成功证据汇总见 [verification-matrix.md](verification-matrix.md)。
 
-## 7. 本地边界
+## 8. 本地边界
 
 - 结构化 JSON 日志默认脱敏；`TRPC_LOG_LEVEL` 可设 `debug|info|warn|error`，`TRPC_LOG_MASKING_LEVEL` 可设 `none|basic|strict`。
 - 节点故障、IM 重试、PostgreSQL/Redis 短断、模型/Tool 超时的降级策略，以及灰度、回滚、容量和生产推荐拓扑，统一见 [`reliability-release-capacity.md`](reliability-release-capacity.md)。
 - Collector 或 Jaeger 停止不会阻断本地业务链路；Trace 可见性是本地诊断辅助，而非远端 SLO 告警。
-- MinIO、远端 DLP 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。ClamAV 是 Feishu/WeCom 图片或文件 smoke 的本地必需依赖，由 Compose 自动启动；它的官方多架构镜像首次拉取与病毒库初始化可能需要数分钟。Feishu 与 WeCom 只分别支持第 3、4 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
+- MinIO、远端 DLP 和 Kubernetes 不属于本地闭环必需项；相关 adapter 与代码级测试保留，外部 smoke 和运维资产不再维护。ClamAV 是 Feishu/WeCom 图片或文件 smoke 的本地必需依赖，由 Compose 自动启动；它的官方多架构镜像首次拉取与病毒库初始化可能需要数分钟。Feishu 与 WeCom 只分别支持第 4、5 节所述的开发者自有账号、本地 Docker 和临时 tunnel smoke，不承诺生产可用性或 tunnel 的稳定域名。
 - `deploy/compose/secrets/` 已被 Git 忽略；不得用 `git add -f` 加入 API Key 或其他凭据。

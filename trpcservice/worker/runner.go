@@ -46,7 +46,7 @@ func (f InputDecoderFunc) DecodeInput(ctx context.Context, envelope runtime.Exec
 type ResultRefEncoder func(context.Context, runtime.ExecutionEnvelope, string) (string, error)
 
 type ConfirmedToolResolver interface {
-	ResolveConfirmedTool(context.Context, string, governance.VersionedRef) (agenttool.CallableTool, error)
+	ResolveConfirmedTool(context.Context, string, profile.VersionedRef) (agenttool.CallableTool, error)
 }
 
 type RunnerExecutor struct {
@@ -231,8 +231,18 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			}
 		}
 	}
+	// Bundle construction can resolve a tenant ToolRef. In particular, MCP tool
+	// discovery injects a scoped SecretRef while building the Agent graph, so it
+	// must receive the same trusted execution context as Tool.Call.
+	runCtx := runtime.WithExecutionBudget(runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID,
+		RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, PayloadKeyVersion: payload.KeyVersion}), envelope.ExecutionBudget)
+	var cancelBudget context.CancelFunc
+	if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 {
+		runCtx, cancelBudget = context.WithTimeout(runCtx, time.Duration(envelope.ExecutionBudget.ExecutionTimeoutSeconds)*time.Second)
+		defer cancelBudget()
+	}
 
-	lease, err := w.Bundles.Acquire(ctx, key)
+	lease, err := w.Bundles.Acquire(runCtx, key)
 	if err != nil {
 		if w.Governance != nil {
 			_ = w.Governance.Refund(ctx, permit, "bundle_acquire_failed")
@@ -255,12 +265,6 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 	}()
 
-	runCtx := runtime.WithExecutionBudget(runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, PayloadKeyVersion: payload.KeyVersion}), envelope.ExecutionBudget)
-	var cancelBudget context.CancelFunc
-	if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 {
-		runCtx, cancelBudget = context.WithTimeout(runCtx, time.Duration(envelope.ExecutionBudget.ExecutionTimeoutSeconds)*time.Second)
-		defer cancelBudget()
-	}
 	runOptions := []agentcore.RunOption{agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID)}
 	if w.Governance != nil {
 		toolRule := func(value agenttool.Tool) governance.Decision {
@@ -320,7 +324,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			if w.ContinuationTools == nil {
 				return runtime.ErrCapabilityUnsupported
 			}
-			callable, resolveErr := w.ContinuationTools.ResolveConfirmedTool(ctx, envelope.TenantID, continuation.Tool)
+			pinnedTool, pinErr := continuationToolRef(ctx, w.Profiles, snapshot, continuation.Tool)
+			if pinErr != nil {
+				return pinErr
+			}
+			callable, resolveErr := w.ContinuationTools.ResolveConfirmedTool(runCtx, envelope.TenantID, pinnedTool)
 			if resolveErr != nil {
 				return resolveErr
 			}
@@ -942,6 +950,38 @@ func confirmationToolRef(ctx context.Context, resolver profile.ExecutionProfileR
 		}
 	}
 	return governance.VersionedRef{}, false
+}
+
+// continuationToolRef restores the published ToolRef rather than resolving a
+// confirmation by its historical ID/version alone. The confirmation schema
+// intentionally carries the governance identity only; the immutable execution
+// profile supplies its reviewed MCP binding digest. Ambiguous bindings fail
+// closed instead of choosing an endpoint after a worker restart.
+func continuationToolRef(ctx context.Context, resolver profile.ExecutionProfileResolver, snapshot profile.ExecutionProfileSnapshot,
+	wanted governance.VersionedRef,
+) (profile.VersionedRef, error) {
+	var result profile.VersionedRef
+	found := false
+	err := walkExecutionProfiles(ctx, resolver, snapshot, 0, make(map[profile.ExecutionProfileKey]bool),
+		func(value profile.ExecutionProfileSnapshot) error {
+			for _, candidate := range value.ToolRefs {
+				if candidate.ID != wanted.ID || candidate.Version != wanted.Version {
+					continue
+				}
+				if found && candidate != result {
+					return runtime.ErrVersionMismatch
+				}
+				result, found = candidate, true
+			}
+			return nil
+		})
+	if err != nil {
+		return profile.VersionedRef{}, err
+	}
+	if !found {
+		return profile.VersionedRef{}, runtime.ErrVersionMismatch
+	}
+	return result, nil
 }
 
 func executionModelRef(ctx context.Context, resolver profile.ExecutionProfileResolver,

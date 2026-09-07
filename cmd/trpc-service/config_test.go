@@ -317,13 +317,13 @@ func TestLoadWorkerConfig(t *testing.T) {
 
 func TestLoadWorkerConfigParsesMCPEndpoints(t *testing.T) {
 	values := cloneEnvironment(workerEnvironment())
-	values["TRPC_MCP_ENDPOINTS"] = `[{"tenant_id":"t_demo","tool_id":"weather_lookup","version":2,"transport":"streamable","server_url":"https://mcp.test/tools","timeout":"10s","secret_ref":"secret://mcp/weather","secret_version":4,"secret_header":"Authorization","secret_prefix":"Bearer "}]`
+	values["TRPC_MCP_ENDPOINTS"] = `[{"tenant_id":"t_demo","tool_id":"weather_lookup","version":2,"transport":"streamable","server_url":"https://mcp.test/tools","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","timeout":"10s","secret_ref":"secret://mcp/weather","secret_version":4,"secret_header":"Authorization","secret_prefix":"Bearer "}]`
 	config, err := loadWorkerConfig(mapEnvironment(values))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(config.MCPEndpoints) != 1 || config.MCPEndpoints[0].TenantID != "t_demo" || config.MCPEndpoints[0].ToolID != "weather_lookup" ||
-		config.MCPEndpoints[0].Version != 2 || config.MCPEndpoints[0].Transport != "streamable" || config.MCPEndpoints[0].Timeout != 10*time.Second ||
+		config.MCPEndpoints[0].Version != 2 || config.MCPEndpoints[0].Transport != "streamable" || config.MCPEndpoints[0].DeclarationDigest != strings.Repeat("a", 64) || config.MCPEndpoints[0].Timeout != 10*time.Second ||
 		config.MCPEndpoints[0].SecretRef != "secret://mcp/weather" || config.MCPEndpoints[0].SecretVersion != 4 ||
 		config.MCPEndpoints[0].SecretHeader != "Authorization" || config.MCPEndpoints[0].SecretPrefix != "Bearer " {
 		t.Fatalf("mcp endpoints=%#v", config.MCPEndpoints)
@@ -349,7 +349,7 @@ func TestLoadWorkerConfigRejectsMalformedMCPEndpoints(t *testing.T) {
 
 func TestBuildToolCatalogRegistersMCPEndpointsAndRejectsInvalid(t *testing.T) {
 	valid := []mcpEndpoint{{TenantID: "t_demo", ToolID: "weather_lookup", Version: 1, Transport: "streamable",
-		ServerURL: "https://mcp.test/tools", Timeout: 10 * time.Second}}
+		ServerURL: "https://mcp.test/tools", DeclarationDigest: strings.Repeat("a", 64), Timeout: 10 * time.Second}}
 	catalog, err := buildToolCatalog(valid)
 	if err != nil {
 		t.Fatalf("valid endpoints rejected: %v", err)
@@ -358,7 +358,7 @@ func TestBuildToolCatalogRegistersMCPEndpointsAndRejectsInvalid(t *testing.T) {
 		t.Fatal("nil catalog")
 	}
 	invalid := []mcpEndpoint{{TenantID: "t_demo", ToolID: "weather_lookup", Version: 1, Transport: "stdio",
-		ServerURL: "https://mcp.test/tools", Timeout: 10 * time.Second}}
+		ServerURL: "https://mcp.test/tools", DeclarationDigest: strings.Repeat("a", 64), Timeout: 10 * time.Second}}
 	if _, err := buildToolCatalog(invalid); err == nil {
 		t.Fatal("accepted stdio transport")
 	}

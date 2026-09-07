@@ -19,6 +19,7 @@ import (
 	trpcagentserver "trpc.group/trpc-go/trpc-agent-go/server/trpcagent"
 	"trpc.group/trpc-go/trpc-agent-go/skill"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+	upstreammcp "trpc.group/trpc-go/trpc-agent-go/tool/mcp"
 )
 
 // ModuleVersion is the reviewed upstream release. The dependency-boundary
@@ -57,6 +58,9 @@ var (
 	_ = graph.CfgKeyCheckpointID
 	_ = model.NewToolMessage
 	_ = tool.PermissionActionAsk
+	_ = upstreammcp.NewMCPToolSet
+	_ = upstreammcp.WithToolFilterFunc
+	_ = upstreammcp.WithMCPOptions
 	_ = skill.NewFSRepository
 	_ = knowledge.New
 	_ = plugin.NewManager

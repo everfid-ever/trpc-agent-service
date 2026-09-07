@@ -34,12 +34,16 @@ type BuildFunc func(context.Context, BuildRequest) (agenttool.CallableTool, erro
 // a global tool registration would make an accidental cross-tenant lookup
 // indistinguishable from an authorization success.
 type Registration struct {
-	TenantID  string
-	ID        string
-	Version   int64
-	Status    Status
-	SecretRef secrets.SecretRef
-	Build     BuildFunc
+	TenantID string
+	ID       string
+	Version  int64
+	// ContentDigest pins behavior that is not represented by the (id, version)
+	// tuple, such as a reviewed remote MCP endpoint and declaration. Empty is
+	// reserved for legacy code-owned tools whose implementation is the binary.
+	ContentDigest string
+	Status        Status
+	SecretRef     secrets.SecretRef
+	Build         BuildFunc
 }
 
 type registrationKey struct {
@@ -70,6 +74,7 @@ func NewCatalog(registrations ...Registration) (*Catalog, error) {
 // when the builders happen to be identical, preserving immutable revisions.
 func (c *Catalog) Register(registration Registration) error {
 	if c == nil || !validTenantText(registration.TenantID) || !validToolID(registration.ID) || registration.Version < 1 ||
+		(registration.ContentDigest != "" && !validContentDigest(registration.ContentDigest)) ||
 		(registration.Status != StatusActive && registration.Status != StatusSuspended && registration.Status != StatusDisabled) ||
 		registration.Build == nil || !validSecretRef(registration.SecretRef) {
 		return runtime.ErrInvariantViolation
@@ -159,7 +164,7 @@ func (r Resolver) ResolveTools(ctx context.Context, tenantID string, refs []prof
 	seen := make(map[profile.VersionedRef]struct{}, len(refs))
 	result := make([]agenttool.Tool, len(refs))
 	for index, ref := range refs {
-		if !validToolID(ref.ID) || ref.Version < 1 {
+		if !validToolID(ref.ID) || ref.Version < 1 || (ref.ContentDigest != "" && !validContentDigest(ref.ContentDigest)) {
 			return nil, runtime.ErrInvalidEnvelope
 		}
 		if _, exists := seen[ref]; exists {
@@ -172,6 +177,9 @@ func (r Resolver) ResolveTools(ctx context.Context, tenantID string, refs []prof
 		}
 		if registration.Status != StatusActive {
 			return nil, runtime.ErrCapabilityUnsupported
+		}
+		if registration.ContentDigest != "" && registration.ContentDigest != ref.ContentDigest {
+			return nil, runtime.ErrVersionMismatch
 		}
 		if registration.SecretRef.Ref != "" && r.Secrets == nil {
 			return nil, runtime.ErrCapabilityUnsupported
@@ -236,6 +244,18 @@ func validToolID(value string) bool {
 
 func validSecretRef(value secrets.SecretRef) bool {
 	return (value.Ref == "" && value.Version == 0) || (validTenantText(value.Ref) && value.Version >= 1)
+}
+
+func validContentDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func contextErr(ctx context.Context) error {

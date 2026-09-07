@@ -188,7 +188,7 @@ func configAllowsApp(value config.ConfigV1, appID string) bool {
 func project(key profile.ExecutionProfileKey, app agentapp.AgentApp, revision agentapp.Revision, configuration config.ConfigV1) profile.ExecutionProfileSnapshot {
 	tools := make([]profile.VersionedRef, len(revision.ToolRefs))
 	for index, ref := range revision.ToolRefs {
-		tools[index] = profile.VersionedRef{ID: ref.ID, Version: ref.Version}
+		tools[index] = profile.VersionedRef{ID: ref.ID, Version: ref.Version, ContentDigest: ref.ContentDigest}
 	}
 	knowledge := make([]profile.VersionedRef, len(revision.KnowledgeRefs))
 	for index, ref := range revision.KnowledgeRefs {

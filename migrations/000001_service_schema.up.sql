@@ -3153,8 +3153,10 @@ CREATE TABLE public.agent_app_revision_tool (
     revision bigint NOT NULL,
     tool_id text NOT NULL,
     tool_version bigint NOT NULL,
+    content_digest character(64),
     required boolean DEFAULT false NOT NULL,
-    CONSTRAINT agent_app_revision_tool_tool_version_check CHECK ((tool_version >= 1))
+    CONSTRAINT agent_app_revision_tool_tool_version_check CHECK ((tool_version >= 1)),
+    CONSTRAINT agent_app_revision_tool_content_digest_check CHECK (((content_digest IS NULL) OR (content_digest ~ '^[0-9a-f]{64}$'::text)))
 );
 
 

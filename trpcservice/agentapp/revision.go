@@ -29,9 +29,10 @@ const (
 )
 
 type VersionedRef struct {
-	ID       string `json:"id"`
-	Version  int64  `json:"version"`
-	Required bool   `json:"required,omitempty"`
+	ID            string `json:"id"`
+	Version       int64  `json:"version"`
+	ContentDigest string `json:"content_digest,omitempty"`
+	Required      bool   `json:"required,omitempty"`
 }
 
 type SkillRef struct {
@@ -155,7 +156,7 @@ func (r Revision) ValidateDraft() error {
 	for kind, refs := range map[string][]VersionedRef{"tool": r.ToolRefs, "knowledge": r.KnowledgeRefs} {
 		seen := make(map[string]struct{}, len(refs))
 		for _, ref := range refs {
-			if ref.ID == "" || ref.Version < 1 {
+			if ref.ID == "" || ref.Version < 1 || (ref.ContentDigest != "" && !isDigest(ref.ContentDigest)) {
 				return fmt.Errorf("%w: invalid %s reference", ErrInvalid, kind)
 			}
 			if _, exists := seen[ref.ID]; exists {

@@ -355,29 +355,31 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 // before any Agent can call it. Every field is re-validated by the mcp adapter
 // at assembly time so a malformed declaration refuses startup.
 type mcpEndpoint struct {
-	TenantID      string
-	ToolID        string
-	Version       int64
-	Transport     string
-	ServerURL     string
-	Timeout       time.Duration
-	SecretRef     string
-	SecretVersion int64
-	SecretHeader  string
-	SecretPrefix  string
+	TenantID          string
+	ToolID            string
+	Version           int64
+	Transport         string
+	ServerURL         string
+	DeclarationDigest string
+	Timeout           time.Duration
+	SecretRef         string
+	SecretVersion     int64
+	SecretHeader      string
+	SecretPrefix      string
 }
 
 type mcpEndpointJSON struct {
-	TenantID      string `json:"tenant_id"`
-	ToolID        string `json:"tool_id"`
-	Version       int64  `json:"version"`
-	Transport     string `json:"transport"`
-	ServerURL     string `json:"server_url"`
-	Timeout       string `json:"timeout"`
-	SecretRef     string `json:"secret_ref"`
-	SecretVersion int64  `json:"secret_version"`
-	SecretHeader  string `json:"secret_header"`
-	SecretPrefix  string `json:"secret_prefix"`
+	TenantID          string `json:"tenant_id"`
+	ToolID            string `json:"tool_id"`
+	Version           int64  `json:"version"`
+	Transport         string `json:"transport"`
+	ServerURL         string `json:"server_url"`
+	DeclarationDigest string `json:"declaration_digest"`
+	Timeout           string `json:"timeout"`
+	SecretRef         string `json:"secret_ref"`
+	SecretVersion     int64  `json:"secret_version"`
+	SecretHeader      string `json:"secret_header"`
+	SecretPrefix      string `json:"secret_prefix"`
 }
 
 func parseMCPEndpoints(raw string) ([]mcpEndpoint, error) {
@@ -393,9 +395,10 @@ func parseMCPEndpoints(raw string) ([]mcpEndpoint, error) {
 	for _, spec := range specs {
 		endpoint := mcpEndpoint{TenantID: strings.TrimSpace(spec.TenantID), ToolID: strings.TrimSpace(spec.ToolID),
 			Version: spec.Version, Transport: strings.TrimSpace(spec.Transport), ServerURL: strings.TrimSpace(spec.ServerURL),
-			SecretRef: strings.TrimSpace(spec.SecretRef), SecretVersion: spec.SecretVersion,
+			DeclarationDigest: strings.TrimSpace(spec.DeclarationDigest),
+			SecretRef:         strings.TrimSpace(spec.SecretRef), SecretVersion: spec.SecretVersion,
 			SecretHeader: strings.TrimSpace(spec.SecretHeader), SecretPrefix: spec.SecretPrefix}
-		if endpoint.TenantID == "" || endpoint.ToolID == "" || endpoint.Version < 1 || endpoint.Transport == "" || endpoint.ServerURL == "" {
+		if endpoint.TenantID == "" || endpoint.ToolID == "" || endpoint.Version < 1 || endpoint.Transport == "" || endpoint.ServerURL == "" || endpoint.DeclarationDigest == "" {
 			return nil, errors.New("invalid TRPC_MCP_ENDPOINTS entry")
 		}
 		if (endpoint.SecretRef == "") != (endpoint.SecretVersion == 0) {

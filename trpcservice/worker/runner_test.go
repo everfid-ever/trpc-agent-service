@@ -151,6 +151,10 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	mock := mockmodel.New()
 	factory := serviceagent.Factory{Profiles: profiles, Models: staticModelResolver{model: mock}}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, requested profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
+		execution, ok := runtime.ExecutionContextFrom(ctx)
+		if !ok || execution.TenantID != envelope.TenantID || execution.RequestID != envelope.RequestID || execution.SubjectID != envelope.UserID {
+			t.Fatalf("bundle builder missing trusted execution context: %#v ok=%t", execution, ok)
+		}
 		resolved, err := profiles.Resolve(ctx, requested)
 		if err != nil {
 			return nil, nil, err

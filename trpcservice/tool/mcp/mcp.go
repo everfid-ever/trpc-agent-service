@@ -5,7 +5,11 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,7 +25,8 @@ import (
 )
 
 const (
-	maxTimeout = time.Minute
+	maxTimeout     = time.Minute
+	maxResultBytes = 256 << 10
 )
 
 // Config is a code-reviewed, immutable MCP endpoint definition. It is not a
@@ -32,12 +37,13 @@ const (
 // local processes and model-selected URLs would weaken the tenant boundary, so
 // neither is part of this adapter.
 type Config struct {
-	Transport      string
-	ServerURL      string
-	RemoteToolName string
-	Timeout        time.Duration
-	SecretHeader   string
-	SecretPrefix   string
+	Transport                 string
+	ServerURL                 string
+	RemoteToolName            string
+	ExpectedDeclarationDigest string
+	Timeout                   time.Duration
+	SecretHeader              string
+	SecretPrefix              string
 
 	// clientOptions is only an in-package test seam. Production registrations
 	// use the fixed options assembled by newToolSet.
@@ -55,8 +61,12 @@ func NewRegistration(tenantID, localID string, version int64, config Config, sec
 		return servicetool.Registration{}, err
 	}
 	config = config.clone()
+	bindingDigest, err := BindingDigest(config, secretRef)
+	if err != nil {
+		return servicetool.Registration{}, err
+	}
 	return servicetool.Registration{
-		TenantID: tenantID, ID: localID, Version: version, Status: servicetool.StatusActive, SecretRef: secretRef,
+		TenantID: tenantID, ID: localID, Version: version, ContentDigest: bindingDigest, Status: servicetool.StatusActive, SecretRef: secretRef,
 		Build: func(ctx context.Context, request servicetool.BuildRequest) (agenttool.CallableTool, error) {
 			value := callable{config: config, request: request, localID: localID}
 			declaration, err := value.discover(ctx)
@@ -78,7 +88,10 @@ func (c Config) validate(localID string, secretRef secrets.SecretRef) error {
 		strings.TrimSpace(c.ServerURL) != c.ServerURL {
 		return runtime.ErrInvariantViolation
 	}
-	if !validToolID(c.RemoteToolName) || c.RemoteToolName != localID || c.Timeout <= 0 || c.Timeout > maxTimeout {
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil && forbiddenAddress(ip) {
+		return runtime.ErrCapabilityUnsupported
+	}
+	if !validToolID(c.RemoteToolName) || c.RemoteToolName != localID || !validDigest(c.ExpectedDeclarationDigest) || c.Timeout <= 0 || c.Timeout > maxTimeout {
 		return runtime.ErrInvariantViolation
 	}
 	if secretRef.Ref == "" && secretRef.Version == 0 {
@@ -95,6 +108,44 @@ func (c Config) validate(localID string, secretRef secrets.SecretRef) error {
 		return runtime.ErrInvariantViolation
 	}
 	return nil
+}
+
+// BindingDigest is the revision-pinned identity of a reviewed MCP endpoint.
+// Changing endpoint, timeout, authentication binding, remote tool name, or
+// expected declaration makes an old published ToolRef fail closed.
+func BindingDigest(config Config, secretRef secrets.SecretRef) (string, error) {
+	if err := config.validate(config.RemoteToolName, secretRef); err != nil {
+		return "", err
+	}
+	payload := struct {
+		Transport, ServerURL, RemoteToolName, ExpectedDeclarationDigest string
+		TimeoutNanoseconds                                              int64
+		SecretRef                                                       string
+		SecretVersion                                                   int64
+		SecretHeader, SecretPrefix                                      string
+	}{config.Transport, config.ServerURL, config.RemoteToolName, config.ExpectedDeclarationDigest, config.Timeout.Nanoseconds(),
+		secretRef.Ref, secretRef.Version, config.SecretHeader, config.SecretPrefix}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// DeclarationDigest returns the stable digest expected in Config. It is for
+// control-plane validation tooling and must be calculated from a reviewed MCP
+// discovery result, never model-provided content.
+func DeclarationDigest(value *agenttool.Declaration) (string, error) {
+	if value == nil || !validToolID(value.Name) {
+		return "", runtime.ErrInvariantViolation
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (c Config) clone() Config {
@@ -142,7 +193,15 @@ func (c callable) Call(ctx context.Context, arguments []byte) (any, error) {
 		return nil, err
 	}
 	defer func() { _ = set.Close() }()
-	return remote.Call(ctx, arguments)
+	result, err := remote.Call(ctx, arguments)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > maxResultBytes {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return result, nil
 }
 
 func (c callable) discover(ctx context.Context) (*agenttool.Declaration, error) {
@@ -155,6 +214,10 @@ func (c callable) discover(ctx context.Context) (*agenttool.Declaration, error) 
 	if declaration == nil || declaration.Name != c.localID {
 		return nil, runtime.ErrVersionMismatch
 	}
+	digest, err := DeclarationDigest(declaration)
+	if err != nil || digest != c.config.ExpectedDeclarationDigest {
+		return nil, runtime.ErrVersionMismatch
+	}
 	copy := *declaration
 	return &copy, nil
 }
@@ -165,6 +228,7 @@ func (c callable) openExact(ctx context.Context) (upstreamToolSet, agenttool.Cal
 	}
 	set := newUpstreamToolSet(upstreammcp.ConnectionConfig{Transport: c.config.Transport, ServerURL: c.config.ServerURL, Timeout: c.config.Timeout},
 		upstreammcp.WithToolFilterFunc(agenttool.NewIncludeToolNamesFilter(c.config.RemoteToolName)),
+		upstreammcp.WithMCPOptions(tmcp.WithHTTPReqHandler(safeHTTPHandler{})),
 		upstreammcp.WithMCPOptions(c.clientOptions()...))
 	if err := set.Init(ctx); err != nil {
 		_ = set.Close()
@@ -219,6 +283,49 @@ func validToolID(value string) bool {
 }
 
 func containsControl(value string) bool { return strings.IndexFunc(value, unicode.IsControl) >= 0 }
+
+func validDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+var lookupIP = net.DefaultResolver.LookupIPAddr
+
+// safeHTTPHandler validates every connection target after DNS resolution. The
+// config-time literal-IP check prevents the obvious bypass; this second gate
+// handles a reviewed hostname that later resolves to loopback/private space.
+// Redirects are deliberately disabled because a redirect is a new endpoint
+// that is not part of the revision-pinned binding.
+type safeHTTPHandler struct{}
+
+func (safeHTTPHandler) Handle(ctx context.Context, client *http.Client, request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil || request.URL.Scheme != "https" || request.URL.User != nil || request.URL.Hostname() == "" {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	addresses, err := lookupIP(ctx, request.URL.Hostname())
+	if err != nil || len(addresses) == 0 {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	for _, address := range addresses {
+		if forbiddenAddress(address.IP) {
+			return nil, runtime.ErrCapabilityUnsupported
+		}
+	}
+	if client == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	copy := *client
+	copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return copy.Do(request)
+}
+
+func forbiddenAddress(value net.IP) bool {
+	return value == nil || value.IsPrivate() || value.IsLoopback() || value.IsLinkLocalUnicast() || value.IsUnspecified() ||
+		value.IsLinkLocalMulticast() || value.IsMulticast()
+}
 
 func wipe(value []byte) {
 	for index := range value {

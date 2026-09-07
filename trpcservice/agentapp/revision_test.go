@@ -21,6 +21,23 @@ func TestContentDigestNormalizesReferenceOrder(t *testing.T) {
 	}
 }
 
+func TestContentDigestIncludesToolBindingDigest(t *testing.T) {
+	base := Revision{AgentKind: AgentKindLLM, SchemaVersion: 1, Instruction: "help", ModelProfileID: "model", ModelProfileVersion: 1,
+		ToolRefs: []VersionedRef{{ID: "mcp_weather", Version: 1, ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}
+	first, err := base.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.ToolRefs[0].ContentDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	second, err := base.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("tool binding digest did not affect revision digest")
+	}
+}
+
 func TestNormalizeRevisionCanonicalizesNilObjectFields(t *testing.T) {
 	revision := NormalizeRevision(Revision{})
 	if revision.GenerationConfig == nil || revision.RuntimePolicy == nil || revision.FallbackModelRefs == nil {

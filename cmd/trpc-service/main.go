@@ -40,8 +40,22 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "mcp-declaration-digest" {
+		if err := runMCPDeclarationDigest(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "trpc-agent-service MCP declaration digest failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "mcp-binding-digests" {
+		if err := runMCPBindingDigests(os.Args[2:], os.Stdout, os.Getenv); err != nil {
+			fmt.Fprintf(os.Stderr, "trpc-agent-service MCP binding digests failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [demo [--confirm]|demo-server|artifact|preprocess|channel|channel-delivery|gateway|admin|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [demo [--confirm]|mcp-declaration-digest|mcp-binding-digests|demo-server|artifact|preprocess|channel|channel-delivery|gateway|admin|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}

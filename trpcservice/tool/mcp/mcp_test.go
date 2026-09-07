@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -20,10 +21,21 @@ import (
 
 func TestRegistrationUsesUpstreamMCPToolSetWithScopedSecret(t *testing.T) {
 	handler := &recordingHandler{}
-	registration, err := NewRegistration("tenant-a", "weather_lookup", 2, Config{
+	expected, err := DeclarationDigest(&agenttool.Declaration{Name: "weather_lookup", Description: "tenant weather", InputSchema: &agenttool.Schema{Type: "object"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := Config{
 		Transport: "streamable", ServerURL: "https://mcp.test/tools", RemoteToolName: "weather_lookup", Timeout: time.Second,
-		SecretHeader: "Authorization", SecretPrefix: "Bearer ", clientOptions: []tmcp.ClientOption{tmcp.WithHTTPReqHandler(handler)},
-	}, secrets.SecretRef{Ref: "secret://mcp-weather", Version: 4})
+		ExpectedDeclarationDigest: expected,
+		SecretHeader:              "Authorization", SecretPrefix: "Bearer ", clientOptions: []tmcp.ClientOption{tmcp.WithHTTPReqHandler(handler)},
+	}
+	secretRef := secrets.SecretRef{Ref: "secret://mcp-weather", Version: 4}
+	binding, err := BindingDigest(config, secretRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := NewRegistration("tenant-a", "weather_lookup", 2, config, secretRef)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +46,7 @@ func TestRegistrationUsesUpstreamMCPToolSetWithScopedSecret(t *testing.T) {
 	provider := &recordingSecrets{value: []byte("tenant-token")}
 	resolver := servicetool.Resolver{Catalog: catalog, Secrets: provider}
 	ctx := runtime.WithExecutionContext(context.Background(), runtime.ExecutionContext{TenantID: "tenant-a", RequestID: "req-1", SubjectID: "worker-model"})
-	values, err := resolver.ResolveTools(ctx, "tenant-a", []profile.VersionedRef{{ID: "weather_lookup", Version: 2}})
+	values, err := resolver.ResolveTools(ctx, "tenant-a", []profile.VersionedRef{{ID: "weather_lookup", Version: 2, ContentDigest: binding}})
 	if err != nil || len(values) != 1 || values[0].Declaration().Name != "weather_lookup" {
 		t.Fatalf("values=%#v err=%v", values, err)
 	}
@@ -62,16 +74,20 @@ func TestRegistrationUsesUpstreamMCPToolSetWithScopedSecret(t *testing.T) {
 	if !handler.seen("initialize") || !handler.seen("tools/list") || !handler.seen("tools/call") {
 		t.Fatalf("methods=%v", handler.methods())
 	}
+	if _, err := resolver.ResolveTools(ctx, "tenant-a", []profile.VersionedRef{{ID: "weather_lookup", Version: 2, ContentDigest: strings.Repeat("0", 64)}}); err != runtime.ErrVersionMismatch {
+		t.Fatalf("binding digest mismatch err=%v", err)
+	}
 }
 
 func TestRegistrationRejectsUnboundedOrMutableMCPConfiguration(t *testing.T) {
-	valid := Config{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", Timeout: time.Second}
+	valid := Config{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", ExpectedDeclarationDigest: strings.Repeat("a", 64), Timeout: time.Second}
 	cases := []Config{
-		{Transport: "stdio", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", Timeout: time.Second},
-		{Transport: "streamable", ServerURL: "http://mcp.example.com/v1", RemoteToolName: "lookup", Timeout: time.Second},
-		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1?token=leak", RemoteToolName: "lookup", Timeout: time.Second},
-		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "other", Timeout: time.Second},
-		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", Timeout: 0},
+		{Transport: "stdio", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: time.Second},
+		{Transport: "streamable", ServerURL: "http://mcp.example.com/v1", RemoteToolName: "lookup", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: time.Second},
+		{Transport: "streamable", ServerURL: "https://127.0.0.1/v1", RemoteToolName: "lookup", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: time.Second},
+		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1?token=leak", RemoteToolName: "lookup", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: time.Second},
+		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "other", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: time.Second},
+		{Transport: "streamable", ServerURL: "https://mcp.example.com/v1", RemoteToolName: "lookup", ExpectedDeclarationDigest: valid.ExpectedDeclarationDigest, Timeout: 0},
 	}
 	for _, config := range cases {
 		if _, err := NewRegistration("tenant-a", "lookup", 1, config, secrets.SecretRef{}); err == nil {
@@ -84,6 +100,21 @@ func TestRegistrationRejectsUnboundedOrMutableMCPConfiguration(t *testing.T) {
 	if _, err := NewRegistration("tenant-a", "lookup", 1, Config{Transport: valid.Transport, ServerURL: valid.ServerURL,
 		RemoteToolName: valid.RemoteToolName, Timeout: valid.Timeout, SecretHeader: "Cookie"}, secrets.SecretRef{Ref: "secret://mcp", Version: 1}); err == nil {
 		t.Fatal("unsafe secret header accepted")
+	}
+}
+
+func TestSafeHTTPHandlerRejectsHostnameResolvedToPrivateAddress(t *testing.T) {
+	original := lookupIP
+	lookupIP = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("10.0.0.8")}}, nil
+	}
+	t.Cleanup(func() { lookupIP = original })
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://reviewed.example.test/mcp", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = (safeHTTPHandler{}).Handle(context.Background(), http.DefaultClient, request); err != runtime.ErrCapabilityUnsupported {
+		t.Fatalf("private resolved address err=%v", err)
 	}
 }
 

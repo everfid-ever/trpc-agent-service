@@ -239,17 +239,18 @@ func (f Factory) graphAskTools(ctx context.Context, snapshot profile.ExecutionPr
 	return result, nil
 }
 
-// ResolveConfirmedTool returns one exact-version callable behind the same
+// ResolveConfirmedTool returns one exact, revision-pinned callable behind the same
 // non-bypassable policy/grant wrapper used by normal agent construction.
-func (f Factory) ResolveConfirmedTool(ctx context.Context, tenantID string, ref governance.VersionedRef) (tool.CallableTool, error) {
+func (f Factory) ResolveConfirmedTool(ctx context.Context, tenantID string, ref profile.VersionedRef) (tool.CallableTool, error) {
 	if f.Tools == nil || f.Policies == nil || f.Confirmations == nil || f.ToolResults == nil || tenantID == "" || ref.ID == "" || ref.Version < 1 {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	values, err := f.Tools.ResolveTools(ctx, tenantID, []profile.VersionedRef{{ID: ref.ID, Version: ref.Version}})
+	values, err := f.Tools.ResolveTools(ctx, tenantID, []profile.VersionedRef{ref})
 	if err != nil {
 		return nil, err
 	}
-	guarded, err := servicetool.GuardCallablesWithConfirmation(f.Policies, f.Confirmations, f.ToolResults, []governance.VersionedRef{ref}, values)
+	guarded, err := servicetool.GuardCallablesWithConfirmation(f.Policies, f.Confirmations, f.ToolResults,
+		[]governance.VersionedRef{{ID: ref.ID, Version: ref.Version}}, values)
 	if err != nil {
 		return nil, err
 	}

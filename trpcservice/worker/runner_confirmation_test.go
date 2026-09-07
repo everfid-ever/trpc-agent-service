@@ -391,7 +391,7 @@ func TestRunnerGraphDangerousToolResumesFromCheckpointExactlyOnce(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	callable, err := factory.ResolveConfirmedTool(context.Background(), envelope.TenantID, confirmation.Tool)
+	callable, err := factory.ResolveConfirmedTool(context.Background(), envelope.TenantID, profile.VersionedRef{ID: confirmation.Tool.ID, Version: confirmation.Tool.Version})
 	if err != nil {
 		t.Fatal(err)
 	}
