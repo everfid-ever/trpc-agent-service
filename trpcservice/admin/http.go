@@ -19,12 +19,30 @@ type PrincipalResolver interface {
 type Handler struct {
 	Service    Service
 	Principals PrincipalResolver
+	Catalog    Catalog
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	principal, err := h.Principals.Resolve(r)
 	if err != nil {
 		writeError(w, ErrUnauthenticated)
+		return
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/v1/admin/catalog" {
+		if err := authorize(principal, principal.TenantID); err != nil {
+			writeError(w, err)
+			return
+		}
+		if h.Catalog == nil {
+			writeError(w, ErrForbidden)
+			return
+		}
+		value, getErr := h.Catalog.GetCatalog(r.Context(), principal.TenantID)
+		if getErr != nil {
+			writeError(w, getErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")

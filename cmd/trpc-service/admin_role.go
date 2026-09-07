@@ -103,8 +103,11 @@ func runAdminRole(parent context.Context, getenv func(string) string, logger *ro
 	mux := http.NewServeMux()
 	mux.Handle("/livez", health.Handler{Checker: monitor})
 	mux.Handle("/readyz", health.Handler{Checker: monitor})
-	mux.Handle("/v1/", readinessGate{Checker: monitor, Handler: admin.Handler{Service: admin.Service{
-		Configs: configpostgres.New(db, tenantRepo)}, Principals: resolver}})
+	api := admin.Handler{Service: admin.Service{Configs: configpostgres.New(db, tenantRepo)}, Principals: resolver,
+		Catalog: admin.PostgreSQLCatalog{DB: db}}
+	mux.Handle("/admin", admin.Console{API: readinessGate{Checker: monitor, Handler: api}, Principals: resolver})
+	mux.Handle("/admin/", admin.Console{API: readinessGate{Checker: monitor, Handler: api}, Principals: resolver})
+	mux.Handle("/v1/", admin.Console{API: readinessGate{Checker: monitor, Handler: api}, Principals: resolver})
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 
