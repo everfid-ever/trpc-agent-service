@@ -79,8 +79,9 @@ func DeepSeekModelSchema() Schema {
 		AllowedModels:   []string{"deepseek-v4-flash-vision-exp"},
 		EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.deepseek.com"},
 		OptionRules: map[string]OptionRule{
-			"timeout_ms":          {Type: OptionInteger, Default: "60000", Min: 100, Max: 600000},
-			"channel_buffer_size": {Type: OptionInteger, Default: "256", Min: 1, Max: 4096},
+			"timeout_ms":             {Type: OptionInteger, Default: "60000", Min: 100, Max: 600000},
+			"timeout_retry_attempts": {Type: OptionInteger, Default: "1", Min: 1, Max: 3},
+			"channel_buffer_size":    {Type: OptionInteger, Default: "256", Min: 1, Max: 4096},
 		},
 		SecretRequirement: "required",
 	}

@@ -4,6 +4,7 @@ package modelclient
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
@@ -68,7 +69,7 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 	if err := validateEndpoint(value.Endpoint); err != nil {
 		return nil, err
 	}
-	timeout, bufferSize, err := options(value.Options)
+	timeout, retryAttempts, bufferSize, err := options(value.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +97,33 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 	if isDeepSeekVisionModel(value.Model) {
 		opts = append(opts, openai.WithTextOnlyMessageContent(false))
 	}
-	return openai.New(value.Model, opts...), nil
+	resolved := model.Model(openai.New(value.Model, opts...))
+	if retryAttempts > 1 {
+		resolved = timeoutRetryModel{Model: resolved, attempts: retryAttempts}
+	}
+	return resolved, nil
+}
+
+type timeoutRetryModel struct {
+	model.Model
+	attempts int
+}
+
+func (m timeoutRetryModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
+	for attempt := 1; ; attempt++ {
+		result, err := m.Model.GenerateContent(ctx, request)
+		if err == nil || attempt >= m.attempts || ctx.Err() != nil || !isTimeout(err) {
+			return result, err
+		}
+	}
+}
+
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
 }
 
 func isDeepSeekVisionModel(name string) bool { return name == deepSeekVisionModel }
@@ -133,26 +160,33 @@ func validateEndpoint(raw string) error {
 	return nil
 }
 
-func options(input map[string]string) (time.Duration, int, error) {
+func options(input map[string]string) (time.Duration, int, int, error) {
 	timeout := defaultTimeout
+	retryAttempts := 1
 	bufferSize := 0
 	for name, value := range input {
 		switch name {
 		case "timeout_ms":
 			milliseconds, err := strconv.ParseInt(value, 10, 64)
 			if err != nil || milliseconds < 100 || milliseconds > maximumTimeout.Milliseconds() {
-				return 0, 0, runtime.ErrCapabilityUnsupported
+				return 0, 0, 0, runtime.ErrCapabilityUnsupported
 			}
 			timeout = time.Duration(milliseconds) * time.Millisecond
+		case "timeout_retry_attempts":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 1 || parsed > 3 {
+				return 0, 0, 0, runtime.ErrCapabilityUnsupported
+			}
+			retryAttempts = parsed
 		case "channel_buffer_size":
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed < 1 || parsed > 4096 {
-				return 0, 0, runtime.ErrCapabilityUnsupported
+				return 0, 0, 0, runtime.ErrCapabilityUnsupported
 			}
 			bufferSize = parsed
 		default:
-			return 0, 0, runtime.ErrCapabilityUnsupported
+			return 0, 0, 0, runtime.ErrCapabilityUnsupported
 		}
 	}
-	return timeout, bufferSize, nil
+	return timeout, retryAttempts, bufferSize, nil
 }

@@ -3,6 +3,7 @@ package modelclient
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
@@ -10,7 +11,25 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
+
+type timeoutModelStub struct{ calls atomic.Int64 }
+
+func (s *timeoutModelStub) GenerateContent(context.Context, *model.Request) (<-chan *model.Response, error) {
+	s.calls.Add(1)
+	return nil, context.DeadlineExceeded
+}
+
+func (*timeoutModelStub) Info() model.Info { return model.Info{Name: "timeout-stub"} }
+
+func TestTimeoutRetryModelRetriesOnlyTimeoutsBeforeAStream(t *testing.T) {
+	stub := &timeoutModelStub{}
+	_, err := (timeoutRetryModel{Model: stub, attempts: 3}).GenerateContent(context.Background(), &model.Request{})
+	if !errors.Is(err, context.DeadlineExceeded) || stub.calls.Load() != 3 {
+		t.Fatalf("err=%v calls=%d", err, stub.calls.Load())
+	}
+}
 
 type profileReaderStub struct{ value provider.ModelProfileSnapshot }
 
