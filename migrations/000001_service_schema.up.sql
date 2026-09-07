@@ -6862,4 +6862,60 @@ REVOKE ALL ON FUNCTION public.update_tenant_configuration(p_tenant_id text, p_ex
 
 
 
+-- First-delivery baseline: all final contract additions are kept in this one
+-- transaction so an empty database never observes an intermediate schema.
+CREATE TABLE public.config_release (
+ release_id text PRIMARY KEY, state text NOT NULL, percentage integer NOT NULL, salt text NOT NULL,
+ version bigint NOT NULL DEFAULT 1, actor_id text NOT NULL, reason_code text NOT NULL,
+ correlation_id text NOT NULL, trace_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ CONSTRAINT config_release_state_check CHECK (state IN ('active','rolled_back')),
+ CONSTRAINT config_release_percentage_check CHECK (percentage BETWEEN 0 AND 100), CONSTRAINT config_release_version_check CHECK (version >= 1),
+ CONSTRAINT config_release_identifier_check CHECK (length(btrim(release_id)) > 0 AND length(release_id) <= 256),
+ CONSTRAINT config_release_salt_check CHECK (length(btrim(salt)) >= 16 AND length(salt) <= 512),
+ CONSTRAINT config_release_metadata_check CHECK (length(btrim(actor_id)) > 0 AND length(btrim(reason_code)) > 0 AND length(btrim(correlation_id)) > 0 AND length(btrim(trace_id)) > 0)
+);
+CREATE TABLE public.config_release_target (
+ release_id text NOT NULL REFERENCES public.config_release(release_id), tenant_id text NOT NULL REFERENCES public.tenant(tenant_id),
+ baseline_config_version bigint NOT NULL, candidate_config_version bigint NOT NULL, allowlisted boolean NOT NULL DEFAULT false,
+ PRIMARY KEY (release_id, tenant_id), CONSTRAINT config_release_target_versions_check CHECK (baseline_config_version >= 1 AND candidate_config_version >= 1 AND baseline_config_version <> candidate_config_version),
+ CONSTRAINT config_release_target_baseline_fk FOREIGN KEY (tenant_id, baseline_config_version) REFERENCES public.config_snapshot(tenant_id, config_version),
+ CONSTRAINT config_release_target_candidate_fk FOREIGN KEY (tenant_id, candidate_config_version) REFERENCES public.config_snapshot(tenant_id, config_version)
+);
+CREATE INDEX config_release_target_effective_idx ON public.config_release_target(tenant_id, baseline_config_version, release_id);
+
+ALTER TABLE public.outbox DROP CONSTRAINT outbox_kind_check;
+ALTER TABLE public.outbox ADD CONSTRAINT outbox_kind_check CHECK (kind = ANY (ARRAY['audit'::text, 'tenant-control'::text, 'config-invalidation'::text, 'memory-invalidation'::text, 'dispatch'::text, 'reply'::text, 'wakeup'::text, 'execution-control'::text]));
+CREATE TABLE public.memory_watermark (tenant_id text PRIMARY KEY REFERENCES public.tenant(tenant_id), version bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT memory_watermark_version_check CHECK (version >= 0));
+CREATE TABLE public.memory_entry (
+ tenant_id text NOT NULL REFERENCES public.tenant(tenant_id), scope text NOT NULL, subject_id text NOT NULL DEFAULT '', memory_id text NOT NULL, version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, attributes jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY (tenant_id, scope, subject_id, memory_id), CONSTRAINT memory_entry_scope_check CHECK ((scope = 'tenant' AND subject_id = '') OR (scope = 'user' AND length(btrim(subject_id)) > 0)), CONSTRAINT memory_entry_version_check CHECK (version >= 1 AND tenant_watermark >= 1), CONSTRAINT memory_entry_content_check CHECK (length(btrim(content_ref)) > 0 AND content_digest ~ '^[0-9a-f]{64}$'), CONSTRAINT memory_entry_attributes_check CHECK (jsonb_typeof(attributes) = 'object')
+);
+CREATE INDEX memory_entry_tenant_scope_idx ON public.memory_entry(tenant_id, scope, subject_id, memory_id);
+CREATE TABLE public.memory_mutation (
+ tenant_id text NOT NULL REFERENCES public.tenant(tenant_id), mutation_id text NOT NULL, scope text NOT NULL, subject_id text NOT NULL, memory_id text NOT NULL, entry_version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, attributes jsonb NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+ PRIMARY KEY (tenant_id, mutation_id), CONSTRAINT memory_mutation_scope_check CHECK ((scope = 'tenant' AND subject_id = '') OR (scope = 'user' AND length(btrim(subject_id)) > 0)), CONSTRAINT memory_mutation_version_check CHECK (entry_version >= 1 AND tenant_watermark >= 1), CONSTRAINT memory_mutation_content_check CHECK (length(btrim(mutation_id)) > 0 AND length(btrim(content_ref)) > 0 AND content_digest ~ '^[0-9a-f]{64}$'), CONSTRAINT memory_mutation_attributes_check CHECK (jsonb_typeof(attributes) = 'object')
+);
+CREATE TABLE public.memory_index_intent (
+ tenant_id text NOT NULL, mutation_id text NOT NULL, scope text NOT NULL, subject_id text NOT NULL, memory_id text NOT NULL, entry_version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, state text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(), indexed_at timestamptz,
+ PRIMARY KEY (tenant_id, mutation_id), CONSTRAINT memory_index_intent_mutation_fk FOREIGN KEY (tenant_id, mutation_id) REFERENCES public.memory_mutation(tenant_id, mutation_id), CONSTRAINT memory_index_intent_state_check CHECK (state IN ('pending','indexed','failed')), CONSTRAINT memory_index_intent_version_check CHECK (entry_version >= 1 AND tenant_watermark >= 1)
+);
+CREATE INDEX memory_index_intent_pending_idx ON public.memory_index_intent(state, created_at, tenant_id);
+
+ALTER TABLE public.result_payload ADD COLUMN content_type text NOT NULL DEFAULT 'text/plain', ADD CONSTRAINT result_payload_content_type_check CHECK (content_type IN ('text/plain', 'application/vnd.trpc.card+json') OR content_type ~ '^image/[a-z0-9.+-]+$');
+ALTER TABLE public.interaction_payload ADD COLUMN content_type text NOT NULL DEFAULT 'text/plain', ADD CONSTRAINT interaction_payload_content_type_check CHECK (content_type IN ('text/plain', 'application/vnd.trpc.card+json') OR content_type ~ '^image/[a-z0-9.+-]+$');
+ALTER TABLE public.agent_app_revision ADD COLUMN fallback_model_refs jsonb NOT NULL DEFAULT '[]'::jsonb, ADD CONSTRAINT agent_app_revision_fallback_model_refs_check CHECK (jsonb_typeof(fallback_model_refs) = 'array' AND (agent_kind = 'llm'::text OR fallback_model_refs = '[]'::jsonb));
+ALTER TABLE public.agent_app_revision ADD COLUMN max_llm_calls integer NOT NULL DEFAULT 0, ADD COLUMN max_tool_calls integer NOT NULL DEFAULT 0, ADD COLUMN max_parallel_tools integer NOT NULL DEFAULT 0, ADD COLUMN execution_timeout_seconds integer NOT NULL DEFAULT 0, ADD CONSTRAINT agent_app_revision_execution_budget_check CHECK (max_llm_calls BETWEEN 0 AND 10000 AND max_tool_calls BETWEEN 0 AND 10000 AND max_parallel_tools BETWEEN 0 AND 1000 AND execution_timeout_seconds BETWEEN 0 AND 86400);
+ALTER TABLE public.execution_record ADD COLUMN max_llm_calls integer NOT NULL DEFAULT 0, ADD COLUMN max_tool_calls integer NOT NULL DEFAULT 0, ADD COLUMN max_parallel_tools integer NOT NULL DEFAULT 0, ADD COLUMN execution_timeout_seconds integer NOT NULL DEFAULT 0, ADD CONSTRAINT execution_record_execution_budget_check CHECK (max_llm_calls BETWEEN 0 AND 10000 AND max_tool_calls BETWEEN 0 AND 10000 AND max_parallel_tools BETWEEN 0 AND 1000 AND execution_timeout_seconds BETWEEN 0 AND 86400);
+CREATE FUNCTION public.hydrate_execution_budget() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'pg_catalog' AS $$
+DECLARE budget public.agent_app_revision%ROWTYPE;
+BEGIN
+ SELECT * INTO budget FROM public.agent_app_revision WHERE tenant_id=NEW.tenant_id AND agent_app_id=NEW.agent_app_id AND revision=NEW.agent_app_revision AND state='published' AND content_digest=NEW.agent_content_digest;
+ IF NOT FOUND THEN RAISE EXCEPTION 'published revision budget not found' USING ERRCODE='40001'; END IF;
+ NEW.max_llm_calls := budget.max_llm_calls; NEW.max_tool_calls := budget.max_tool_calls; NEW.max_parallel_tools := budget.max_parallel_tools; NEW.execution_timeout_seconds := budget.execution_timeout_seconds;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER execution_record_hydrate_execution_budget BEFORE INSERT ON public.execution_record FOR EACH ROW EXECUTE FUNCTION public.hydrate_execution_budget();
+REVOKE ALL ON FUNCTION public.hydrate_execution_budget() FROM PUBLIC;
+
 COMMIT;

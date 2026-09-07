@@ -11,124 +11,14 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 6 {
-		t.Fatalf("migrations=%d, want baseline plus release, memory, outbound content, model fallback, and execution budget migrations", len(all))
+	if len(all) != 1 {
+		t.Fatalf("migrations=%d, want one first-delivery baseline", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
 		t.Fatalf("migration=%#v", migration)
 	}
 	return migration
-}
-
-func TestExecutionBudgetMigrationIsTransactionWrapped(t *testing.T) {
-	all, err := All()
-	if err != nil {
-		t.Fatal(err)
-	}
-	migration := all[5]
-	if migration.Version != "000006" || migration.Name != "execution_budgets" {
-		t.Fatalf("migration=%#v", migration)
-	}
-	if _, err := transactionBody(migration.Up); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transactionBody(migration.Down); err != nil {
-		t.Fatal(err)
-	}
-	for _, clause := range []string{"max_llm_calls", "max_tool_calls", "max_parallel_tools", "execution_timeout_seconds", "execution_record_hydrate_execution_budget"} {
-		if !strings.Contains(migration.Up, clause) {
-			t.Errorf("execution budget migration lacks %q", clause)
-		}
-	}
-}
-
-func TestConfigReleaseMigrationIsTransactionWrapped(t *testing.T) {
-	all, err := All()
-	if err != nil {
-		t.Fatal(err)
-	}
-	migration := all[1]
-	if migration.Version != "000002" || migration.Name != "config_release" {
-		t.Fatalf("migration=%#v", migration)
-	}
-	if _, err := transactionBody(migration.Up); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transactionBody(migration.Down); err != nil {
-		t.Fatal(err)
-	}
-	for _, clause := range []string{"CREATE TABLE public.config_release", "CREATE TABLE public.config_release_target", "config_release_target_effective_idx"} {
-		if !strings.Contains(migration.Up, clause) {
-			t.Errorf("release migration lacks %q", clause)
-		}
-	}
-}
-
-func TestMemoryDomainMigrationIsTransactionWrapped(t *testing.T) {
-	all, err := All()
-	if err != nil {
-		t.Fatal(err)
-	}
-	migration := all[2]
-	if migration.Version != "000003" || migration.Name != "memory_domain" {
-		t.Fatalf("migration=%#v", migration)
-	}
-	if _, err := transactionBody(migration.Up); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transactionBody(migration.Down); err != nil {
-		t.Fatal(err)
-	}
-	for _, clause := range []string{"CREATE TABLE public.memory_entry", "CREATE TABLE public.memory_index_intent", "memory-invalidation"} {
-		if !strings.Contains(migration.Up, clause) {
-			t.Errorf("memory migration lacks %q", clause)
-		}
-	}
-}
-
-func TestOutboundContentTypeMigrationIsTransactionWrapped(t *testing.T) {
-	all, err := All()
-	if err != nil {
-		t.Fatal(err)
-	}
-	migration := all[3]
-	if migration.Version != "000004" || migration.Name != "outbound_content_type" {
-		t.Fatalf("migration=%#v", migration)
-	}
-	if _, err := transactionBody(migration.Up); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transactionBody(migration.Down); err != nil {
-		t.Fatal(err)
-	}
-	for _, clause := range []string{"result_payload_content_type_check", "interaction_payload_content_type_check", "application/vnd.trpc.card+json"} {
-		if !strings.Contains(migration.Up, clause) {
-			t.Errorf("outbound content migration lacks %q", clause)
-		}
-	}
-}
-
-func TestAgentFallbackModelsMigrationIsTransactionWrapped(t *testing.T) {
-	all, err := All()
-	if err != nil {
-		t.Fatal(err)
-	}
-	migration := all[4]
-	if migration.Version != "000005" || migration.Name != "agent_fallback_models" {
-		t.Fatalf("migration=%#v", migration)
-	}
-	if _, err := transactionBody(migration.Up); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transactionBody(migration.Down); err != nil {
-		t.Fatal(err)
-	}
-	for _, clause := range []string{"fallback_model_refs", "jsonb_typeof(fallback_model_refs) = 'array'", "agent_kind = 'llm'"} {
-		if !strings.Contains(migration.Up, clause) {
-			t.Errorf("fallback model migration lacks %q", clause)
-		}
-	}
 }
 
 func TestServiceSchemaBaselineContainsFinalPlatformContract(t *testing.T) {
@@ -146,6 +36,10 @@ func TestServiceSchemaBaselineContainsFinalPlatformContract(t *testing.T) {
 		"CREATE FUNCTION public.commit_turn", "CREATE FUNCTION public.guard_outbox_idempotency", "CREATE FUNCTION public.begin_session_backend_observation",
 		"CREATE FUNCTION public.begin_knowledge_backend_observation", "CREATE ROLE audit_retention_purger",
 		"UNIQUE (tenant_id, kind, idempotency_key)", "GRANT ALL ON FUNCTION public.execute_business_audit_purge",
+		"CREATE TABLE public.config_release", "CREATE TABLE public.memory_entry", "CREATE TABLE public.memory_index_intent",
+		"memory-invalidation", "result_payload_content_type_check", "interaction_payload_content_type_check",
+		"fallback_model_refs", "max_llm_calls", "execution_record_hydrate_execution_budget",
+		"REVOKE ALL ON FUNCTION public.hydrate_execution_budget() FROM PUBLIC",
 	} {
 		if !strings.Contains(migration.Up, clause) {
 			t.Errorf("baseline lacks %q", clause)
