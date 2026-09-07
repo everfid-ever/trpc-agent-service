@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+if [[ "${1:-}" == "--demo" ]]; then
+  [[ $# -eq 1 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
+  exec "$ROOT/scripts/quickstart.sh" --demo
+fi
+[[ $# -eq 0 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
+
 compose_file="$ROOT/deploy/compose/docker-compose.local.yml"
 secret_file="$ROOT/deploy/compose/secrets/deepseek-api-key"
 

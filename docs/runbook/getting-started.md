@@ -4,6 +4,8 @@
 
 DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu 与 WeCom smoke 会使用开发者自行创建的应用和临时 HTTPS tunnel；它们同样只服务于本机 Docker 验收。
 
+如果只需验证本仓库的无凭据启动与 deterministic fake model，可先运行 `./start.sh --demo`。它不需要任何 Secret 文件；覆盖范围和豁免项见 [Fake Demo 覆盖面](demo-fake-coverage.md)。
+
 ## Acceptance from zero
 
 **验收者从零复现（推荐顺序）**

@@ -41,7 +41,7 @@ func main() {
 		return
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Fprintf(os.Stdout, "usage: %s [demo [--confirm]|artifact|preprocess|channel|channel-delivery|gateway|admin|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
+		fmt.Fprintf(os.Stdout, "usage: %s [demo [--confirm]|demo-server|artifact|preprocess|channel|channel-delivery|gateway|admin|worker|audit-relay|audit-query|audit-purge|business-audit-purge|schema-migrate|audit-compliance-migrate|webui-local|webui-local-bootstrap|im-local|wecom-local|prestop]\n", os.Args[0])
 		fmt.Fprintln(os.Stdout, "Runs the selected production dependency/readiness process (artifact is the default).")
 		return
 	}
@@ -102,6 +102,8 @@ func runRole(parent context.Context, getenv func(string) string, logger *roleLog
 		return runWebUILocalRole(parent, getenv, logger)
 	case "webui-local-bootstrap":
 		return runWebUILocalBootstrap(parent, getenv, logger)
+	case "demo-server":
+		return runDemoServer(parent, getenv, logger)
 	case "im-local":
 		return runWebUILocalRole(parent, getenv, logger)
 	case "wecom-local":
