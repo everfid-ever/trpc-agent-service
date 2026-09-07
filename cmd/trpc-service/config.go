@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strconv"
@@ -66,6 +67,7 @@ type productionConfig struct {
 	WorkerBacklogPoll                                            time.Duration
 	WorkerBundleFailureBackoff, WorkerBundleCloseTimeout         time.Duration
 	WorkerGraphCheckpointTTL                                     time.Duration
+	MCPEndpoints                                                 []mcpEndpoint
 
 	GatewayProbeTenant, GatewayAuthSecretRef, GatewayPublicURL           string
 	GatewayAuthSecretVersion, GatewayMaxBody, GatewaySSEReplayLimit      int64
@@ -341,7 +343,71 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		config.PayloadKeyRef == "" || config.S3Region == "" || config.S3Bucket == "" {
 		return productionConfig{}, errors.New("required worker dependency configuration is missing")
 	}
+	if config.MCPEndpoints, err = parseMCPEndpoints(getenv("TRPC_MCP_ENDPOINTS")); err != nil {
+		return productionConfig{}, err
+	}
 	return config, nil
+}
+
+// mcpEndpoint is one reviewed, fixed MCP tool endpoint declared in worker
+// configuration. It is not a tenant-submitted payload: the endpoint must map to
+// exactly one Tool Catalog registration and be bound to a published revision
+// before any Agent can call it. Every field is re-validated by the mcp adapter
+// at assembly time so a malformed declaration refuses startup.
+type mcpEndpoint struct {
+	TenantID      string
+	ToolID        string
+	Version       int64
+	Transport     string
+	ServerURL     string
+	Timeout       time.Duration
+	SecretRef     string
+	SecretVersion int64
+	SecretHeader  string
+	SecretPrefix  string
+}
+
+type mcpEndpointJSON struct {
+	TenantID      string `json:"tenant_id"`
+	ToolID        string `json:"tool_id"`
+	Version       int64  `json:"version"`
+	Transport     string `json:"transport"`
+	ServerURL     string `json:"server_url"`
+	Timeout       string `json:"timeout"`
+	SecretRef     string `json:"secret_ref"`
+	SecretVersion int64  `json:"secret_version"`
+	SecretHeader  string `json:"secret_header"`
+	SecretPrefix  string `json:"secret_prefix"`
+}
+
+func parseMCPEndpoints(raw string) ([]mcpEndpoint, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var specs []mcpEndpointJSON
+	if err := json.Unmarshal([]byte(raw), &specs); err != nil || len(specs) == 0 {
+		return nil, errors.New("invalid TRPC_MCP_ENDPOINTS JSON")
+	}
+	result := make([]mcpEndpoint, 0, len(specs))
+	for _, spec := range specs {
+		endpoint := mcpEndpoint{TenantID: strings.TrimSpace(spec.TenantID), ToolID: strings.TrimSpace(spec.ToolID),
+			Version: spec.Version, Transport: strings.TrimSpace(spec.Transport), ServerURL: strings.TrimSpace(spec.ServerURL),
+			SecretRef: strings.TrimSpace(spec.SecretRef), SecretVersion: spec.SecretVersion,
+			SecretHeader: strings.TrimSpace(spec.SecretHeader), SecretPrefix: spec.SecretPrefix}
+		if endpoint.TenantID == "" || endpoint.ToolID == "" || endpoint.Version < 1 || endpoint.Transport == "" || endpoint.ServerURL == "" {
+			return nil, errors.New("invalid TRPC_MCP_ENDPOINTS entry")
+		}
+		if (endpoint.SecretRef == "") != (endpoint.SecretVersion == 0) {
+			return nil, errors.New("invalid TRPC_MCP_ENDPOINTS secret binding")
+		}
+		var err error
+		if endpoint.Timeout, err = time.ParseDuration(spec.Timeout); err != nil || endpoint.Timeout <= 0 {
+			return nil, errors.New("invalid TRPC_MCP_ENDPOINTS timeout")
+		}
+		result = append(result, endpoint)
+	}
+	return result, nil
 }
 
 func parseWorkerShards(raw string, count int) ([]uint32, error) {

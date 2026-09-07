@@ -53,6 +53,7 @@ import (
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	toolmcp "github.com/liuzengh/trpc-agent-service/trpcservice/tool/mcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 )
 
@@ -108,9 +109,9 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
 	credentialPool := generation.New(secretProvider)
 	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Credentials: credentialPool, Subject: "worker-model"}
-	toolCatalog, err := servicetool.NewCatalog()
+	toolCatalog, err := buildToolCatalog(configValue.MCPEndpoints)
 	if err != nil {
-		return errors.New("tool catalog initialization failed")
+		return fmt.Errorf("tool catalog rejected: %w", err)
 	}
 	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: secretProvider}
 	governanceStore := governancepostgres.New(db)
@@ -419,4 +420,23 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	}
 	lifecycle.MarkStopped()
 	return terminalErr
+}
+
+// buildToolCatalog assembles the process-local, code-owned Tool Catalog from the
+// reviewed fixed MCP endpoints. Every endpoint maps to exactly one registration;
+// a malformed declaration fails here so the worker refuses startup instead of
+// silently running with a half-registered catalog.
+func buildToolCatalog(endpoints []mcpEndpoint) (*servicetool.Catalog, error) {
+	registrations := make([]servicetool.Registration, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		registration, err := toolmcp.NewRegistration(endpoint.TenantID, endpoint.ToolID, endpoint.Version, toolmcp.Config{
+			Transport: endpoint.Transport, ServerURL: endpoint.ServerURL, RemoteToolName: endpoint.ToolID, Timeout: endpoint.Timeout,
+			SecretHeader: endpoint.SecretHeader, SecretPrefix: endpoint.SecretPrefix,
+		}, secrets.SecretRef{Ref: endpoint.SecretRef, Version: endpoint.SecretVersion})
+		if err != nil {
+			return nil, fmt.Errorf("MCP endpoint %q: %w", endpoint.ToolID, err)
+		}
+		registrations = append(registrations, registration)
+	}
+	return servicetool.NewCatalog(registrations...)
 }
