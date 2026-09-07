@@ -3,6 +3,7 @@ package modelclient
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -72,6 +73,58 @@ func TestResolverUsesCredentialGenerationWhenConfigured(t *testing.T) {
 	}
 	if secret.calls != 1 {
 		t.Fatalf("secret resolutions=%d", secret.calls)
+	}
+}
+
+func TestResolverBuildsDeterministicFakeModelWithoutSecretsOrNetwork(t *testing.T) {
+	secret := &secretProviderStub{value: secrets.SecretValue{Bytes: []byte("must-not-be-read"), Version: 1}}
+	resolver := Resolver{Profiles: profileReaderStub{fakeProfile(map[string]string{"response": "fixed reply"})}, Secrets: secret}
+	resolved, err := resolver.ResolveModel(context.Background(), "tenant-a", profile.VersionedRef{ID: "fake", Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &model.Request{Messages: []model.Message{model.NewUserMessage("same input")}}
+	responses, err := resolved.GenerateContent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := <-responses
+	if response == nil || !response.Done || response.Choices[0].Message.Content != "fixed reply" || secret.calls != 0 {
+		t.Fatalf("response=%#v secret calls=%d", response, secret.calls)
+	}
+	if extra := <-responses; extra != nil {
+		t.Fatalf("unexpected extra response=%#v", extra)
+	}
+	again, err := resolved.GenerateContent(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := <-again
+	if second == nil || second.Choices[0].Message.Content != response.Choices[0].Message.Content || second.ID != response.ID || second.Created != response.Created {
+		t.Fatalf("first=%#v second=%#v", response, second)
+	}
+}
+
+func TestResolverFakeModelStreamsConfiguredDeltasDeterministically(t *testing.T) {
+	resolver := Resolver{Profiles: profileReaderStub{fakeProfile(map[string]string{"response": "ignored", "stream_deltas": `["hel","lo","!"]`})}}
+	resolved, err := resolver.ResolveModel(context.Background(), "tenant-a", profile.VersionedRef{ID: "fake", Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responses, err := resolved.GenerateContent(context.Background(), &model.Request{GenerationConfig: model.GenerationConfig{Stream: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []string
+	var terminal *model.Response
+	for response := range responses {
+		deltas = append(deltas, response.Choices[0].Delta.Content)
+		if response.Done {
+			terminal = response
+		}
+	}
+	if got := strings.Join(deltas, ""); got != "hello!" || terminal == nil || terminal.Usage == nil || terminal.Usage.CompletionTokens != len([]rune("hello!")) {
+		t.Fatalf("deltas=%q terminal=%#v", got, terminal)
 	}
 }
 
@@ -146,4 +199,9 @@ func validProfile() provider.ModelProfileSnapshot {
 		Provider: "deepseek", Model: "deepseek-v4-flash-vision-exp", Endpoint: "https://api.deepseek.com",
 		Options:   map[string]string{"timeout_ms": "1000", "channel_buffer_size": "32"},
 		SecretRef: secrets.SecretRef{Ref: "secret/model", Version: 9}, ContentDigest: "digest", Version: 3}
+}
+
+func fakeProfile(options map[string]string) provider.ModelProfileSnapshot {
+	return provider.ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "fake", Status: "active", SchemaVersion: 1,
+		Provider: "fake", Model: "fake-deterministic-v1", Options: options, ContentDigest: "digest", Version: 1}
 }

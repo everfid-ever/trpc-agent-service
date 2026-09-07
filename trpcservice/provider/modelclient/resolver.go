@@ -4,6 +4,7 @@ package modelclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strconv"
@@ -27,7 +28,8 @@ const (
 	// by default, which is correct for the regular v4 models but would silently
 	// replace a vision image with an attachment-unavailable hint. Keep this
 	// narrow until another DeepSeek vision model is explicitly catalogued.
-	deepSeekVisionModel = "deepseek-v4-flash-vision-exp"
+	deepSeekVisionModel    = "deepseek-v4-flash-vision-exp"
+	fakeDeterministicModel = "fake-deterministic-v1"
 )
 
 type ProfileReader interface {
@@ -44,7 +46,7 @@ type Resolver struct {
 }
 
 func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile.VersionedRef) (model.Model, error) {
-	if r.Profiles == nil || (r.Secrets == nil && r.Credentials == nil) || strings.TrimSpace(r.Subject) != r.Subject || r.Subject == "" {
+	if r.Profiles == nil {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
 	if tenantID == "" || ref.ID == "" || ref.Version < 1 {
@@ -63,7 +65,11 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 	if value.Status != "active" && value.Status != "suspended" {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	if value.Provider != "deepseek" || value.SchemaVersion != 1 || value.Model == "" || value.SecretRef.Ref == "" || value.SecretRef.Version < 1 {
+	if value.Provider == "fake" {
+		return resolveFakeModel(value)
+	}
+	if value.Provider != "deepseek" || value.SchemaVersion != 1 || value.Model == "" || value.SecretRef.Ref == "" || value.SecretRef.Version < 1 ||
+		(r.Secrets == nil && r.Credentials == nil) || strings.TrimSpace(r.Subject) != r.Subject || r.Subject == "" {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
 	if err := validateEndpoint(value.Endpoint); err != nil {
@@ -102,6 +108,82 @@ func (r Resolver) ResolveModel(ctx context.Context, tenantID string, ref profile
 		resolved = timeoutRetryModel{Model: resolved, attempts: retryAttempts}
 	}
 	return resolved, nil
+}
+
+type fakeModel struct {
+	modelName string
+	response  string
+	deltas    []string
+}
+
+func resolveFakeModel(value provider.ModelProfileSnapshot) (model.Model, error) {
+	if value.SchemaVersion != 1 || value.Model != fakeDeterministicModel || value.Endpoint != "" || value.SecretRef.Ref != "" || value.SecretRef.Version != 0 {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	response, exists := value.Options["response"]
+	if !exists || response == "" || len(response) > 65536 {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	var deltas []string
+	if script, exists := value.Options["stream_deltas"]; exists {
+		if err := json.Unmarshal([]byte(script), &deltas); err != nil || len(deltas) == 0 || len(deltas) > 128 {
+			return nil, runtime.ErrCapabilityUnsupported
+		}
+		var total int
+		for _, delta := range deltas {
+			if delta == "" {
+				return nil, runtime.ErrCapabilityUnsupported
+			}
+			total += len(delta)
+			if total > 65536 {
+				return nil, runtime.ErrCapabilityUnsupported
+			}
+		}
+	}
+	return fakeModel{modelName: value.Model, response: response, deltas: deltas}, nil
+}
+
+func (m fakeModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	stream := request != nil && request.GenerationConfig.Stream
+	deltas := m.deltas
+	if len(deltas) == 0 {
+		deltas = []string{m.response}
+	}
+	content := m.response
+	if len(m.deltas) != 0 {
+		content = strings.Join(m.deltas, "")
+	}
+	if !stream {
+		responses := make(chan *model.Response, 1)
+		responses <- fakeResponse(m.modelName, content, "", true)
+		close(responses)
+		return responses, nil
+	}
+	responses := make(chan *model.Response, len(deltas))
+	for index, delta := range deltas {
+		responses <- fakeResponse(m.modelName, content, delta, index == len(deltas)-1)
+	}
+	close(responses)
+	return responses, nil
+}
+
+func (m fakeModel) Info() model.Info { return model.Info{Name: m.modelName} }
+
+func fakeResponse(modelName, content, delta string, done bool) *model.Response {
+	response := &model.Response{ID: "fake-deterministic-response", Object: model.ObjectTypeChatCompletion,
+		Model: modelName, Done: done, Choices: []model.Choice{{Index: 0}}}
+	if delta == "" {
+		response.Choices[0].Message = model.NewAssistantMessage(content)
+	} else {
+		response.Choices[0].Delta = model.Message{Role: model.RoleAssistant, Content: delta}
+	}
+	if done {
+		response.Usage = &model.Usage{PromptTokens: 1, CompletionTokens: int(len([]rune(content))), TotalTokens: 1 + int(len([]rune(content)))}
+	}
+	return response
 }
 
 type timeoutRetryModel struct {

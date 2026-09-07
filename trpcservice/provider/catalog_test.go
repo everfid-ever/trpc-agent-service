@@ -76,6 +76,31 @@ func TestDeepSeekModelSchemaPinsOfficialProductionSurface(t *testing.T) {
 	}
 }
 
+func TestFakeModelSchemaIsCredentialFreeAndScripted(t *testing.T) {
+	catalog, err := NewCatalog(FakeModelSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeModel(ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "fake", ProfileKey: "fake",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "fake", Model: "fake-deterministic-v1",
+		Options: map[string]string{"response": "ignored in stream", "stream_deltas": `["hello"," world"]`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.SecretRef.Ref != "" || value.Options["response"] != "ignored in stream" || value.Options["stream_deltas"] != `["hello"," world"]` || len(value.ContentDigest) != 64 {
+		t.Fatalf("fake profile=%#v", value)
+	}
+	value.SecretRef = secrets.SecretRef{Ref: "forbidden", Version: 1}
+	if _, err := catalog.NormalizeModel(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("fake secret=%v", err)
+	}
+	value.SecretRef = secrets.SecretRef{}
+	value.Options["stream_deltas"] = `{"not":"an array"}`
+	if _, err := catalog.NormalizeModel(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("fake script=%v", err)
+	}
+}
+
 func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	catalog, err := NewCatalog(QdrantVectorSchema())
 	if err != nil {

@@ -554,7 +554,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema())
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}

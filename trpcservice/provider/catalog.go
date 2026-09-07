@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
@@ -84,6 +85,21 @@ func DeepSeekModelSchema() Schema {
 			"channel_buffer_size":    {Type: OptionInteger, Default: "256", Min: 1, Max: 4096},
 		},
 		SecretRequirement: "required",
+	}
+}
+
+// FakeModelSchema is an intentionally local-only deterministic model surface
+// for smoke tests and demos. It carries no endpoint and rejects SecretRef, so
+// selecting it cannot cause an outbound credential or network dependency.
+func FakeModelSchema() Schema {
+	return Schema{
+		Kind: KindModel, Name: "fake", SchemaVersion: 1,
+		AllowedModels:     []string{"fake-deterministic-v1"},
+		SecretRequirement: "forbidden",
+		OptionRules: map[string]OptionRule{
+			"response":      {Type: OptionString, Default: "fake response"},
+			"stream_deltas": {Type: OptionString},
+		},
 	}
 }
 
@@ -202,6 +218,11 @@ func (c *Catalog) NormalizeModel(input ModelProfileSnapshot) (ModelProfileSnapsh
 	if err != nil {
 		return ModelProfileSnapshot{}, err
 	}
+	if schema.Name == "fake" && schema.SchemaVersion == 1 {
+		if err := validateFakeModelOptions(input.Model, input.Endpoint, options); err != nil {
+			return ModelProfileSnapshot{}, err
+		}
+	}
 	if err := validateSecret(input.SecretRef, schema.SecretRequirement); err != nil {
 		return ModelProfileSnapshot{}, err
 	}
@@ -217,6 +238,31 @@ func (c *Catalog) NormalizeModel(input ModelProfileSnapshot) (ModelProfileSnapsh
 		Generation    map[string]any
 	}{input.SchemaVersion, input.Provider, input.Model, input.Endpoint, input.Options, input.SecretRef, input.Generation})
 	return input, err
+}
+
+func validateFakeModelOptions(model, endpoint string, options map[string]string) error {
+	if model != "fake-deterministic-v1" || endpoint != "" || !utf8.ValidString(options["response"]) || len(options["response"]) > 65536 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	script, exists := options["stream_deltas"]
+	if !exists {
+		return nil
+	}
+	var deltas []string
+	if err := json.Unmarshal([]byte(script), &deltas); err != nil || len(deltas) == 0 || len(deltas) > 128 {
+		return runtime.ErrCapabilityUnsupported
+	}
+	var total int
+	for _, delta := range deltas {
+		if delta == "" || !utf8.ValidString(delta) {
+			return runtime.ErrCapabilityUnsupported
+		}
+		total += len(delta)
+		if total > 65536 {
+			return runtime.ErrCapabilityUnsupported
+		}
+	}
+	return nil
 }
 
 func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfileSnapshot, error) {
