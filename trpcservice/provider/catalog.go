@@ -125,6 +125,21 @@ func QdrantVectorSchema() Schema {
 	}
 }
 
+// PostgresBackendSchema describes the shared PostgreSQL persistence plane.
+// Its connection is owned by the process deployment, never by an individual
+// tenant profile, so a tenant CredentialRef is deliberately forbidden.
+func PostgresBackendSchema() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "postgres", SchemaVersion: 1,
+		SecretRequirement: "forbidden",
+		Capabilities: CapabilitySet{
+			"atomic_turn_commit": true,
+			"strong_ryw":         true,
+			"summary_cas":        true,
+		},
+	}
+}
+
 func NewCatalog(schemas ...Schema) (*Catalog, error) {
 	catalog := &Catalog{schemas: make(map[schemaKey]Schema, len(schemas))}
 	for _, schema := range schemas {

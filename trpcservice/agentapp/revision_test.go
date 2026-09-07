@@ -23,14 +23,14 @@ func TestContentDigestNormalizesReferenceOrder(t *testing.T) {
 
 func TestNormalizeRevisionCanonicalizesNilObjectFields(t *testing.T) {
 	revision := NormalizeRevision(Revision{})
-	if revision.GenerationConfig == nil || revision.RuntimePolicy == nil {
-		t.Fatalf("object fields were not normalized: %#v", revision)
+	if revision.GenerationConfig == nil || revision.RuntimePolicy == nil || revision.FallbackModelRefs == nil {
+		t.Fatalf("nullable fields were not normalized: %#v", revision)
 	}
 	nilDigest, err := (Revision{}).ComputeContentDigest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	emptyDigest, err := (Revision{GenerationConfig: map[string]any{}, RuntimePolicy: map[string]any{}}).ComputeContentDigest()
+	emptyDigest, err := (Revision{GenerationConfig: map[string]any{}, RuntimePolicy: map[string]any{}, FallbackModelRefs: []VersionedRef{}}).ComputeContentDigest()
 	if err != nil {
 		t.Fatal(err)
 	}

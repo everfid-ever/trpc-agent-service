@@ -255,6 +255,12 @@ func NormalizeRevision(r Revision) Revision {
 	if r.RuntimePolicy == nil {
 		r.RuntimePolicy = map[string]any{}
 	}
+	// PostgreSQL persists this field as a JSON array and rejects JSON null.
+	// Canonicalizing an omitted fallback list also keeps revision hashes stable
+	// across draft creation and reload.
+	if r.FallbackModelRefs == nil {
+		r.FallbackModelRefs = []VersionedRef{}
+	}
 	return r
 }
 

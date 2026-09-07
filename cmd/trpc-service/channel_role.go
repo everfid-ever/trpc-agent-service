@@ -134,7 +134,9 @@ func runChannelRole(parent context.Context, getenv func(string) string, logger *
 		}},
 	}
 	if progressRedis != nil {
-		dependencies = append(dependencies, health.Dependency{Name: "webui_progress_redis", Probe: progressRedis.Ping})
+		dependencies = append(dependencies, health.Dependency{Name: "webui_progress_redis", Probe: func(ctx context.Context) error {
+			return progressRedis.Ping(ctx).Err()
+		}})
 	}
 	monitor, err := health.NewMonitor(lifecycle, dependencies, configValue.ProbeTimeout, configValue.ProbeInterval)
 	if err != nil {

@@ -97,7 +97,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("payload key configuration rejected")
 	}
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.QdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}

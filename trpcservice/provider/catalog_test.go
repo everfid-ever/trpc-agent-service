@@ -125,3 +125,23 @@ func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 		t.Fatalf("secret-bearing endpoint: %v", err)
 	}
 }
+
+func TestPostgresBackendSchemaIsCredentialFreeAndCapabilityBound(t *testing.T) {
+	catalog, err := NewCatalog(PostgresBackendSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeBackend(BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "pg", ProfileKey: "pg",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "postgres",
+		Capabilities: CapabilitySet{"atomic_turn_commit": true, "strong_ryw": true, "summary_cas": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.CredentialRef.Ref != "" || len(value.ContentDigest) != 64 {
+		t.Fatalf("postgres backend=%#v", value)
+	}
+	value.CredentialRef = secrets.SecretRef{Ref: "forbidden", Version: 1}
+	if _, err := catalog.NormalizeBackend(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("credential accepted: %v", err)
+	}
+}
