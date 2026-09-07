@@ -16,6 +16,15 @@ type CapabilitySet map[string]bool
 type GenerationConfigV1 map[string]any
 type RuntimePolicyV1 map[string]any
 
+// ExecutionBudgetV1 is the immutable execution limiter projected from the
+// published Agent App revision.
+type ExecutionBudgetV1 struct {
+	MaxLLMCalls             int
+	MaxToolCalls            int
+	MaxParallelTools        int
+	ExecutionTimeoutSeconds int
+}
+
 type ExecutionProfileKey struct {
 	TenantID         string
 	TenantVersion    int64
@@ -45,5 +54,6 @@ type ExecutionProfileSnapshot struct {
 	KnowledgeRefs       []VersionedRef
 	GenerationConfig    GenerationConfigV1
 	RuntimePolicy       RuntimePolicyV1
+	ExecutionBudget     ExecutionBudgetV1
 	BackendRequirements CapabilitySet
 }

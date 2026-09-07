@@ -72,6 +72,25 @@ type AgentSpecV1 struct {
 	Checkpoint     CheckpointPolicyV1 `json:"checkpoint"`
 }
 
+// ExecutionBudgetV1 is the bounded, per-execution portion of a revision's
+// runtime policy. A zero value means that particular limit is not set. These
+// fields deliberately remain separate from tenant billing budgets: they are
+// local circuit breakers, not a reservation or settlement ledger.
+type ExecutionBudgetV1 struct {
+	MaxLLMCalls             int `json:"max_llm_calls,omitempty"`
+	MaxToolCalls            int `json:"max_tool_calls,omitempty"`
+	MaxParallelTools        int `json:"max_parallel_tools,omitempty"`
+	ExecutionTimeoutSeconds int `json:"execution_timeout_seconds,omitempty"`
+}
+
+func (b ExecutionBudgetV1) Validate() error {
+	if b.MaxLLMCalls < 0 || b.MaxToolCalls < 0 || b.MaxParallelTools < 0 || b.ExecutionTimeoutSeconds < 0 ||
+		b.MaxLLMCalls > 10000 || b.MaxToolCalls > 10000 || b.MaxParallelTools > 1000 || b.ExecutionTimeoutSeconds > 86400 {
+		return fmt.Errorf("%w: execution budget", ErrInvalid)
+	}
+	return nil
+}
+
 type Revision struct {
 	TenantID            string
 	AgentAppID          string
@@ -92,6 +111,7 @@ type Revision struct {
 	KnowledgeRefs       []VersionedRef
 	GenerationConfig    map[string]any
 	RuntimePolicy       map[string]any
+	ExecutionBudget     ExecutionBudgetV1
 	ContentDigest       string
 	PublishedAt         *time.Time
 	CreatedAt           time.Time
@@ -105,6 +125,9 @@ func (r Revision) ValidateDraft() error {
 	}
 	if !isSupportedAgentKind(r.AgentKind) {
 		return fmt.Errorf("%w: unsupported agent kind %q", ErrInvalid, r.AgentKind)
+	}
+	if err := r.ExecutionBudget.Validate(); err != nil {
+		return err
 	}
 	if r.AgentKind == AgentKindLLM {
 		if r.Instruction == "" || r.ModelProfileID == "" || r.ModelProfileVersion < 1 || !r.AgentSpec.empty() {
@@ -303,9 +326,10 @@ func (r Revision) ComputeContentDigest() (string, error) {
 		KnowledgeRefs       []VersionedRef
 		GenerationConfig    map[string]any
 		RuntimePolicy       map[string]any
+		ExecutionBudget     ExecutionBudgetV1
 	}{r.AgentKind, r.SchemaVersion, r.AgentSpec, r.Description, r.Instruction,
 		r.GlobalInstruction, r.ModelProfileID, r.ModelProfileVersion, r.FallbackModelRefs,
-		tools, skills, knowledge, r.GenerationConfig, r.RuntimePolicy}
+		tools, skills, knowledge, r.GenerationConfig, r.RuntimePolicy, r.ExecutionBudget}
 	b, err := json.Marshal(input)
 	if err != nil {
 		return "", fmt.Errorf("digest revision: %w", err)

@@ -111,6 +111,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if snapshot.TenantVersion != envelope.TenantVersion || snapshot.AgentAppVersion != envelope.AgentAppVersion {
 		return runtime.ErrVersionMismatch
 	}
+	if snapshot.ExecutionBudget != (profile.ExecutionBudgetV1{MaxLLMCalls: envelope.ExecutionBudget.MaxLLMCalls,
+		MaxToolCalls: envelope.ExecutionBudget.MaxToolCalls, MaxParallelTools: envelope.ExecutionBudget.MaxParallelTools,
+		ExecutionTimeoutSeconds: envelope.ExecutionBudget.ExecutionTimeoutSeconds}) {
+		return runtime.ErrVersionMismatch
+	}
 	modelRef, err := executionModelRef(ctx, w.Profiles, snapshot)
 	if err != nil {
 		return fmt.Errorf("resolve execution model: %w", err)
@@ -250,7 +255,12 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 	}()
 
-	runCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, PayloadKeyVersion: payload.KeyVersion})
+	runCtx := runtime.WithExecutionBudget(runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID, SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, PayloadKeyVersion: payload.KeyVersion}), envelope.ExecutionBudget)
+	var cancelBudget context.CancelFunc
+	if envelope.ExecutionBudget.ExecutionTimeoutSeconds > 0 {
+		runCtx, cancelBudget = context.WithTimeout(runCtx, time.Duration(envelope.ExecutionBudget.ExecutionTimeoutSeconds)*time.Second)
+		defer cancelBudget()
+	}
 	runOptions := []agentcore.RunOption{agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID)}
 	if w.Governance != nil {
 		toolRule := func(value agenttool.Tool) governance.Decision {
@@ -314,10 +324,15 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			if resolveErr != nil {
 				return resolveErr
 			}
-			confirmedCtx := runtime.WithExecutionContext(ctx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
+			confirmedCtx := runtime.WithExecutionContext(runCtx, runtime.ExecutionContext{TenantID: envelope.TenantID, RequestID: envelope.RequestID,
 				SubjectID: envelope.UserID, PolicyVersion: envelope.PolicyVersion, GrantID: grant.GrantID, GrantVersion: grant.Version,
 				ToolCallID: call.ID, ArgsDigest: continuation.ArgsDigest, PayloadKeyVersion: payload.KeyVersion})
+			release, budgetErr := runtime.BeginToolCall(confirmedCtx)
+			if budgetErr != nil {
+				return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, budgetErr)
+			}
 			result, callErr := callable.Call(confirmedCtx, call.Function.Arguments)
+			release()
 			if callErr != nil {
 				attempt, attemptErr := w.Confirmations.GetToolAttempt(ctx, envelope.TenantID, grant.GrantID)
 				if attemptErr == nil && attempt.State == governance.ToolAttemptFailed {
@@ -383,12 +398,18 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		progress = &progressEmitter{publisher: w.Progress, envelope: envelope}
 		progress.publish(ProgressRunStarted, "")
 	}
-	runResult, err := consumeRunnerEventsWithProgress(ctx, events, func(delta string) {
+	runResult, err := consumeRunnerEventsWithProgress(runCtx, events, func(delta string) {
 		progress.publish(ProgressMessageDelta, delta)
 	})
 	if err != nil {
 		closeRunner(run, events, w.EventDrainTimeout)
 		runnerClosed = true
+		if violation := runtime.ExecutionBudgetViolation(runCtx); violation != nil {
+			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, violation)
+		}
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return w.commitBudgetTerminal(ctx, turn, envelope, head, fence, beforeCommit, context.DeadlineExceeded)
+		}
 		return fmt.Errorf("consume agent graph events: %w", err)
 	}
 	if continuation != nil {
@@ -657,6 +678,33 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 		CommitID: envelope.RequestID + ":" + string(outcome) + ":governance", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
 		ExpectedVersion: head.Version, Outcome: outcome, Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "governance:" + decision.DecisionID,
 			PayloadRef: "governance://" + envelope.TenantID + "/" + decision.DecisionID, EventSeq: 1,
+			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}})
+	if errors.Is(err, runtime.ErrAlreadyTerminal) {
+		return nil
+	}
+	return err
+}
+
+// commitBudgetTerminal records a bounded execution failure without touching
+// governance's billing reservation/settlement path. The audit fact names the
+// exact local circuit breaker which stopped the run.
+func (w RunnerExecutor) commitBudgetTerminal(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope, head sessionstore.SessionHead,
+	fence uint64, beforeCommit func(context.Context) error, cause error,
+) error {
+	if turn != nil {
+		_ = turn.Rollback(ctx)
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(ctx); err != nil {
+			return err
+		}
+	}
+	reason := runtime.ExecutionBudgetReason(cause)
+	_, err := w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: head.SessionKey, RequestID: envelope.RequestID,
+		CommitID: envelope.RequestID + ":budget:" + reason, Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
+		ExpectedVersion: head.Version, Outcome: runtime.OutcomeFailed,
+		Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "execution-budget:" + envelope.RequestID,
+			PayloadRef: "execution-budget://" + envelope.TenantID + "/" + envelope.RequestID + "/" + reason, EventSeq: 1,
 			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil

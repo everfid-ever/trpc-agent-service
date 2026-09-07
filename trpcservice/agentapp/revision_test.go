@@ -62,3 +62,27 @@ func TestFallbackModelsAreOrderedAndPartOfRevisionDigest(t *testing.T) {
 		t.Fatalf("primary repeated as fallback should be rejected: %v", revision.ValidateDraft())
 	}
 }
+
+func TestExecutionBudgetIsValidatedAndPartOfRevisionDigest(t *testing.T) {
+	revision := Revision{TenantID: "tenant", AgentAppID: "app", Revision: 1, DraftVersion: 1, AgentKind: AgentKindLLM, SchemaVersion: 1, Instruction: "help", ModelProfileID: "model", ModelProfileVersion: 1,
+		ExecutionBudget: ExecutionBudgetV1{MaxLLMCalls: 2, MaxToolCalls: 3, MaxParallelTools: 1, ExecutionTimeoutSeconds: 30}}
+	if err := revision.ValidateDraft(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := revision.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision.ExecutionBudget.MaxLLMCalls++
+	second, err := revision.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("execution budget must affect the published revision digest")
+	}
+	revision.ExecutionBudget.MaxLLMCalls = -1
+	if !errors.Is(revision.ValidateDraft(), ErrInvalid) {
+		t.Fatalf("negative budget accepted: %v", revision.ValidateDraft())
+	}
+}

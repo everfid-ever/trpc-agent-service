@@ -11,14 +11,36 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 5 {
-		t.Fatalf("migrations=%d, want baseline plus release, memory, outbound content, and model fallback migrations", len(all))
+	if len(all) != 6 {
+		t.Fatalf("migrations=%d, want baseline plus release, memory, outbound content, model fallback, and execution budget migrations", len(all))
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
 		t.Fatalf("migration=%#v", migration)
 	}
 	return migration
+}
+
+func TestExecutionBudgetMigrationIsTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration := all[5]
+	if migration.Version != "000006" || migration.Name != "execution_budgets" {
+		t.Fatalf("migration=%#v", migration)
+	}
+	if _, err := transactionBody(migration.Up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transactionBody(migration.Down); err != nil {
+		t.Fatal(err)
+	}
+	for _, clause := range []string{"max_llm_calls", "max_tool_calls", "max_parallel_tools", "execution_timeout_seconds", "execution_record_hydrate_execution_budget"} {
+		if !strings.Contains(migration.Up, clause) {
+			t.Errorf("execution budget migration lacks %q", clause)
+		}
+	}
 }
 
 func TestConfigReleaseMigrationIsTransactionWrapped(t *testing.T) {

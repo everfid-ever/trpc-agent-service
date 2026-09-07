@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -92,6 +93,20 @@ type instrumentedModel struct {
 	provider telemetry.Provider
 }
 
+// budgetedModel is always installed, including when tracing is disabled. The
+// controller itself is opt-in via the Worker execution context, so ordinary
+// callers retain their existing behavior.
+type budgetedModel struct{ inner model.Model }
+
+func (m budgetedModel) Info() model.Info { return m.inner.Info() }
+
+func (m budgetedModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
+	if err := runtime.ConsumeLLMCall(ctx); err != nil {
+		return nil, err
+	}
+	return m.inner.GenerateContent(ctx, request)
+}
+
 func (m instrumentedModel) Info() model.Info { return m.inner.Info() }
 
 func (m instrumentedModel) GenerateContent(ctx context.Context, request *model.Request) (<-chan *model.Response, error) {
@@ -171,6 +186,26 @@ type instrumentedCallable struct {
 	provider telemetry.Provider
 }
 
+type budgetedCallable struct{ inner tool.CallableTool }
+
+func (t budgetedCallable) Declaration() *tool.Declaration { return t.inner.Declaration() }
+
+func (t budgetedCallable) Call(ctx context.Context, arguments []byte) (any, error) {
+	release, err := runtime.BeginToolCall(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return t.inner.Call(ctx, arguments)
+}
+
+func (t budgetedCallable) GovernanceToolRef() governance.VersionedRef {
+	if versioned, ok := t.inner.(governance.VersionedTool); ok {
+		return versioned.GovernanceToolRef()
+	}
+	return governance.VersionedRef{}
+}
+
 func (t instrumentedCallable) Declaration() *tool.Declaration { return t.inner.Declaration() }
 
 func (t instrumentedCallable) Call(ctx context.Context, arguments []byte) (any, error) {
@@ -215,6 +250,22 @@ func instrumentCallables(provider telemetry.Provider, values []tool.Tool) []tool
 	return result
 }
 
+func budgetCallables(values []tool.Tool) []tool.Tool {
+	result := make([]tool.Tool, len(values))
+	for index, value := range values {
+		callable, ok := value.(tool.CallableTool)
+		if !ok || callable == nil {
+			result[index] = value
+			continue
+		}
+		result[index] = budgetedCallable{inner: callable}
+	}
+	return result
+}
+
 var _ model.Model = instrumentedModel{}
+var _ model.Model = budgetedModel{}
 var _ tool.CallableTool = instrumentedCallable{}
+var _ tool.CallableTool = budgetedCallable{}
 var _ governance.VersionedTool = instrumentedCallable{}
+var _ governance.VersionedTool = budgetedCallable{}

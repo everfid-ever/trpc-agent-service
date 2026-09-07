@@ -61,6 +61,10 @@ func (s *Store) ResolveAuditEvent(ctx context.Context, record messaging.OutboxRe
 		if err := s.resolveConfirmation(ctx, record, &event, "consumed"); err != nil {
 			return audit.Event{}, err
 		}
+	case strings.HasPrefix(record.PayloadRef, "execution-budget://"):
+		if err := s.resolveExecutionBudget(ctx, record, &event); err != nil {
+			return audit.Event{}, err
+		}
 	default:
 		if err := s.resolveExecution(ctx, record.TenantID, record.AggregateID, &event); err == nil {
 			event.RequestID = record.AggregateID
@@ -72,6 +76,21 @@ func (s *Store) ResolveAuditEvent(ctx context.Context, record messaging.OutboxRe
 		return audit.Event{}, err
 	}
 	return event, nil
+}
+
+func (s *Store) resolveExecutionBudget(ctx context.Context, record messaging.OutboxRecord, event *audit.Event) error {
+	parts, err := scopedParts(record.PayloadRef, "execution-budget://", record.TenantID, 2)
+	if err != nil || len(parts) != 2 || parts[0] != record.AggregateID {
+		return runtime.ErrInvalidEnvelope
+	}
+	switch parts[1] {
+	case "max_llm_calls", "max_tool_calls", "max_parallel_tools", "execution_timeout_seconds":
+	default:
+		return runtime.ErrInvalidEnvelope
+	}
+	event.Action, event.Decision, event.ReasonCode = "execution.budget", "denied", parts[1]
+	event.RequestID = parts[0]
+	return s.resolveExecution(ctx, record.TenantID, parts[0], event)
 }
 
 func (s *Store) resolveArtifactQuarantine(ctx context.Context, record messaging.OutboxRecord, event *audit.Event) error {

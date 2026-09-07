@@ -14,23 +14,24 @@ const CurrentEnvelopeSchemaVersion uint16 = 1
 // ExecutionEnvelope is the only cross-process execution payload. Large or
 // sensitive data is represented by references.
 type ExecutionEnvelope struct {
-	SchemaVersion      uint16    `json:"schema_version"`
-	TenantID           string    `json:"tenant_id"`
-	TenantVersion      int64     `json:"tenant_version"`
-	AgentAppID         string    `json:"agent_app_id"`
-	AgentAppVersion    int64     `json:"agent_app_version"`
-	AgentAppRevision   int64     `json:"agent_app_revision"`
-	AgentContentDigest string    `json:"agent_content_digest"`
-	ConfigVersion      int64     `json:"config_version"`
-	PolicyVersion      int64     `json:"policy_version"`
-	RequestID          string    `json:"request_id"`
-	SessionID          string    `json:"session_id"`
-	UserID             string    `json:"user_id"`
-	Channel            string    `json:"channel"`
-	InputSeq           uint64    `json:"input_seq"`
-	PayloadRef         string    `json:"payload_ref"`
-	TraceParent        string    `json:"traceparent,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
+	SchemaVersion      uint16          `json:"schema_version"`
+	TenantID           string          `json:"tenant_id"`
+	TenantVersion      int64           `json:"tenant_version"`
+	AgentAppID         string          `json:"agent_app_id"`
+	AgentAppVersion    int64           `json:"agent_app_version"`
+	AgentAppRevision   int64           `json:"agent_app_revision"`
+	AgentContentDigest string          `json:"agent_content_digest"`
+	ConfigVersion      int64           `json:"config_version"`
+	PolicyVersion      int64           `json:"policy_version"`
+	ExecutionBudget    ExecutionBudget `json:"execution_budget"`
+	RequestID          string          `json:"request_id"`
+	SessionID          string          `json:"session_id"`
+	UserID             string          `json:"user_id"`
+	Channel            string          `json:"channel"`
+	InputSeq           uint64          `json:"input_seq"`
+	PayloadRef         string          `json:"payload_ref"`
+	TraceParent        string          `json:"traceparent,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
 }
 
 // Validate performs structural validation only. Trust is established by
@@ -45,6 +46,9 @@ func (e ExecutionEnvelope) Validate() error {
 		e.RequestID == "" || e.SessionID == "" || e.UserID == "" ||
 		e.Channel == "" || e.InputSeq < 1 || e.PayloadRef == "" || e.CreatedAt.IsZero() {
 		return ErrInvalidEnvelope
+	}
+	if err := e.ExecutionBudget.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

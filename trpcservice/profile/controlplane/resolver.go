@@ -213,6 +213,9 @@ func project(key profile.ExecutionProfileKey, app agentapp.AgentApp, revision ag
 		FallbackModelRefs: modelRefs(revision.FallbackModelRefs),
 		ToolRefs:          tools, SkillRefs: append([]profile.SkillRef(nil), revision.SkillRefs...), KnowledgeRefs: knowledge,
 		GenerationConfig: cloneMap(revision.GenerationConfig), RuntimePolicy: cloneMap(revision.RuntimePolicy),
+		ExecutionBudget: profile.ExecutionBudgetV1{MaxLLMCalls: revision.ExecutionBudget.MaxLLMCalls,
+			MaxToolCalls: revision.ExecutionBudget.MaxToolCalls, MaxParallelTools: revision.ExecutionBudget.MaxParallelTools,
+			ExecutionTimeoutSeconds: revision.ExecutionBudget.ExecutionTimeoutSeconds},
 		BackendRequirements: requirements,
 	}
 }

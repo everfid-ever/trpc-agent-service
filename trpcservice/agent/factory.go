@@ -148,7 +148,7 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		if err != nil {
 			return nil, false, err
 		}
-		models = append(models, instrumentModel(f.Telemetry, resolved))
+		models = append(models, instrumentModel(f.Telemetry, budgetedModel{inner: resolved}))
 	}
 	resolvedModel := models[0]
 	if len(models) > 1 {
@@ -192,7 +192,7 @@ func (f Factory) buildLLM(ctx context.Context, snapshot profile.ExecutionProfile
 		if err != nil {
 			return nil, false, err
 		}
-		options = append(options, llmagent.WithTools(instrumentCallables(f.Telemetry, guarded)))
+		options = append(options, llmagent.WithTools(instrumentCallables(f.Telemetry, budgetCallables(guarded))))
 	}
 	if len(snapshot.SkillRefs) != 0 {
 		if f.Skills == nil {

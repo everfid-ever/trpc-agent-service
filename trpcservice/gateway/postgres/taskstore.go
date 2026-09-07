@@ -68,7 +68,7 @@ func (s *TaskStore) GetExecution(ctx context.Context, key gateway.ExecutionKey) 
 	var created time.Time
 	err := s.db.QueryRowContext(ctx, `SELECT e.tenant_id,e.tenant_version,e.agent_app_id,e.agent_app_version,
 e.agent_app_revision,e.agent_content_digest,e.config_version,e.policy_version,e.request_id,e.session_id,e.user_id,e.channel,
-e.input_seq,e.payload_ref,COALESCE(e.traceparent,''),e.outcome,COALESCE(e.result_ref,''),e.created_at,e.version,
+e.input_seq,e.payload_ref,COALESCE(e.traceparent,''),e.max_llm_calls,e.max_tool_calls,e.max_parallel_tools,e.execution_timeout_seconds,e.outcome,COALESCE(e.result_ref,''),e.created_at,e.version,
 (e.cancel_requested_at IS NOT NULL OR t.status='disabled'),
 CASE WHEN e.cancel_requested_at IS NOT NULL THEN e.cancel_version WHEN t.status='disabled' THEN t.version ELSE 0 END
 FROM execution_record e JOIN tenant t ON t.tenant_id=e.tenant_id
@@ -77,7 +77,9 @@ WHERE e.tenant_id=$1 AND e.request_id=$2`, key.TenantID, key.RequestID).
 			&result.Envelope.AgentAppVersion, &result.Envelope.AgentAppRevision, &result.Envelope.AgentContentDigest,
 			&result.Envelope.ConfigVersion, &result.Envelope.PolicyVersion, &result.Envelope.RequestID,
 			&result.Envelope.SessionID, &result.Envelope.UserID, &result.Envelope.Channel, &result.Envelope.InputSeq,
-			&result.Envelope.PayloadRef, &result.Envelope.TraceParent, &result.Outcome, &result.ResultRef, &created,
+			&result.Envelope.PayloadRef, &result.Envelope.TraceParent, &result.Envelope.ExecutionBudget.MaxLLMCalls,
+			&result.Envelope.ExecutionBudget.MaxToolCalls, &result.Envelope.ExecutionBudget.MaxParallelTools,
+			&result.Envelope.ExecutionBudget.ExecutionTimeoutSeconds, &result.Outcome, &result.ResultRef, &created,
 			&result.Version, &result.CancelRequested, &result.CancelVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return gateway.ExecutionStatus{}, runtime.ErrNotFound
@@ -153,6 +155,11 @@ FROM inspect_execution_wakeup($1,$2)`, key.TenantID, key.RequestID).
 		return gateway.WakeupCandidate{}, translate(err)
 	}
 	result.Execution.Envelope.CreatedAt = created
+	status, statusErr := s.GetExecution(ctx, key)
+	if statusErr != nil {
+		return gateway.WakeupCandidate{}, statusErr
+	}
+	result.Execution.Envelope.ExecutionBudget = status.Envelope.ExecutionBudget
 	return result, nil
 }
 
