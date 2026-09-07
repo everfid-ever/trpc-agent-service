@@ -15,11 +15,28 @@
 
 ## 快速开始
 
-前置条件：Docker Desktop（含 Docker Compose v2），以及一个可消费的 DeepSeek API Key。
+验收者首选无凭据 Demo：只需 Docker Desktop（含 Docker Compose v2）和 `curl`；不需要 DeepSeek、IM 或任何 Secret 文件。
 
 ~~~
 git clone https://github.com/liuzengh/trpc-agent-service.git
 cd trpc-agent-service
+
+./start.sh --demo
+~~~
+
+该命令从空 PostgreSQL 启动 deterministic fake provider，检查健康、readiness、普通 chat 与 SSE delta；完成后会打印访问地址和仅清理其自身资源的命令。覆盖范围与明确豁免项见 [Fake Demo 覆盖面](docs/runbook/demo-fake-coverage.md)。
+
+如需执行与 CI 相同的完整无凭据门禁，另需本机 Go 1.21：
+
+~~~
+bash scripts/ci_admission.sh --demo
+~~~
+
+### 可选：真实 DeepSeek WebUI
+
+真实模型验证需要一个可消费的 DeepSeek API Key；该密钥仅供本机 Docker 容器使用。
+
+~~~
 
 mkdir -p deploy/compose/secrets
 install -m 600 /absolute/path/to/deepseek-api-key \
@@ -28,7 +45,7 @@ install -m 600 /absolute/path/to/deepseek-api-key \
 ./start.sh
 ~~~
 
-打开：
+启动后打开：
 
 - WebUI：[http://localhost:58081/webui/](http://localhost:58081/webui/)
 - Jaeger：[http://localhost:56686/](http://localhost:56686/)
@@ -55,6 +72,7 @@ cp deploy/compose/.env.local.example deploy/compose/.env.local
 
 | 场景 | 必需的本机资源 | 启动入口 |
 | --- | --- | --- |
+| 无凭据最终验收（fake chat + SSE） | Docker Desktop、curl | ./start.sh --demo；或 `bash scripts/ci_admission.sh --demo` |
 | WebUI + DeepSeek 多模态对话 | secrets/deepseek-api-key | ./start.sh |
 | 飞书单聊、群聊、图片 | DeepSeek Key、secrets/feishu.env、临时公网 HTTPS tunnel | docker compose -f deploy/compose/docker-compose.local.yml --profile feishu-local up -d --build |
 | 企业微信回调与回复 | DeepSeek Key、secrets/wecom.env、临时公网 HTTPS tunnel | docker compose -f deploy/compose/docker-compose.local.yml --profile wecom-local up -d --build |

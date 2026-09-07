@@ -4,13 +4,13 @@
 
 DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中的真实模型调用，绝不能提交到仓库。可选的 Feishu 与 WeCom smoke 会使用开发者自行创建的应用和临时 HTTPS tunnel；它们同样只服务于本机 Docker 验收。
 
-如果只需验证本仓库的无凭据启动与 deterministic fake model，可先运行 `./start.sh --demo`。它不需要任何 Secret 文件；覆盖范围和豁免项见 [Fake Demo 覆盖面](demo-fake-coverage.md)。
+验收者首选先运行 `./start.sh --demo`，验证无凭据启动与 deterministic fake model。它不需要任何 Secret 文件；覆盖范围和豁免项见 [Fake Demo 覆盖面](demo-fake-coverage.md)。真实 DeepSeek、Feishu 与 WeCom 验证均是后续可选项。
 
 ## Acceptance from zero
 
 **验收者从零复现（推荐顺序）**
 
-本节面向第一次拿到仓库、没有任何历史数据库或 Docker 数据卷的验收者。无需申请云主机、Kubernetes 或运维账号；Docker Desktop 与自己的 DeepSeek Key 即可完成核心闭环。Feishu、WeCom 是在核心闭环后可选的真实账号验证，不能互相替代。
+本节面向第一次拿到仓库、没有任何历史数据库或 Docker 数据卷的验收者。无需申请云主机、Kubernetes、运维账号或任何模型密钥；Docker Desktop 即可先完成无凭据核心验收。真实 DeepSeek、Feishu 与 WeCom 是其后的可选外部验证，不能替代无凭据门禁。
 
 1. 克隆仓库，进入根目录，并确认 Compose 文件可解析：
 
@@ -20,7 +20,15 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    docker compose -f deploy/compose/docker-compose.local.yml config --quiet
    ```
 
-2. 创建仅本机可读的模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
+2. 先运行无凭据最终验收。它会创建独立的临时 PostgreSQL/Redis、断言空库只应用 `000001`，并验证 deterministic fake chat 与 SSE：
+
+   ```bash
+   ./start.sh --demo
+   ```
+
+   命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.21）。
+
+3. 只有需要真实模型闭环时，才创建仅本机可读的 DeepSeek 模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
 
    ```bash
    mkdir -p deploy/compose/secrets
@@ -28,7 +36,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
      deploy/compose/secrets/deepseek-api-key
    ```
 
-3. 启动默认 WebUI 闭环并检查 readiness。首次启动会从空的 PostgreSQL 16 数据库执行业务 schema 基线 `000001`：
+4. 启动真实 DeepSeek WebUI 闭环并检查 readiness。首次启动会从空的 PostgreSQL 16 数据库执行业务 schema 基线 `000001`：
 
    ```bash
    ./start.sh
@@ -40,7 +48,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
 
    预期最后一条命令输出 `000001`。然后打开 <http://localhost:58081/webui/>，按第 2 节完成一次文本和 durable confirmation 验收。
 
-4. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据：
+5. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据；其中多节点与依赖恢复需要第 3 步的 DeepSeek Key：
 
    ```bash
    # 无凭据的最终验收：空库单一基线、fake chat 与 SSE
@@ -51,7 +59,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    bash scripts/local_dependency_recovery_smoke.sh
    ```
 
-5. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 3 节或第 4 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
+6. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 3 节或第 4 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
 
 验收结束后执行 `./stop.sh` 可保留本地数据便于排查。确需重新从空库开始时，才执行下列破坏性命令；它只会删除名为 `trpc-agent-local` 的 Compose project 所创建的卷：
 
@@ -62,7 +70,8 @@ docker compose -f deploy/compose/docker-compose.local.yml --profile webui down -
 ## 1. 前置条件
 
 - Docker Desktop（包含 `docker compose` v2）；
-- 一个可用的 DeepSeek API Key；
+- 无凭据 Demo 还需要 `curl`；
+- 真实 WebUI、IM、多节点与依赖恢复验证才需要一个可用的 DeepSeek API Key；
 - 本机端口 `55432`、`56379`、`58081`、`56686`、`59464` 未被占用。
 
 ## 2. 启动本地 WebUI

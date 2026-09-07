@@ -10,6 +10,8 @@ coverage.out
 coverage.html
 *.test
 *.exe
+# Locally built service binary; release artifacts belong in an image or release.
+/trpc-service
 
 vendor/
 

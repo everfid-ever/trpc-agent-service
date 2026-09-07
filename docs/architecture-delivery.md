@@ -14,7 +14,7 @@ flowchart LR
   GW --> R["Relay / Redis Broker"]
   R --> W["无状态 Worker × N"]
   W --> RUN["Guardrail + tRPC-Agent-Go Runner"]
-  RUN --> M["模型 / Tool / MCP"]
+  RUN --> M["模型 / Tool（MCP 未启用）"]
   W --> S["Storage Router"]
   S --> D[("PostgreSQL / Redis\n向量库 / 对象存储")]
   W --> RO[("Reply / Audit Outbox")]
@@ -89,7 +89,7 @@ Gateway、Worker、Relay 和 Adapter 可独立部署，Worker 无需 sticky sess
 
 ## 6. tRPC-Agent-Go 复用边界与验收
 
-服务复用 tRPC-Agent-Go 的 Runner、Agent、Session/Memory/Knowledge/Artifact、Tool/MCP、Plugin/Guardrail/Callback 与协议公共 API。平台新增可信租户控制面、Profile/Secret 路由、Inbox/Outbox/relay、lease/fence、IM Adapter、治理装配与审计；不依赖上游 `internal` 包。OpenClaw Channel 的 `ID/Run` 生命周期和 sender 语义由服务 Adapter 兼容扩展。
+服务实际复用 tRPC-Agent-Go 的 Runner、Agent、Session contract、Graph checkpoint、Model、Tool、Skill、Knowledge、Callback 与 OpenAI/A2A/tRPC-Agent 协议公共 API。上游 MCP client API 已随固定依赖引入，但当前生产组合根未接入，不能表述为已支持 MCP；Memory 与 Artifact 目前由 service-owned Store 承担多租户原子性和生命周期，`plugin.Manager` 也仅保留升级兼容锚点。平台新增可信租户控制面、Profile/Secret 路由、Inbox/Outbox/relay、lease/fence、IM Adapter、治理装配与审计；不依赖上游 `internal` 包。OpenClaw Channel 的 `ID/Run` 生命周期和 sender 语义由服务 Adapter 兼容扩展。
 
 本地 Docker 的命令、资源与成功证据见 [`runbook/verification-matrix.md`](./runbook/verification-matrix.md)；详细规范见 [`design/`](./design/README.md)。
 
