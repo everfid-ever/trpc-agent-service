@@ -15,6 +15,7 @@
 | [模块边界与上游集成](6.module-boundaries.md) | 服务内部模块依赖、`trpc-agent-go` 公共能力复用和禁止依赖 |
 | [验证与发布规范](7.verification-release-design.md) | 单元、契约、集成、故障恢复、Provider 和发布门禁如何组合 |
 | [能力与兼容边界](8.capability-boundaries.md) | 生产角色、Channel、协议和明确不支持能力的边界 |
+| [任务书可追溯矩阵](9.requirement-traceability.md) | 任务要求、设计、代码与验收证据的一一映射 |
 
 ## 推荐阅读顺序
 
