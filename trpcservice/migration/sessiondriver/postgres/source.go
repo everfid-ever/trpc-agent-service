@@ -12,9 +12,20 @@ import (
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 )
 
-type Source struct{ db *sql.DB }
+// Source reads platform coordination facts and official framework Session rows.
+// The databases may be split throughout a migration: coordination stays in the
+// control database, while SDK Session data comes from the profile-selected
+// data plane. During observation that data plane is the cut-over target.
+type Source struct {
+	coordinationDB *sql.DB
+	sessionDB      *sql.DB
+}
 
-func NewSource(db *sql.DB) *Source { return &Source{db: db} }
+func NewSource(db *sql.DB) *Source { return NewSplitSource(db, db) }
+
+func NewSplitSource(coordinationDB, sessionDB *sql.DB) *Source {
+	return &Source{coordinationDB: coordinationDB, sessionDB: sessionDB}
+}
 
 type keyCursor struct {
 	AgentAppID string `json:"agent_app_id"`
@@ -23,14 +34,14 @@ type keyCursor struct {
 }
 
 func (s *Source) CaptureWatermark(ctx context.Context, tenantID string) (string, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.coordinationDB == nil || s.sessionDB == nil {
 		return "", runtime.ErrBackendUnavailable
 	}
 	if tenantID == "" {
 		return "", runtime.ErrTenantScope
 	}
 	var cursor keyCursor
-	err := s.db.QueryRowContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
+	err := s.coordinationDB.QueryRowContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
 WHERE tenant_id=$1 ORDER BY agent_app_id DESC,session_id DESC LIMIT 1`, tenantID).
 		Scan(&cursor.AgentAppID, &cursor.SessionID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -44,26 +55,39 @@ WHERE tenant_id=$1 ORDER BY agent_app_id DESC,session_id DESC LIMIT 1`, tenantID
 }
 
 func (s *Source) LoadSessionImage(ctx context.Context, key sessionstore.SessionKey) (sessiondriver.SessionImage, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.coordinationDB == nil || s.sessionDB == nil {
 		return sessiondriver.SessionImage{}, runtime.ErrBackendUnavailable
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	coordinationTx, err := s.coordinationDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
-	defer tx.Rollback()
-	image, err := loadImage(ctx, tx, key)
+	defer coordinationTx.Rollback()
+	sessionTx := coordinationTx
+	if s.sessionDB != s.coordinationDB {
+		sessionTx, err = s.sessionDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return sessiondriver.SessionImage{}, err
+		}
+		defer sessionTx.Rollback()
+	}
+	image, err := loadImage(ctx, coordinationTx, sessionTx, key)
 	if err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if sessionTx != coordinationTx {
+		if err := sessionTx.Commit(); err != nil {
+			return sessiondriver.SessionImage{}, err
+		}
+	}
+	if err := coordinationTx.Commit(); err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
 	return image, nil
 }
 
 func (s *Source) PageSessions(ctx context.Context, in sessiondriver.PageRequest) (sessiondriver.Page, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.coordinationDB == nil || s.sessionDB == nil {
 		return sessiondriver.Page{}, runtime.ErrBackendUnavailable
 	}
 	if in.TenantID == "" || in.Limit < 1 || in.Limit > 1000 {
@@ -83,12 +107,20 @@ func (s *Source) PageSessions(ctx context.Context, in sessiondriver.PageRequest)
 			return sessiondriver.Page{}, runtime.ErrInvariantViolation
 		}
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	coordinationTx, err := s.coordinationDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return sessiondriver.Page{}, err
 	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
+	defer coordinationTx.Rollback()
+	sessionTx := coordinationTx
+	if s.sessionDB != s.coordinationDB {
+		sessionTx, err = s.sessionDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return sessiondriver.Page{}, err
+		}
+		defer sessionTx.Rollback()
+	}
+	rows, err := coordinationTx.QueryContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
 WHERE tenant_id=$1 AND (agent_app_id,session_id)>($2,$3) AND (agent_app_id,session_id)<=($4,$5)
 ORDER BY agent_app_id,session_id LIMIT $6`, in.TenantID, after.AgentAppID, after.SessionID,
 		upper.AgentAppID, upper.SessionID, in.Limit+1)
@@ -113,7 +145,7 @@ ORDER BY agent_app_id,session_id LIMIT $6`, in.TenantID, after.AgentAppID, after
 	}
 	page := sessiondriver.Page{Complete: complete}
 	for _, key := range keys {
-		image, err := loadImage(ctx, tx, key)
+		image, err := loadImage(ctx, coordinationTx, sessionTx, key)
 		if err != nil {
 			return sessiondriver.Page{}, err
 		}
@@ -128,7 +160,12 @@ ORDER BY agent_app_id,session_id LIMIT $6`, in.TenantID, after.AgentAppID, after
 			return sessiondriver.Page{}, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if sessionTx != coordinationTx {
+		if err := sessionTx.Commit(); err != nil {
+			return sessiondriver.Page{}, err
+		}
+	}
+	if err := coordinationTx.Commit(); err != nil {
 		return sessiondriver.Page{}, err
 	}
 	return page, nil
@@ -149,12 +186,23 @@ func (s *Source) Fingerprint(ctx context.Context, tenantID, watermark string) (s
 	if upper.Empty {
 		return sessiondriver.FingerprintFromItems(nil, watermark), nil
 	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if s == nil || s.coordinationDB == nil || s.sessionDB == nil {
+		return sessiondriver.Fingerprint{}, runtime.ErrBackendUnavailable
+	}
+	coordinationTx, err := s.coordinationDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
 		return sessiondriver.Fingerprint{}, err
 	}
-	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
+	defer coordinationTx.Rollback()
+	sessionTx := coordinationTx
+	if s.sessionDB != s.coordinationDB {
+		sessionTx, err = s.sessionDB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+		if err != nil {
+			return sessiondriver.Fingerprint{}, err
+		}
+		defer sessionTx.Rollback()
+	}
+	rows, err := coordinationTx.QueryContext(ctx, `SELECT agent_app_id,session_id FROM public.session_head
 WHERE tenant_id=$1 AND (agent_app_id,session_id)<=($2,$3) ORDER BY agent_app_id,session_id`,
 		tenantID, upper.AgentAppID, upper.SessionID)
 	if err != nil {
@@ -174,7 +222,7 @@ WHERE tenant_id=$1 AND (agent_app_id,session_id)<=($2,$3) ORDER BY agent_app_id,
 	}
 	images := make([]sessiondriver.SessionImage, 0, len(keys))
 	for _, key := range keys {
-		image, err := loadImage(ctx, tx, key)
+		image, err := loadImage(ctx, coordinationTx, sessionTx, key)
 		if err != nil {
 			return sessiondriver.Fingerprint{}, err
 		}
@@ -184,7 +232,12 @@ WHERE tenant_id=$1 AND (agent_app_id,session_id)<=($2,$3) ORDER BY agent_app_id,
 	if err != nil {
 		return sessiondriver.Fingerprint{}, err
 	}
-	if err := tx.Commit(); err != nil {
+	if sessionTx != coordinationTx {
+		if err := sessionTx.Commit(); err != nil {
+			return sessiondriver.Fingerprint{}, err
+		}
+	}
+	if err := coordinationTx.Commit(); err != nil {
 		return sessiondriver.Fingerprint{}, err
 	}
 	return result, nil
@@ -207,13 +260,13 @@ type queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
-func loadImage(ctx context.Context, q queryer, key sessionstore.SessionKey) (sessiondriver.SessionImage, error) {
+func loadImage(ctx context.Context, coordination queryer, sessions queryer, key sessionstore.SessionKey) (sessiondriver.SessionImage, error) {
 	if key.TenantID == "" || key.AgentAppID == "" || key.SessionID == "" {
 		return sessiondriver.SessionImage{}, runtime.ErrTenantScope
 	}
 	image := sessiondriver.SessionImage{}
 	image.Head.SessionKey = key
-	err := q.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,last_allocated_input_seq
+	err := coordination.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,last_allocated_input_seq
 FROM public.session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`,
 		key.TenantID, key.AgentAppID, key.SessionID).Scan(&image.Head.Version, &image.Head.LastFence,
 		&image.Head.LastSessionSeq, &image.Head.NextInputSeq, &image.LastAllocatedInputSeq)
@@ -224,7 +277,7 @@ FROM public.session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$
 		return sessiondriver.SessionImage{}, err
 	}
 	appName := key.TenantID + "/" + key.AgentAppID
-	stateRows, err := q.QueryContext(ctx, `SELECT user_id,state,created_at,updated_at,expires_at
+	stateRows, err := sessions.QueryContext(ctx, `SELECT user_id,state,created_at,updated_at,expires_at
 FROM public.session_states WHERE app_name=$1 AND session_id=$2 AND deleted_at IS NULL ORDER BY id`, appName, key.SessionID)
 	if err != nil {
 		return sessiondriver.SessionImage{}, err
@@ -251,11 +304,11 @@ FROM public.session_states WHERE app_name=$1 AND session_id=$2 AND deleted_at IS
 		return sessiondriver.SessionImage{}, err
 	}
 	if image.SDK != nil {
-		if err := loadSDKRows(ctx, q, image.SDK); err != nil {
+		if err := loadSDKRows(ctx, sessions, image.SDK); err != nil {
 			return sessiondriver.SessionImage{}, err
 		}
 	}
-	commitRows, err := q.QueryContext(ctx, `SELECT commit_id,request_id,request_digest,input_seq,stage,outcome,fence,
+	commitRows, err := coordination.QueryContext(ctx, `SELECT commit_id,request_id,request_digest,input_seq,stage,outcome,fence,
 session_version,COALESCE(reply_cursor,''),COALESCE(result_ref,''),created_at FROM public.session_commit
 WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 ORDER BY session_version,commit_id`, key.TenantID, key.AgentAppID, key.SessionID)
 	if err != nil {

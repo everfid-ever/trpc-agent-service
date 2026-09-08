@@ -9,12 +9,22 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
-// Replica applies a SessionImage to a target PostgreSQL binding. It copies the
-// official session/postgres rows as opaque JSON records and only owns the
-// platform coordination rows needed for input ordering and fencing.
-type Replica struct{ db *sql.DB }
+// Replica applies a SessionImage to a target PostgreSQL binding. It always
+// copies official session/postgres rows as opaque JSON. Full replicas also
+// maintain a target coordination image for pre-cutover verification; SDK-only
+// replicas are used for reverse repair after cutover, when the source control
+// database already owns the current coordination rows.
+type Replica struct {
+	db                *sql.DB
+	writeCoordination bool
+}
 
-func NewReplica(db *sql.DB) *Replica { return &Replica{db: db} }
+func NewReplica(db *sql.DB) *Replica { return &Replica{db: db, writeCoordination: true} }
+
+// NewSDKReplica writes framework-owned Session data without replacing the
+// target's platform coordination journal. It is the only safe reverse target
+// when a cut-over Worker has continued to commit fence/outbox facts centrally.
+func NewSDKReplica(db *sql.DB) *Replica { return &Replica{db: db} }
 
 func (r *Replica) ApplySessionSnapshot(ctx context.Context, in sessiondriver.ApplyRequest) (sessiondriver.ApplyResult, error) {
 	if r == nil || r.db == nil {
@@ -37,30 +47,32 @@ func (r *Replica) ApplySessionSnapshot(ctx context.Context, in sessiondriver.App
 	if result, found, err := existingApply(ctx, tx, in); err != nil || found {
 		return result, err
 	}
-	currentVersion, exists, err := targetVersion(ctx, tx, in)
-	if err != nil {
-		return sessiondriver.ApplyResult{}, mapError(err)
-	}
-	if exists && currentVersion > in.Image.Head.Version {
-		// A newer target image must never be overwritten. Record this mutation
-		// as applied so repair can make forward progress; the source digest is
-		// valid evidence for this apply attempt and Driver only accepts it when
-		// target version strictly dominates the source version.
-		if err := recordApply(ctx, tx, in, currentVersion); err != nil {
+	if r.writeCoordination {
+		currentVersion, exists, err := targetVersion(ctx, tx, in)
+		if err != nil {
 			return sessiondriver.ApplyResult{}, mapError(err)
 		}
-		if err := tx.Commit(); err != nil {
+		if exists && currentVersion > in.Image.Head.Version {
+			// A newer target image must never be overwritten. Record this mutation
+			// as applied so repair can make forward progress; the source digest is
+			// valid evidence for this apply attempt and Driver only accepts it when
+			// target version strictly dominates the source version.
+			if err := recordApply(ctx, tx, in, currentVersion); err != nil {
+				return sessiondriver.ApplyResult{}, mapError(err)
+			}
+			if err := tx.Commit(); err != nil {
+				return sessiondriver.ApplyResult{}, mapError(err)
+			}
+			return sessiondriver.ApplyResult{SessionVersion: currentVersion, SnapshotDigest: in.SnapshotDigest}, nil
+		}
+		if exists && currentVersion == in.Image.Head.Version {
+			// The matching mutation receipt above is the only proof that an equal
+			// version is the same image. Never overwrite an unproven equal version.
+			return sessiondriver.ApplyResult{}, runtime.ErrVersionConflict
+		}
+		if err := replaceCoordination(ctx, tx, in.Image); err != nil {
 			return sessiondriver.ApplyResult{}, mapError(err)
 		}
-		return sessiondriver.ApplyResult{SessionVersion: currentVersion, SnapshotDigest: in.SnapshotDigest}, nil
-	}
-	if exists && currentVersion == in.Image.Head.Version {
-		// The matching mutation receipt above is the only proof that an equal
-		// version is the same image. Never overwrite an unproven equal version.
-		return sessiondriver.ApplyResult{}, runtime.ErrVersionConflict
-	}
-	if err := replaceCoordination(ctx, tx, in.Image); err != nil {
-		return sessiondriver.ApplyResult{}, mapError(err)
 	}
 	if err := replaceSDKSession(ctx, tx, in.Image); err != nil {
 		return sessiondriver.ApplyResult{}, mapError(err)

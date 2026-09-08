@@ -87,6 +87,24 @@ export TRPC_SESSION_POSTGRES_CONNECTIONS='{
 
 每个被引用的数据平面都必须先应用服务 schema 基线。未注册、格式非法或未发布的 connection ID 会让该执行 fail closed；不会回退到默认库。此变量是 Worker 的部署密钥配置，应通过 Secret projection/环境注入提供，不能提交到 `.env.local` 或 Backend Profile。
 
+### 1.2 Session 数据平面迁移作业
+
+`session-migrate` 是有界的一次性 operator job，不是常驻 Worker。它只处理已在 `backend_migration` authority 中创建的 `session` migration：解析 source/target 的精确 Backend Profile、回填官方 Session snapshot、修复 durable mutation，并在安全阶段推进 `planned → snapshot → dual_write → backfill → verify`。每次执行只做一小步或一个 batch，可安全重跑。
+
+它不会自行切换 tenant 的 active ConfigSnapshot，也不会自行 rollback；verify 成功后仍需由已授权的控制面操作携带 verification evidence 执行 cutover。cutover/observe 阶段该作业仅处理正反向 repair 并报告 drain 状态。
+
+```bash
+export TRPC_SESSION_MIGRATION_TENANT_ID='t_example'
+export TRPC_SESSION_MIGRATION_ID='session-move-2026-01'
+export TRPC_SESSION_MIGRATION_WORKER_ID='operator-01'
+export TRPC_SESSION_MIGRATION_CONFIRM=true
+
+# TRPC_POSTGRES_DSN 与可选 TRPC_SESSION_POSTGRES_CONNECTIONS 按 1.1 注入。
+go run ./cmd/trpc-service session-migrate
+```
+
+该 job 拒绝缺少确认、未应用 schema、未部署或指向同一数据平面的 source/target、非 Session domain 与非法 phase；不记录或打印任何 DSN。迁移期间保持使用与 Worker 相同的 `TRPC_SESSION_POSTGRES_CONNECTIONS` Secret projection，避免 job 与实际数据面路由产生偏差。
+
 ## 2. 可选：配置一个审阅后的 MCP 工具
 
 MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。

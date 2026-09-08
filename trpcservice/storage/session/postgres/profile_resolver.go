@@ -55,26 +55,12 @@ func (r *ProfileServiceResolver) Resolve(ctx context.Context, snapshot profile.E
 		return nil, runtime.ErrCapabilityUnsupported
 	}
 	binding, ok := snapshot.BackendBindingFor("session")
-	if !ok || binding.BackendProfileID == "" || binding.BackendVersion < 1 || !requiresCapability(binding.Required, "atomic_turn_commit") {
+	if !ok || !requiresCapability(binding.Required, "atomic_turn_commit") {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	backend, err := r.Profiles.GetBackend(ctx, snapshot.Key.TenantID, binding.BackendProfileID, binding.BackendVersion)
+	connectionID, dsn, err := r.ResolvePostgresDSN(ctx, snapshot.Key.TenantID, binding.BackendProfileID, binding.BackendVersion)
 	if err != nil {
 		return nil, err
-	}
-	if backend.TenantID != snapshot.Key.TenantID || backend.ProfileID != binding.BackendProfileID || backend.Version != binding.BackendVersion {
-		return nil, runtime.ErrTenantScope
-	}
-	if backend.Status != "active" || backend.Provider != "postgres" || (backend.SchemaVersion != 1 && backend.SchemaVersion != 2) ||
-		backend.CredentialRef.Ref != "" || backend.CredentialRef.Version != 0 || !backend.Capabilities["atomic_turn_commit"] {
-		return nil, runtime.ErrCapabilityUnsupported
-	}
-	connectionID := "default"
-	if backend.SchemaVersion == 2 {
-		connectionID = backend.Configuration["connection_id"]
-	}
-	if !validConnectionID(connectionID) {
-		return nil, runtime.ErrInvariantViolation
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -84,16 +70,50 @@ func (r *ProfileServiceResolver) Resolve(ctx context.Context, snapshot profile.E
 	if service := r.services[connectionID]; service != nil {
 		return service, nil
 	}
-	dsn, ok := r.Connections[connectionID]
-	if !ok {
-		return nil, fmt.Errorf("%w: session postgres connection %q is not deployed", runtime.ErrCapabilityUnsupported, connectionID)
-	}
 	service, err := NewOfficialSessionService(dsn)
 	if err != nil {
 		return nil, err
 	}
 	r.services[connectionID] = service
 	return service, nil
+}
+
+// ResolvePostgresDSN is for trusted process composition roots such as the
+// Session migration job. It resolves an exact immutable Backend Profile to a
+// deployment-injected data-plane DSN; callers must never log or persist the
+// returned value.
+func (r *ProfileServiceResolver) ResolvePostgresDSN(ctx context.Context, tenantID, profileID string, version int64) (string, string, error) {
+	if r == nil || r.Profiles == nil || tenantID == "" || profileID == "" || version < 1 {
+		return "", "", runtime.ErrCapabilityUnsupported
+	}
+	backend, err := r.Profiles.GetBackend(ctx, tenantID, profileID, version)
+	if err != nil {
+		return "", "", err
+	}
+	if backend.TenantID != tenantID || backend.ProfileID != profileID || backend.Version != version {
+		return "", "", runtime.ErrTenantScope
+	}
+	if backend.Status != "active" || backend.Provider != "postgres" || (backend.SchemaVersion != 1 && backend.SchemaVersion != 2) ||
+		backend.CredentialRef.Ref != "" || backend.CredentialRef.Version != 0 || !backend.Capabilities["atomic_turn_commit"] {
+		return "", "", runtime.ErrCapabilityUnsupported
+	}
+	connectionID := "default"
+	if backend.SchemaVersion == 2 {
+		connectionID = backend.Configuration["connection_id"]
+	}
+	if !validConnectionID(connectionID) {
+		return "", "", runtime.ErrInvariantViolation
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.services == nil {
+		return "", "", runtime.ErrBackendUnavailable
+	}
+	dsn, ok := r.Connections[connectionID]
+	if !ok {
+		return "", "", fmt.Errorf("%w: session postgres connection %q is not deployed", runtime.ErrCapabilityUnsupported, connectionID)
+	}
+	return connectionID, dsn, nil
 }
 
 // Close releases every lazily constructed framework service. It is safe to
