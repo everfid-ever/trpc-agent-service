@@ -17,17 +17,24 @@ if [[ "${go_version}" != go1.25.* ]]; then
   exit 2
 fi
 
-# RUNNER_TEMP is job-private on GitHub Actions.  Fall back to TMPDIR for local
-# execution, but never touch a shared Go cache.  Some integration helpers can
-# leave files owned by another user in this directory; cleanup is best-effort
-# and must not turn a successful admission run into a failed job.
-temp_parent="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-cache_root="$(mktemp -d "${temp_parent%/}/trpc-ci-go.XXXXXX")"
+# A GitHub-hosted runner discards its workspace after the job.  Keep the CI
+# cache beneath that workspace and do not manually remove it: a subprocess can
+# legitimately leave read-only module files, and cache cleanup must never hide
+# the actual build/test result.  Local invocations retain the disposable
+# system-temp cache and best-effort cleanup below.
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  cache_parent="${GITHUB_WORKSPACE:-${repo_root}}/.trpc-ci-cache"
+  mkdir -p -- "${cache_parent}"
+  cache_root="$(mktemp -d "${cache_parent%/}/run.XXXXXX")"
+else
+  temp_parent="${TMPDIR:-/tmp}"
+  cache_root="$(mktemp -d "${temp_parent%/}/trpc-ci-go.XXXXXX")"
+fi
 cleanup() {
   local status=$?
   trap - EXIT
-  if ! rm -rf -- "${cache_root}"; then
-    echo "warning: could not fully remove disposable Go cache ${cache_root}; the ephemeral runner will discard it" >&2
+  if [[ "${GITHUB_ACTIONS:-}" != "true" ]] && ! rm -rf -- "${cache_root}"; then
+    echo "warning: could not fully remove disposable Go cache ${cache_root}" >&2
   fi
   exit "${status}"
 }

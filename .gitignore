@@ -16,6 +16,7 @@ coverage.html
 vendor/
 
 .workbuddy
+.trpc-ci-cache/
 deploy/compose/.env.local
 deploy/compose/.env.live-im
 deploy/compose/secrets/*
