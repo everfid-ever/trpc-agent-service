@@ -13,13 +13,14 @@ import (
 const workerHTTPShutdownBudget = 5 * time.Second
 
 type productionConfig struct {
-	ListenAddress    string
-	PostgresDSN      string
-	RedisAddress     string
-	RedisPassword    string
-	RedisDB          int
-	SecretRoot       string
-	SkillStagingRoot string
+	ListenAddress               string
+	PostgresDSN                 string
+	SessionPostgresConnections map[string]string
+	RedisAddress                string
+	RedisPassword               string
+	RedisDB                     int
+	SecretRoot                  string
+	SkillStagingRoot            string
 
 	S3Region, S3Bucket, S3Endpoint string
 	S3PathStyle, S3AllowInsecure   bool
@@ -275,6 +276,9 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 	config.DLPProbeTenant = strings.TrimSpace(getenv("TRPC_DLP_PROBE_TENANT_ID"))
 	config.DLPSecretRef = strings.TrimSpace(getenv("TRPC_DLP_SECRET_REF"))
 	var err error
+	if config.SessionPostgresConnections, err = parseSessionPostgresConnections(config.PostgresDSN, getenv("TRPC_SESSION_POSTGRES_CONNECTIONS")); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_SESSION_POSTGRES_CONNECTIONS")
+	}
 	if config.RedisDB, err = envInt(getenv, "TRPC_REDIS_DB", 0); err != nil || config.RedisDB < 0 {
 		return productionConfig{}, errors.New("invalid TRPC_REDIS_DB")
 	}
@@ -359,6 +363,54 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 		return productionConfig{}, errors.New("invalid TRPC_CODE_EXECUTOR_WORKSPACE_ROOT")
 	}
 	return config, nil
+}
+
+// parseSessionPostgresConnections keeps PostgreSQL credentials in deployment
+// configuration rather than in tenant Backend Profiles. The mandatory default
+// preserves the single-database deployment; additional JSON entries are named
+// data planes selected only through immutable profile connection_id values.
+func parseSessionPostgresConnections(defaultDSN, raw string) (map[string]string, error) {
+	defaultDSN = strings.TrimSpace(defaultDSN)
+	if !validSessionPostgresDSN(defaultDSN) {
+		return nil, errors.New("default session postgres DSN is invalid")
+	}
+	result := map[string]string{"default": defaultDSN}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return result, nil
+	}
+	var declared map[string]string
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil || len(declared) == 0 {
+		return nil, errors.New("connection registry must be a non-empty JSON object")
+	}
+	for connectionID, dsn := range declared {
+		// v1 Backend Profiles are permanently bound to the original control
+		// plane default. A named v2 Profile is required for a different data
+		// plane; allowing this registry to replace default would silently alter
+		// historical Profile semantics.
+		if connectionID == "default" || !validSessionConnectionID(connectionID) || !validSessionPostgresDSN(dsn) {
+			return nil, errors.New("invalid session postgres connection")
+		}
+		result[connectionID] = strings.TrimSpace(dsn)
+	}
+	return result, nil
+}
+
+func validSessionConnectionID(value string) bool {
+	if len(value) == 0 || len(value) > 128 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validSessionPostgresDSN(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 // mcpEndpoint is one reviewed, fixed MCP tool endpoint declared in worker

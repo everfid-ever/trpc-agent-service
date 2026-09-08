@@ -195,7 +195,10 @@ func project(key profile.ExecutionProfileKey, app agentapp.AgentApp, revision ag
 		knowledge[index] = profile.VersionedRef{ID: ref.ID, Version: ref.Version}
 	}
 	requirements := make(profile.CapabilitySet)
+	bindings := make([]profile.BackendBinding, 0, len(configuration.BackendBindings))
 	for _, binding := range configuration.BackendBindings {
+		bindings = append(bindings, profile.BackendBinding{Domain: binding.Domain, BackendProfileID: binding.BackendProfileID,
+			BackendVersion: binding.BackendVersion, Required: append([]string(nil), binding.Required...)})
 		for _, required := range binding.Required {
 			requirements[required] = true
 		}
@@ -217,7 +220,7 @@ func project(key profile.ExecutionProfileKey, app agentapp.AgentApp, revision ag
 		ExecutionBudget: profile.ExecutionBudgetV1{MaxLLMCalls: revision.ExecutionBudget.MaxLLMCalls,
 			MaxToolCalls: revision.ExecutionBudget.MaxToolCalls, MaxParallelTools: revision.ExecutionBudget.MaxParallelTools,
 			ExecutionTimeoutSeconds: revision.ExecutionBudget.ExecutionTimeoutSeconds},
-		BackendRequirements: requirements,
+		BackendRequirements: requirements, BackendBindings: bindings,
 	}
 }
 

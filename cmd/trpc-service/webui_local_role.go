@@ -281,6 +281,9 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		return errors.New("memory service configuration rejected")
 	}
 	defer memoryService.Close()
+	// The standalone local acceptance role owns one fixed PostgreSQL volume.
+	// Distributed Worker roles use ProfileServiceResolver for per-profile
+	// routing; local bootstrap deliberately remains the single-plane fixture.
 	sdkSessions, err := sessionpostgres.NewOfficialSessionService(configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("session service configuration rejected")
@@ -608,7 +611,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema())
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}

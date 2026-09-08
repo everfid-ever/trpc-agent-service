@@ -56,6 +56,10 @@ type RunnerExecutor struct {
 	Profiles          profile.ExecutionProfileResolver
 	Bundles           profile.RuntimeBundleManager
 	Sessions          sessionstore.AtomicSessionStore
+	SessionServices   sessionstore.ServiceResolver
+	// SDKSessions is retained only for in-memory and narrowly scoped callers.
+	// Production roles must set SessionServices so an immutable ConfigSnapshot
+	// selects the framework-owned session backend for every turn.
 	SDKSessions       agentsession.Service
 	Payloads          messaging.PayloadStore
 	Artifacts         artifact.Store
@@ -75,11 +79,21 @@ func (w RunnerExecutor) Execute(ctx context.Context, envelope runtime.ExecutionE
 	return w.ExecuteWithLease(ctx, envelope, 1, nil)
 }
 
+func (w RunnerExecutor) resolveSessionService(ctx context.Context, snapshot profile.ExecutionProfileSnapshot) (agentsession.Service, error) {
+	if w.SessionServices != nil {
+		return w.SessionServices.Resolve(ctx, snapshot)
+	}
+	if w.SDKSessions == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return w.SDKSessions, nil
+}
+
 func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.ExecutionEnvelope, fence uint64, beforeCommit func(context.Context) error) (resultErr error) {
 	ctx, finish := telemetry.StartOperation(ctx, w.Telemetry, envelope.TraceParent, telemetry.OperationWorkerExecute,
 		telemetry.ComponentAttribute(telemetry.ComponentWorker))
 	defer func() { finish(resultErr) }()
-	if w.Tasks == nil || w.Profiles == nil || w.Bundles == nil || w.Sessions == nil || w.SDKSessions == nil ||
+	if w.Tasks == nil || w.Profiles == nil || w.Bundles == nil || w.Sessions == nil || (w.SessionServices == nil && w.SDKSessions == nil) ||
 		w.Payloads == nil || w.Inputs == nil {
 		return runtime.ErrCapabilityUnsupported
 	}
@@ -130,6 +144,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	if appName == "" {
 		appName = envelope.TenantID + "/" + envelope.AgentAppID
 	}
+	sdkSessions, err := w.resolveSessionService(ctx, snapshot)
+	if err != nil {
+		return fmt.Errorf("resolve official session service: %w", err)
+	}
 
 	sessionKey := sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID}
 	head, err := w.Sessions.OpenForRun(ctx, sessionstore.OpenForRunRequest{
@@ -143,7 +161,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		return fmt.Errorf("open session turn: %w", err)
 	}
 
-	turn, err := sessionstore.NewDurableBufferedTurnScoped(w.Sessions, w.SDKSessions, sessionKey, appName, envelope.UserID)
+	turn, err := sessionstore.NewDurableBufferedTurnScoped(w.Sessions, sdkSessions, sessionKey, appName, envelope.UserID)
 	if err != nil {
 		return fmt.Errorf("create durable turn buffer: %w", err)
 	}
@@ -325,7 +343,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			}
 			graphResume = &coordinate
 		}
-		call, callErr := confirmedToolCall(ctx, w.SDKSessions, agentsession.Key{AppName: appName, UserID: envelope.UserID, SessionID: envelope.SessionID}, *continuation)
+		call, callErr := confirmedToolCall(ctx, sdkSessions, agentsession.Key{AppName: appName, UserID: envelope.UserID, SessionID: envelope.SessionID}, *continuation)
 		if callErr != nil {
 			return callErr
 		}

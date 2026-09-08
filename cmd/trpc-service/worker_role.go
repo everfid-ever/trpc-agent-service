@@ -103,7 +103,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("payload key configuration rejected")
 	}
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}
@@ -136,11 +136,11 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 			_ = memoryService.Close()
 		}
 	}()
-	// Session/Event/State are framework-owned capabilities. Keep their DDL in
-	// the service baseline, but use the official synchronous PostgreSQL
-	// implementation at runtime so a process exit cannot strand an async
-	// in-memory persistence queue.
-	sdkSessions, err := sessionpostgres.NewOfficialSessionService(configValue.PostgresDSN)
+	// Session/Event/State are framework-owned capabilities. The immutable
+	// session binding selects a credential-free connection_id; this resolver
+	// maps it to deployment-owned DSNs and constructs only official synchronous
+	// trpc-agent-go session/postgres services.
+	sdkSessions, err := sessionpostgres.NewProfileServiceResolver(providerRepo, configValue.SessionPostgresConnections)
 	if err != nil {
 		return errors.New("session service configuration rejected")
 	}
@@ -200,7 +200,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("progress publisher configuration rejected")
 	}
-	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: sdkSessions,
+	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions, SessionServices: sdkSessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{},
 		Progress:          progressPublisher,
 		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,

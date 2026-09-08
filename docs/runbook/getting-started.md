@@ -74,6 +74,19 @@ docker compose -f deploy/compose/docker-compose.local.yml --profile webui down -
 - 真实 WebUI、IM、多节点与依赖恢复验证才需要一个可用的 DeepSeek API Key；
 - 本机端口 `55432`、`56379`、`58081`、`56686`、`59464` 未被占用。
 
+### 1.1 可选：声明多个 Session PostgreSQL 数据平面
+
+默认情况下，Worker 把 `TRPC_POSTGRES_DSN` 同时注册为无密钥的 `connection_id=default`，因此现有 schema v1 Profile 与单库部署不需要新增参数。需要为 schema v2 的已发布 `session` Backend Profile 选择其他 PostgreSQL 数据平面时，在 Worker 的部署环境中设置 JSON 注册表；Profile 只保存 `connection_id`，不得保存 DSN、密码或 `SecretRef`：
+
+```bash
+export TRPC_SESSION_POSTGRES_CONNECTIONS='{
+  "session-primary": "postgres://worker:password@session-primary:5432/session?sslmode=require",
+  "session-secondary": "postgres://worker:password@session-secondary:5432/session?sslmode=require"
+}'
+```
+
+每个被引用的数据平面都必须先应用服务 schema 基线。未注册、格式非法或未发布的 connection ID 会让该执行 fail closed；不会回退到默认库。此变量是 Worker 的部署密钥配置，应通过 Secret projection/环境注入提供，不能提交到 `.env.local` 或 Backend Profile。
+
 ## 2. 可选：配置一个审阅后的 MCP 工具
 
 MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。

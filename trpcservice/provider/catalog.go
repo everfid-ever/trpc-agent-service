@@ -142,12 +142,34 @@ func QdrantVectorSchema() Schema {
 	}
 }
 
-// PostgresBackendSchema describes the shared PostgreSQL persistence plane.
-// Its connection is owned by the process deployment, never by an individual
-// tenant profile, so a tenant CredentialRef is deliberately forbidden.
+// PostgresBackendSchema describes the original shared PostgreSQL persistence
+// plane. It remains immutable for already published v1 Profiles, which always
+// select the deployment's default data plane.
 func PostgresBackendSchema() Schema {
 	return Schema{
 		Kind: KindBackend, Name: "postgres", SchemaVersion: 1,
+		SecretRequirement: "forbidden",
+		Capabilities: CapabilitySet{
+			"atomic_turn_commit": true,
+			"strong_ryw":         true,
+			"summary_cas":        true,
+		},
+	}
+}
+
+// PostgresBackendSchemaV2 adds an immutable deployment connection selector.
+// It is intentionally a new schema version: changing v1 normalization would
+// invalidate the content digests of already published Backend Profiles.
+func PostgresBackendSchemaV2() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "postgres", SchemaVersion: 2,
+		// connection_id is an opaque deployment selector, never a DSN or a
+		// credential. The process maps it to a protected connection at startup.
+		// Keeping it in the immutable profile lets a published ConfigSnapshot
+		// select a data plane without putting connection material in tenant data.
+		OptionRules: map[string]OptionRule{
+			"connection_id": {Type: OptionString, Required: true},
+		},
 		SecretRequirement: "forbidden",
 		Capabilities: CapabilitySet{
 			"atomic_turn_commit": true,
@@ -314,6 +336,11 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 			return BackendProfileSnapshot{}, err
 		}
 	}
+	if schema.Name == "postgres" && schema.SchemaVersion == 2 {
+		if err := validatePostgresConfiguration(configuration); err != nil {
+			return BackendProfileSnapshot{}, err
+		}
+	}
 	if err := validateSecret(input.CredentialRef, schema.SecretRequirement); err != nil {
 		return BackendProfileSnapshot{}, err
 	}
@@ -344,6 +371,19 @@ func validateQdrantConfiguration(configuration map[string]string) error {
 		return runtime.ErrInvariantViolation
 	}
 	for _, value := range collection {
+		if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '-') {
+			return runtime.ErrCapabilityUnsupported
+		}
+	}
+	return nil
+}
+
+func validatePostgresConfiguration(configuration map[string]string) error {
+	connectionID := configuration["connection_id"]
+	if len(connectionID) == 0 || len(connectionID) > 128 {
+		return runtime.ErrInvariantViolation
+	}
+	for _, value := range connectionID {
 		if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '-') {
 			return runtime.ErrCapabilityUnsupported
 		}

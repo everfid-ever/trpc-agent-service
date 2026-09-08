@@ -132,7 +132,7 @@ func writeDemoIDs(output io.Writer, ids demoIDs, configVersion int64) {
 }
 
 func bootstrapDemo(ctx context.Context, db *sql.DB, ids demoIDs) error {
-	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.PostgresBackendSchema())
+	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2())
 	if err != nil {
 		return err
 	}
@@ -187,6 +187,9 @@ func demoModelProfile(ids demoIDs) provider.ModelProfileSnapshot {
 
 func demoBackendProfile(ids demoIDs) provider.BackendProfileSnapshot {
 	return provider.BackendProfileSnapshot{TenantID: ids.TenantID, ProfileID: ids.BackendProfileID, ProfileKey: "demo-postgres",
+		// Keep the long-lived demo bootstrap on the immutable v1 default-plane
+		// contract so an existing demo database remains idempotent. Named
+		// Session data planes are opt-in through a separate v2 Profile.
 		DisplayName: "Demo PostgreSQL", Status: "active", SchemaVersion: 1, Provider: "postgres", Version: ids.BackendProfileVersion,
 		Capabilities: provider.CapabilitySet{"atomic_turn_commit": true, "strong_ryw": true, "summary_cas": true}}
 }
