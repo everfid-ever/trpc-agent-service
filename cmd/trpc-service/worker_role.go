@@ -19,6 +19,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	checkpointredis "github.com/liuzengh/trpc-agent-service/trpcservice/agent/checkpointredis"
+	agentcondition "github.com/liuzengh/trpc-agent-service/trpcservice/agent/condition"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
@@ -39,22 +40,26 @@ import (
 	providerpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/provider/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	relayredis "github.com/liuzengh/trpc-agent-service/trpcservice/relay/redis"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
+	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
-	memorystore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/memory"
-	memorypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/memory/postgres"
+	serviceknowledge "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
+	knowledgepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	objectstores3 "github.com/liuzengh/trpc-agent-service/trpcservice/storage/objectstore/s3"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	tenantpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/postgres"
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
+	toolcodeexec "github.com/liuzengh/trpc-agent-service/trpcservice/tool/codeexec"
 	toolmcp "github.com/liuzengh/trpc-agent-service/trpcservice/tool/mcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	agentmemorypg "trpc.group/trpc-go/trpc-agent-go/memory/postgres"
 )
 
 func runWorkerRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
@@ -98,7 +103,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("payload key configuration rejected")
 	}
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}
@@ -109,7 +114,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
 	credentialPool := generation.New(secretProvider)
 	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Credentials: credentialPool, Subject: "worker-model"}
-	toolCatalog, err := buildToolCatalog(configValue.MCPEndpoints)
+	toolCatalog, err := buildWorkerToolCatalog(configValue.MCPEndpoints, configValue.CodeExecutors, configValue.CodeExecutorWorkspaceRoot)
 	if err != nil {
 		return fmt.Errorf("tool catalog rejected: %w", err)
 	}
@@ -117,18 +122,46 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	governanceStore := governancepostgres.New(db)
 	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: configValue.WorkerGraphCheckpointTTL}
 	skills := serviceskill.Resolver{Catalog: skillpostgres.New(db), StagingRoot: configValue.SkillStagingRoot}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Checkpoints: graphCheckpoints,
-		Policies: governanceStore, Telemetry: telemetryProvider}
+	knowledgeResolver, err := buildKnowledgeResolver(secretProvider, configRepo, providerRepo, knowledgepostgres.New(db))
+	if err != nil {
+		return fmt.Errorf("knowledge resolver rejected: %w", err)
+	}
+	memoryService, err := agentmemorypg.NewService(agentmemorypg.WithPostgresClientDSN(configValue.PostgresDSN), agentmemorypg.WithSkipDBInit(true))
+	if err != nil {
+		return fmt.Errorf("memory service rejected: %w", err)
+	}
+	memoryClosed := false
+	defer func() {
+		if !memoryClosed {
+			_ = memoryService.Close()
+		}
+	}()
+	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
+	// AppName is encoded as "tenantID/agentAppID" by the control plane, so the
+	// SDK-facing artifact service has to recover the tenant before the
+	// tenant-scoped store will accept a write.
+	artifactService := &serviceartifact.SDKService{Store: artifacts, MapTenant: func(appName string) string {
+		// An unparseable AppName yields an empty tenant, which the
+		// tenant-scoped store rejects rather than writing under a wrong scope.
+		tenantID, err := serviceartifact.TenantFromAppName(appName)
+		if err != nil {
+			return ""
+		}
+		return tenantID
+	}}
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Knowledge: knowledgeResolver,
+		Conditions: agentcondition.DefaultRegistry(),
+		Memory:     memoryService, Checkpoints: graphCheckpoints, Policies: governanceStore, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManagerWithPolicy(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
 			return nil, nil, resolveErr
 		}
-		root, buildErr := agentFactory.Build(ctx, snapshot)
+		root, plugins, buildErr := agentFactory.BuildWithPlugins(ctx, snapshot)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
-		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root}, nil, nil
+		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, nil, nil
 	}, profilememory.BundleManagerPolicy{FailureBackoff: configValue.WorkerBundleFailureBackoff, CloseTimeout: configValue.WorkerBundleCloseTimeout})
 	credentialInvalidator := modelclient.CredentialInvalidator{Pool: credentialPool, Bundles: bundles, Subject: "worker-model"}
 
@@ -147,10 +180,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		runGovernance.InputGuard, runGovernance.OutputGuard = guard, guard
 	}
 	sessions := sessionpostgres.NewWithTelemetry(db, telemetryProvider)
-	memoryCache := memorystore.NewCache(memorypostgres.New(db), 5*time.Second)
 	payloads := messagingpostgres.NewWithPayloadKeyResolver(db, payloadKeys)
 	agentFactory.Confirmations, agentFactory.ToolResults = governanceStore, payloads
-	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
 	progressPublisher, err := progressredis.NewPublisher(redis, progressredis.Config{Environment: configValue.RedisEnvironment})
 	if err != nil {
 		return errors.New("progress publisher configuration rejected")
@@ -261,11 +292,6 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,
 		RetryDelay: configValue.WorkerRetryWait, PollInterval: configValue.WorkerReclaimInterval,
 		Telemetry: telemetryProvider}.Run)
-	start("memory invalidation relay", relay.TenantControlRelay{Outbox: payloads, Controls: publisher,
-		Kind: "memory-invalidation", Owner: workerID + "-memory-relay", BatchSize: configValue.WorkerReclaimLimit,
-		ClaimTTL: configValue.WorkerLeaseTTL, ClaimRenewInterval: configValue.WorkerLeaseRenew,
-		RetryDelay: configValue.WorkerRetryWait, PollInterval: configValue.WorkerReclaimInterval,
-		Telemetry: telemetryProvider}.Run)
 	start("execution control consumer", func(ctx context.Context) error {
 		return controlQueue.ConsumeExecutionControl(ctx, relay.ExecutionControlConsumerOptions{ConsumerID: workerID + "-control"}, hints.ConsumeExecutionControl)
 	})
@@ -297,11 +323,6 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	consumeConfigInvalidation := func(ctx context.Context, delivery relay.TenantControlDelivery) error {
 		event := delivery.Event
 		switch {
-		case event.Kind == "memory-invalidation" && strings.HasPrefix(event.PayloadRef, "memory://"):
-			// Redis delivery accelerates cache invalidation. The cache TTL remains
-			// the convergence fallback when a notification is missed.
-			memoryCache.ApplyInvalidation(memorystore.Invalidation{TenantID: event.TenantID, Version: int64(event.Version)})
-			return nil
 		case event.Kind != "config-invalidation":
 			return nil
 		case strings.HasPrefix(event.PayloadRef, "provider-profile://"):
@@ -409,6 +430,10 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if closeErr := bundles.Close(shutdownCtx); closeErr != nil && terminalErr == nil {
 		terminalErr = errors.New("runtime bundle shutdown timed out")
 	}
+	if closeErr := memoryService.Close(); closeErr != nil && terminalErr == nil {
+		terminalErr = errors.New("memory service shutdown failed")
+	}
+	memoryClosed = true
 	backgroundDone := make(chan struct{})
 	go func() { background.Wait(); close(backgroundDone) }()
 	select {
@@ -439,4 +464,47 @@ func buildToolCatalog(endpoints []mcpEndpoint) (*servicetool.Catalog, error) {
 		registrations = append(registrations, registration)
 	}
 	return servicetool.NewCatalog(registrations...)
+}
+
+// buildWorkerToolCatalog extends the reviewed MCP catalog with the optional,
+// service-owned code-execution registrations. The sandbox is intentionally
+// absent unless an operator supplies both exact tenant bindings and a dedicated
+// workspace root; this prevents a normal worker from accidentally acquiring a
+// local shell capability.
+func buildWorkerToolCatalog(mcpEndpoints []mcpEndpoint, codeExecutors []codeExecutorEndpoint, workspaceRoot string) (*servicetool.Catalog, error) {
+	catalog, err := buildToolCatalog(mcpEndpoints)
+	if err != nil {
+		return nil, err
+	}
+	if len(codeExecutors) == 0 {
+		return catalog, nil
+	}
+	config := toolcodeexec.DefaultConfig(workspaceRoot)
+	for _, endpoint := range codeExecutors {
+		registration, registrationErr := toolcodeexec.NewSandboxRegistration(endpoint.TenantID, endpoint.ToolID, endpoint.Version, endpoint.ContentDigest, config)
+		if registrationErr != nil {
+			return nil, fmt.Errorf("code executor %q: %w", endpoint.ToolID, registrationErr)
+		}
+		if registerErr := catalog.Register(registration); registerErr != nil {
+			return nil, fmt.Errorf("code executor %q catalog registration: %w", endpoint.ToolID, registerErr)
+		}
+	}
+	return catalog, nil
+}
+
+// buildKnowledgeResolver composes the public trpc-agent-go Knowledge runtime
+// from tenant ConfigSnapshot -> BackendProfile -> published Manifest. Endpoint
+// and credentials therefore remain per-tenant immutable control-plane facts,
+// never process-global worker settings.
+func buildKnowledgeResolver(secretProvider secrets.Provider, configs serviceknowledge.ConfigSnapshotReader,
+	profiles serviceknowledge.KnowledgeProfileReader, manifests serviceknowledge.IngestionStore,
+) (serviceagent.KnowledgeResolver, error) {
+	if secretProvider == nil || configs == nil || profiles == nil || manifests == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	factory := serviceknowledge.RuntimeFactory{Backends: serviceknowledge.BackendAdapterResolver{
+		Configs: configs, Backends: profiles, Secrets: secretProvider, Subject: "worker-knowledge-qdrant"},
+		Manifests: manifests, Embedders: serviceknowledge.EmbedderResolver{Profiles: profiles, Secrets: secretProvider, Subject: "worker-knowledge-embedder"}}
+	return serviceknowledge.Resolver{Factory: factory, Limits: serviceknowledge.RetrievalLimits{
+		MaxQueryBytes: 16 << 10, MaxResults: 20, MaxResultBytes: 1 << 20}}, nil
 }

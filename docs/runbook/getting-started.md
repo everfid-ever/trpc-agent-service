@@ -26,7 +26,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    ./start.sh --demo
    ```
 
-   命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.21）。
+   命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.24）。
 
 3. 只有需要真实模型闭环时，才创建仅本机可读的 DeepSeek 模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
 
@@ -94,6 +94,19 @@ go run ./cmd/trpc-service mcp-binding-digests
 ```
 
 发布 Revision 后，Worker 会在构建 Bundle 时用可信 ExecutionContext 执行 discovery，验证远端 declaration digest；每次调用也会通过同一受限端点、SecretRef 和结果大小门禁。改动 URL、超时、认证引用、远端名称或 declaration 都会使旧 Revision fail closed，必须发布带新 binding digest 的 Revision。
+
+## 2.1 可选：启用受限代码执行
+
+代码执行默认关闭，且不是本机 shell 的快捷入口。Worker 只接受固定 tenant/id/version 的注册，并使用上游 OS sandbox 的 managed、禁网、无环境继承 profile；没有可用 sandbox 时执行会失败，不会退回宿主执行。准备一个仅由 Worker 使用、不是仓库、不是 Skill staging 且不含业务文件的绝对目录，例如 `/var/lib/trpc-agent-service/codeexecutor`：
+
+```bash
+export TRPC_CODE_EXECUTOR_WORKSPACE_ROOT=/var/lib/trpc-agent-service/codeexecutor
+go run ./cmd/trpc-service code-executor-binding-digest \
+  --tool-id sandbox_execute_code --version 1
+# <64-char-binding-digest>
+```
+
+将输出写入 `TRPC_CODE_EXECUTORS[].content_digest`，例如 `[{"tenant_id":"replace-after-seeding","tool_id":"sandbox_execute_code","version":1,"content_digest":"<output>"}]`；再以同一个值创建或更新 Draft Revision 的 `tool_refs[].content_digest` 后发布。工具仅支持 Python/Bash，每次调用使用可信 tenant/request 创建并清理 workspace；模型提供的 `execution_id`、本地执行器、共享 workspace 和未扫描输出文件都不会被接受。部署前可运行 `code-executor-binding-digests` 复核已配置条目的 digest。
 
 ## 3. 启动本地 WebUI
 
@@ -295,7 +308,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 ## 7. 本地验证命令
 
 ```bash
-# 纯 Go 静态、单元与 race 检查（Go 1.21）
+# 纯 Go 静态、单元与 race 检查（Go 1.24）
 bash scripts/ci_admission.sh
 bash scripts/ci_admission.sh --race
 

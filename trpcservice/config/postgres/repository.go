@@ -323,17 +323,28 @@ func (r *Repository) invalidateReleaseTargets(ctx context.Context, tx *sql.Tx, r
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var tenantIDs []string
 	for rows.Next() {
 		var tenantID string
 		if err = rows.Scan(&tenantID); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		tenantIDs = append(tenantIDs, tenantID)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, tenantID := range tenantIDs {
 		if err = insertInvalidation(ctx, tx, tenantID, releaseID, version); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func insertInvalidation(ctx context.Context, tx *sql.Tx, tenantID, releaseID string, version int64) error {

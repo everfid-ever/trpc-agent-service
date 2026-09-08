@@ -38,6 +38,10 @@ type Config struct {
 	// by read-back verification.
 	VectorSize        int
 	SnapshotWatermark string
+	// VectorGeneration is the immutable collection generation selected by a
+	// tenant BackendProfile. Runtime retrieval checks it against the published
+	// Knowledge Manifest before querying this adapter.
+	VectorGeneration  string
 	AllowInsecureHTTP bool
 	HTTPClient        *http.Client
 	TokenSource       TokenSource
@@ -54,6 +58,7 @@ type Adapter struct {
 	collection        string
 	vectorSize        int
 	snapshotWatermark string
+	vectorGeneration  string
 	client            *http.Client
 	tokens            TokenSource
 	embedder          Embedder
@@ -70,7 +75,8 @@ func New(config Config, embedder Embedder) (*Adapter, error) {
 		config.HTTPClient = &http.Client{Timeout: 20 * time.Second}
 	}
 	return &Adapter{endpoint: endpoint, collection: config.Collection, vectorSize: config.VectorSize,
-		snapshotWatermark: config.SnapshotWatermark, client: config.HTTPClient, tokens: config.TokenSource, embedder: embedder}, nil
+		snapshotWatermark: config.SnapshotWatermark, vectorGeneration: config.VectorGeneration,
+		client: config.HTTPClient, tokens: config.TokenSource, embedder: embedder}, nil
 }
 
 func (a *Adapter) LoadChunk(ctx context.Context, key knowledgedriver.ChunkKey) (knowledgedriver.ChunkImage, error) {
@@ -240,11 +246,27 @@ func (a *Adapter) search(ctx context.Context, in knowledgedriver.SearchRequest, 
 	if err != nil || len(vector) != a.vectorSize {
 		return nil, runtime.ErrBackendUnavailable
 	}
+	return a.searchVector(ctx, in, vector, limit, minScore)
+}
+
+// searchVector is shared by migration probes and the framework VectorStore
+// adapter. Both paths therefore query the one migration-governed collection
+// and use the same tenant/knowledge envelope.
+func (a *Adapter) searchVector(ctx context.Context, in knowledgedriver.SearchRequest, vector []float32, limit int, minScore float64) ([]point, error) {
+	if a == nil || strings.TrimSpace(in.TenantID) == "" || strings.TrimSpace(in.KnowledgeID) == "" || in.KnowledgeVersion < 1 {
+		return nil, runtime.ErrInvariantViolation
+	}
+	if limit < 1 || limit > 64 || math.IsNaN(minScore) || math.IsInf(minScore, 0) {
+		return nil, runtime.ErrInvariantViolation
+	}
+	if len(vector) != a.vectorSize {
+		return nil, runtime.ErrInvariantViolation
+	}
 	var response struct {
 		Result []point `json:"result"`
 	}
 	if err := a.request(ctx, http.MethodPost, "/collections/"+url.PathEscape(a.collection)+"/points/search", map[string]any{
-		"vector": vector, "limit": limit, "score_threshold": minScore, "with_payload": true, "with_vector": true, "filter": tenantFilter(in.TenantID),
+		"vector": vector, "limit": limit, "score_threshold": minScore, "with_payload": true, "with_vector": true, "filter": knowledgeFilter(in),
 	}, &response); err != nil {
 		return nil, err
 	}
@@ -389,6 +411,29 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any, ou
 
 func tenantFilter(tenantID string) map[string]any {
 	return map[string]any{"must": []any{map[string]any{"key": "tenant_id", "match": map[string]any{"value": tenantID}}}}
+}
+
+func knowledgeFilter(in knowledgedriver.SearchRequest) map[string]any {
+	return map[string]any{"must": []any{
+		map[string]any{"key": "tenant_id", "match": map[string]any{"value": in.TenantID}},
+		map[string]any{"key": "knowledge_id", "match": map[string]any{"value": in.KnowledgeID}},
+		map[string]any{"key": "knowledge_version", "match": map[string]any{"value": in.KnowledgeVersion}},
+	}}
+}
+
+// VectorSize returns the reviewed dimension of this immutable binding.
+func (a *Adapter) VectorSize() int {
+	if a == nil {
+		return 0
+	}
+	return a.vectorSize
+}
+
+func (a *Adapter) VectorGeneration() string {
+	if a == nil {
+		return ""
+	}
+	return a.vectorGeneration
 }
 func pointID(key knowledgedriver.ChunkKey) string {
 	sum := sha256.Sum256([]byte(key.TenantID + "\x00" + key.KnowledgeID + "\x00" + strconv.FormatInt(key.KnowledgeVersion, 10) + "\x00" + key.ChunkID))

@@ -24,6 +24,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/migrations"
 	serviceagent "github.com/liuzengh/trpc-agent-service/trpcservice/agent"
 	checkpointredis "github.com/liuzengh/trpc-agent-service/trpcservice/agent/checkpointredis"
+	agentcondition "github.com/liuzengh/trpc-agent-service/trpcservice/agent/condition"
 	agentapp "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
@@ -66,7 +67,11 @@ import (
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/generation"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
+	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
+	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
+	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
+	knowledgepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/postgres"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -74,6 +79,7 @@ import (
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tool/localnote"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	agentmemorypg "trpc.group/trpc-go/trpc-agent-go/memory/postgres"
 )
 
 const (
@@ -98,7 +104,7 @@ const (
 
 type webUILocalConfig struct {
 	PostgresDSN, RedisAddress, ListenAddress                   string
-	RedisEnvironment, SecretRoot, APIKeyFile                   string
+	RedisEnvironment, SecretRoot, APIKeyFile, SkillStagingRoot string
 	RouteKey, Token, InstanceID, ClamAVAddress                 string
 	ExclusiveRuntime                                           bool
 	FeishuEnabled                                              bool
@@ -237,31 +243,62 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: appRepo, Configs: configRepo, Models: bootstrap.ProviderRepo}
 	models := modelclient.Resolver{Profiles: bootstrap.ProviderRepo, Secrets: bootstrap.SecretStore, Credentials: generation.New(bootstrap.SecretStore), Subject: "worker-model"}
 	governanceStore := governancepostgres.New(db)
+	skills := serviceskill.Resolver{Catalog: skillpostgres.New(db), StagingRoot: configValue.SkillStagingRoot}
+	knowledgeResolver, err := buildKnowledgeResolver(bootstrap.SecretStore, configRepo, bootstrap.ProviderRepo, knowledgepostgres.New(db))
+	if err != nil {
+		return errors.New("knowledge resolver configuration rejected")
+	}
 	toolCatalog, err := servicetool.NewCatalog(localnote.Registration(webUILocalTenantID))
 	if err != nil {
 		return errors.New("tool catalog initialization failed")
 	}
 	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: bootstrap.SecretStore}
+	artifacts := artifactpostgres.New(db)
+	// AppName is fixed by the published control-plane profile as
+	// "tenantID/agentAppID". Recovering the tenant here keeps the framework
+	// artifact.Service on the same tenant-scoped storage contract as inbound
+	// attachments, and fails closed for a malformed AppName.
+	artifactService := &serviceartifact.SDKService{Store: artifacts, MapTenant: func(appName string) string {
+		tenantID, tenantErr := serviceartifact.TenantFromAppName(appName)
+		if tenantErr != nil {
+			return ""
+		}
+		return tenantID
+	}}
 	browser.ReplyRoutes = payloads
 	browser.Confirmations = governanceStore
 	browser.Actions = governance.ConfirmationActionService{Coordinator: governanceStore}
 	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: 7 * 24 * time.Hour}
-	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Checkpoints: graphCheckpoints,
+	// Keep the local WebUI execution path on the same official long-term
+	// Memory implementation as the Worker role. The service baseline owns the
+	// framework schema, so the SDK must never attempt a process-startup DDL
+	// mutation here.
+	memoryService, err := agentmemorypg.NewService(
+		agentmemorypg.WithPostgresClientDSN(configValue.PostgresDSN),
+		agentmemorypg.WithSkipDBInit(true),
+	)
+	if err != nil {
+		return errors.New("memory service configuration rejected")
+	}
+	defer memoryService.Close()
+	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Knowledge: knowledgeResolver,
+		Conditions: agentcondition.DefaultRegistry(),
+		Memory:     memoryService, Checkpoints: graphCheckpoints,
 		Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
 			return nil, nil, resolveErr
 		}
-		root, buildErr := agentFactory.Build(ctx, snapshot)
+		root, plugins, buildErr := agentFactory.BuildWithPlugins(ctx, snapshot)
 		if buildErr != nil {
 			return nil, nil, buildErr
 		}
-		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root}, nil, nil
+		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, nil, nil
 	})
 	defer bundles.Close(context.Background())
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
-		Sessions: sessionpostgres.NewWithTelemetry(db, telemetryProvider), Payloads: payloads, Artifacts: artifactpostgres.New(db),
+		Sessions: sessionpostgres.NewWithTelemetry(db, telemetryProvider), Payloads: payloads, Artifacts: artifacts,
 		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
 		Progress:   progressPublisher,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
@@ -278,7 +315,7 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	media := preprocess.MediaStager{Fetcher: preprocess.MediaRouter{
 		Feishu: feishu.OfficialMediaFetcher{Tokens: feishuCredentials, Client: providerHTTP},
 		WeCom:  wecom.OfficialMediaFetcher{Tokens: wecomTokens, Client: providerHTTP},
-	}, Malware: malware, DLP: localDisabledDLP{}, Artifacts: artifactpostgres.New(db), MaxBytes: 10 << 20}
+	}, Malware: malware, DLP: localDisabledDLP{}, Artifacts: artifacts, MaxBytes: 10 << 20}
 	preprocessor := preprocess.Worker{Store: preprocessStore, Payloads: payloads, Dispatcher: dispatcher,
 		Owner: configValue.instanceName("preprocess"), LeaseTTL: 30 * time.Second, RetryDelay: time.Second, MaxAttempts: 8,
 		Media: &media, ArtifactRetention: 24 * time.Hour, Telemetry: telemetryProvider}
@@ -451,6 +488,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		RedisAddress: strings.TrimSpace(getenv("TRPC_REDIS_ADDRESS")), ListenAddress: valueOr(getenv("TRPC_LISTEN_ADDRESS"), ":8080"),
 		RedisEnvironment:        valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "local-runtime"),
 		SecretRoot:              valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
+		SkillStagingRoot:        valueOr(getenv("TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT"), "/tmp/trpc-webui-skills"),
 		APIKeyFile:              valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
 		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
 		Token:                   valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
@@ -470,7 +508,8 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		WeComEncodingAESKey:     strings.TrimSpace(getenv("WECOM_ENCODING_AES_KEY")),
 	}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
-		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || strings.TrimSpace(value.ClamAVAddress) != value.ClamAVAddress || value.ClamAVAddress == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) {
+		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || strings.TrimSpace(value.ClamAVAddress) != value.ClamAVAddress || value.ClamAVAddress == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) ||
+		!filepath.IsAbs(value.SkillStagingRoot) || filepath.Clean(value.SkillStagingRoot) != value.SkillStagingRoot || value.SkillStagingRoot == value.SecretRoot {
 		return webUILocalConfig{}, errors.New("required WebUI local configuration is missing or invalid")
 	}
 	if !validWebUILocalInstanceID(value.InstanceID) {
@@ -553,8 +592,18 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	if err := os.Chmod(configValue.SecretRoot, 0o700); err != nil {
 		return webUILocalBootstrap{}, err
 	}
+	// Skills are staged through the same immutable catalog as the production
+	// Worker. Keep their content root distinct from the secret projection; a
+	// local WebUI runtime must never make credentials discoverable as Skill
+	// files, even in a disposable Compose volume.
+	if err := os.MkdirAll(configValue.SkillStagingRoot, 0o700); err != nil {
+		return webUILocalBootstrap{}, err
+	}
+	if err := os.Chmod(configValue.SkillStagingRoot, 0o700); err != nil {
+		return webUILocalBootstrap{}, err
+	}
 
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.PostgresBackendSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.QdrantVectorSchema())
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}

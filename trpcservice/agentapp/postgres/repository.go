@@ -171,6 +171,9 @@ func (r *Repository) UpdateDraft(ctx context.Context, in agentapp.UpdateDraftInp
 	if _, err = tx.ExecContext(ctx, `DELETE FROM agent_app_revision_skill WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, value.TenantID, value.AgentAppID, value.Revision); err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM agent_app_revision_plugin WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, value.TenantID, value.AgentAppID, value.Revision); err != nil {
+		return agentapp.Revision{}, classify(err)
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM agent_app_revision_child WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3`, value.TenantID, value.AgentAppID, value.Revision); err != nil {
 		return agentapp.Revision{}, classify(err)
 	}
@@ -277,6 +280,25 @@ func (r *Repository) GetRevision(ctx context.Context, tenantID, appID string, re
 	if err = skillRows.Close(); err != nil {
 		return agentapp.Revision{}, err
 	}
+	pluginRows, err := r.db.QueryContext(ctx, `SELECT plugin_id,plugin_version FROM agent_app_revision_plugin WHERE tenant_id=$1 AND agent_app_id=$2 AND revision=$3 ORDER BY plugin_id`, tenantID, appID, revision)
+	if err != nil {
+		return agentapp.Revision{}, classify(err)
+	}
+	for pluginRows.Next() {
+		var ref agentapp.PluginRef
+		if err = pluginRows.Scan(&ref.ID, &ref.Version); err != nil {
+			pluginRows.Close()
+			return agentapp.Revision{}, err
+		}
+		value.PluginRefs = append(value.PluginRefs, ref)
+	}
+	if err = pluginRows.Err(); err != nil {
+		pluginRows.Close()
+		return agentapp.Revision{}, err
+	}
+	if err = pluginRows.Close(); err != nil {
+		return agentapp.Revision{}, err
+	}
 	return value, nil
 }
 func (r *Repository) Publish(ctx context.Context, in agentapp.PublishInput) (agentapp.PublishResult, error) {
@@ -363,6 +385,11 @@ func writeRefs(ctx context.Context, tx *sql.Tx, value agentapp.Revision) error {
 	}
 	for _, ref := range value.SkillRefs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_app_revision_skill(tenant_id,agent_app_id,revision,skill_id,skill_version,content_digest) VALUES($1,$2,$3,$4,$5,$6)`, value.TenantID, value.AgentAppID, value.Revision, ref.ID, ref.Version, ref.ContentDigest); err != nil {
+			return classify(err)
+		}
+	}
+	for _, ref := range value.PluginRefs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO agent_app_revision_plugin(tenant_id,agent_app_id,revision,plugin_id,plugin_version) VALUES($1,$2,$3,$4,$5)`, value.TenantID, value.AgentAppID, value.Revision, ref.ID, ref.Version); err != nil {
 			return classify(err)
 		}
 	}

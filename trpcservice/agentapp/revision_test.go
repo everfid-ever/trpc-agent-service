@@ -38,6 +38,39 @@ func TestContentDigestIncludesToolBindingDigest(t *testing.T) {
 	}
 }
 
+func TestRevisionPluginsAreVersionedAndIncludedInDigest(t *testing.T) {
+	base := Revision{TenantID: "tenant", AgentAppID: "app", Revision: 1, DraftVersion: 1, AgentKind: AgentKindLLM, SchemaVersion: 1,
+		Instruction: "help", ModelProfileID: "model", ModelProfileVersion: 1, PluginRefs: []PluginRef{{ID: PluginToolCallID, Version: 1}}}
+	if err := base.ValidateDraft(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := base.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.PluginRefs[0].Version = 2
+	if err := base.ValidateDraft(); err == nil {
+		t.Fatal("unsupported plugin version accepted")
+	}
+	second, err := base.ComputeContentDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("plugin selection did not affect digest")
+	}
+}
+
+func TestToolSearchPluginRequiresLLMRevision(t *testing.T) {
+	revision := Revision{TenantID: "tenant", AgentAppID: "app", Revision: 1, DraftVersion: 1,
+		AgentKind: AgentKindChain, SchemaVersion: 1, PluginRefs: []PluginRef{{ID: PluginToolSearch, Version: 1}},
+		AgentSpec: AgentSpecV1{Nodes: []AgentNodeSpecV1{{Key: "child", FailurePolicy: FailurePolicyFailFast,
+			AgentRef: PublishedAgentRef{AgentAppID: "child", Revision: 1, ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}}}}
+	if !errors.Is(revision.ValidateDraft(), ErrInvalid) {
+		t.Fatalf("composite revision accepted tool_search: %v", revision.ValidateDraft())
+	}
+}
+
 func TestNormalizeRevisionCanonicalizesNilObjectFields(t *testing.T) {
 	revision := NormalizeRevision(Revision{})
 	if revision.GenerationConfig == nil || revision.RuntimePolicy == nil || revision.FallbackModelRefs == nil {

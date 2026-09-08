@@ -26,7 +26,7 @@ cd trpc-agent-service
 
 该命令从空 PostgreSQL 启动 deterministic fake provider，检查健康、readiness、普通 chat 与 SSE delta；完成后会打印访问地址和仅清理其自身资源的命令。覆盖范围与明确豁免项见 [Fake Demo 覆盖面](docs/runbook/demo-fake-coverage.md)。
 
-如需执行与 CI 相同的完整无凭据门禁，另需本机 Go 1.21：
+如需执行与 CI 相同的完整无凭据门禁，另需本机 Go 1.24：
 
 ~~~
 bash scripts/ci_admission.sh --demo

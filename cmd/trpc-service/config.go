@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +69,8 @@ type productionConfig struct {
 	WorkerBundleFailureBackoff, WorkerBundleCloseTimeout         time.Duration
 	WorkerGraphCheckpointTTL                                     time.Duration
 	MCPEndpoints                                                 []mcpEndpoint
+	CodeExecutorWorkspaceRoot                                    string
+	CodeExecutors                                                []codeExecutorEndpoint
 
 	GatewayProbeTenant, GatewayAuthSecretRef, GatewayPublicURL           string
 	GatewayAuthSecretVersion, GatewayMaxBody, GatewaySSEReplayLimit      int64
@@ -346,6 +349,15 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 	if config.MCPEndpoints, err = parseMCPEndpoints(getenv("TRPC_MCP_ENDPOINTS")); err != nil {
 		return productionConfig{}, err
 	}
+	if config.CodeExecutors, err = parseCodeExecutorEndpoints(getenv("TRPC_CODE_EXECUTORS")); err != nil {
+		return productionConfig{}, err
+	}
+	config.CodeExecutorWorkspaceRoot = strings.TrimSpace(getenv("TRPC_CODE_EXECUTOR_WORKSPACE_ROOT"))
+	if len(config.CodeExecutors) != 0 && (config.CodeExecutorWorkspaceRoot == "" ||
+		!filepath.IsAbs(config.CodeExecutorWorkspaceRoot) || filepath.Clean(config.CodeExecutorWorkspaceRoot) != config.CodeExecutorWorkspaceRoot ||
+		config.CodeExecutorWorkspaceRoot == string(filepath.Separator)) {
+		return productionConfig{}, errors.New("invalid TRPC_CODE_EXECUTOR_WORKSPACE_ROOT")
+	}
 	return config, nil
 }
 
@@ -411,6 +423,63 @@ func parseMCPEndpoints(raw string) ([]mcpEndpoint, error) {
 		result = append(result, endpoint)
 	}
 	return result, nil
+}
+
+// codeExecutorEndpoint is one fixed, tenant-scoped sandbox execution tool.
+// It is operator configuration rather than tenant input. The digest is the
+// reviewed identity of the service-owned sandbox policy and must be carried by
+// the published ToolRef before the model can see this tool.
+type codeExecutorEndpoint struct {
+	TenantID      string
+	ToolID        string
+	Version       int64
+	ContentDigest string
+}
+
+type codeExecutorEndpointJSON struct {
+	TenantID      string `json:"tenant_id"`
+	ToolID        string `json:"tool_id"`
+	Version       int64  `json:"version"`
+	ContentDigest string `json:"content_digest"`
+}
+
+func parseCodeExecutorEndpoints(raw string) ([]codeExecutorEndpoint, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	var specs []codeExecutorEndpointJSON
+	if err := json.Unmarshal([]byte(raw), &specs); err != nil || len(specs) == 0 {
+		return nil, errors.New("invalid TRPC_CODE_EXECUTORS JSON")
+	}
+	seen := make(map[string]struct{}, len(specs))
+	result := make([]codeExecutorEndpoint, 0, len(specs))
+	for _, spec := range specs {
+		endpoint := codeExecutorEndpoint{TenantID: strings.TrimSpace(spec.TenantID), ToolID: strings.TrimSpace(spec.ToolID),
+			Version: spec.Version, ContentDigest: strings.TrimSpace(spec.ContentDigest)}
+		if endpoint.TenantID == "" || endpoint.ToolID == "" || endpoint.Version < 1 || !validSHA256Digest(endpoint.ContentDigest) {
+			return nil, errors.New("invalid TRPC_CODE_EXECUTORS entry")
+		}
+		key := endpoint.TenantID + "\x00" + endpoint.ToolID + "\x00" + strconv.FormatInt(endpoint.Version, 10)
+		if _, exists := seen[key]; exists {
+			return nil, errors.New("duplicate TRPC_CODE_EXECUTORS entry")
+		}
+		seen[key] = struct{}{}
+		result = append(result, endpoint)
+	}
+	return result, nil
+}
+
+func validSHA256Digest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseWorkerShards(raw string, count int) ([]uint32, error) {

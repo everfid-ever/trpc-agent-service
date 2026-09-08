@@ -6886,22 +6886,7 @@ CREATE TABLE public.config_release_target (
 CREATE INDEX config_release_target_effective_idx ON public.config_release_target(tenant_id, baseline_config_version, release_id);
 
 ALTER TABLE public.outbox DROP CONSTRAINT outbox_kind_check;
-ALTER TABLE public.outbox ADD CONSTRAINT outbox_kind_check CHECK (kind = ANY (ARRAY['audit'::text, 'tenant-control'::text, 'config-invalidation'::text, 'memory-invalidation'::text, 'dispatch'::text, 'reply'::text, 'wakeup'::text, 'execution-control'::text]));
-CREATE TABLE public.memory_watermark (tenant_id text PRIMARY KEY REFERENCES public.tenant(tenant_id), version bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT now(), CONSTRAINT memory_watermark_version_check CHECK (version >= 0));
-CREATE TABLE public.memory_entry (
- tenant_id text NOT NULL REFERENCES public.tenant(tenant_id), scope text NOT NULL, subject_id text NOT NULL DEFAULT '', memory_id text NOT NULL, version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, attributes jsonb NOT NULL DEFAULT '{}'::jsonb, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
- PRIMARY KEY (tenant_id, scope, subject_id, memory_id), CONSTRAINT memory_entry_scope_check CHECK ((scope = 'tenant' AND subject_id = '') OR (scope = 'user' AND length(btrim(subject_id)) > 0)), CONSTRAINT memory_entry_version_check CHECK (version >= 1 AND tenant_watermark >= 1), CONSTRAINT memory_entry_content_check CHECK (length(btrim(content_ref)) > 0 AND content_digest ~ '^[0-9a-f]{64}$'), CONSTRAINT memory_entry_attributes_check CHECK (jsonb_typeof(attributes) = 'object')
-);
-CREATE INDEX memory_entry_tenant_scope_idx ON public.memory_entry(tenant_id, scope, subject_id, memory_id);
-CREATE TABLE public.memory_mutation (
- tenant_id text NOT NULL REFERENCES public.tenant(tenant_id), mutation_id text NOT NULL, scope text NOT NULL, subject_id text NOT NULL, memory_id text NOT NULL, entry_version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, attributes jsonb NOT NULL, created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
- PRIMARY KEY (tenant_id, mutation_id), CONSTRAINT memory_mutation_scope_check CHECK ((scope = 'tenant' AND subject_id = '') OR (scope = 'user' AND length(btrim(subject_id)) > 0)), CONSTRAINT memory_mutation_version_check CHECK (entry_version >= 1 AND tenant_watermark >= 1), CONSTRAINT memory_mutation_content_check CHECK (length(btrim(mutation_id)) > 0 AND length(btrim(content_ref)) > 0 AND content_digest ~ '^[0-9a-f]{64}$'), CONSTRAINT memory_mutation_attributes_check CHECK (jsonb_typeof(attributes) = 'object')
-);
-CREATE TABLE public.memory_index_intent (
- tenant_id text NOT NULL, mutation_id text NOT NULL, scope text NOT NULL, subject_id text NOT NULL, memory_id text NOT NULL, entry_version bigint NOT NULL, tenant_watermark bigint NOT NULL, content_ref text NOT NULL, content_digest text NOT NULL, state text NOT NULL DEFAULT 'pending', created_at timestamptz NOT NULL DEFAULT now(), indexed_at timestamptz,
- PRIMARY KEY (tenant_id, mutation_id), CONSTRAINT memory_index_intent_mutation_fk FOREIGN KEY (tenant_id, mutation_id) REFERENCES public.memory_mutation(tenant_id, mutation_id), CONSTRAINT memory_index_intent_state_check CHECK (state IN ('pending','indexed','failed')), CONSTRAINT memory_index_intent_version_check CHECK (entry_version >= 1 AND tenant_watermark >= 1)
-);
-CREATE INDEX memory_index_intent_pending_idx ON public.memory_index_intent(state, created_at, tenant_id);
+ALTER TABLE public.outbox ADD CONSTRAINT outbox_kind_check CHECK (kind = ANY (ARRAY['audit'::text, 'tenant-control'::text, 'config-invalidation'::text, 'dispatch'::text, 'reply'::text, 'wakeup'::text, 'execution-control'::text]));
 
 ALTER TABLE public.result_payload ADD COLUMN content_type text NOT NULL DEFAULT 'text/plain', ADD CONSTRAINT result_payload_content_type_check CHECK (content_type IN ('text/plain', 'application/vnd.trpc.card+json') OR content_type ~ '^image/[a-z0-9.+-]+$');
 ALTER TABLE public.interaction_payload ADD COLUMN content_type text NOT NULL DEFAULT 'text/plain', ADD CONSTRAINT interaction_payload_content_type_check CHECK (content_type IN ('text/plain', 'application/vnd.trpc.card+json') OR content_type ~ '^image/[a-z0-9.+-]+$');
@@ -6919,5 +6904,39 @@ END;
 $$;
 CREATE TRIGGER execution_record_hydrate_execution_budget BEFORE INSERT ON public.execution_record FOR EACH ROW EXECUTE FUNCTION public.hydrate_execution_budget();
 REVOKE ALL ON FUNCTION public.hydrate_execution_budget() FROM PUBLIC;
+
+-- Framework-owned agent long-term memory (trpc-agent-go/memory/postgres). The
+-- worker runs the service with WithSkipDBInit(true), so the schema is owned by
+-- this baseline; column types match the framework's verifySchema expectation.
+CREATE TABLE public.memories (
+ memory_id text PRIMARY KEY,
+ app_name text NOT NULL,
+ user_id text NOT NULL,
+ memory_data jsonb NOT NULL,
+ created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ deleted_at timestamp NULL DEFAULT NULL
+);
+CREATE INDEX idx_memories_app_user ON public.memories(app_name, user_id);
+CREATE INDEX idx_memories_updated_at ON public.memories(updated_at DESC);
+CREATE INDEX idx_memories_deleted_at ON public.memories(deleted_at);
+
+-- Runner plugins are immutable revision capabilities. The database repeats the
+-- reviewed allow-list so direct SQL cannot publish arbitrary framework hooks.
+CREATE TABLE public.agent_app_revision_plugin (
+ tenant_id text NOT NULL,
+ agent_app_id text NOT NULL,
+ revision bigint NOT NULL,
+ plugin_id text NOT NULL,
+ plugin_version bigint NOT NULL,
+ PRIMARY KEY (tenant_id, agent_app_id, revision, plugin_id),
+ CONSTRAINT agent_app_revision_plugin_version_check CHECK (plugin_version = 1),
+ CONSTRAINT agent_app_revision_plugin_allowlist_check CHECK (plugin_id IN ('tool_call_id', 'message_merger', 'tool_search', 'await_user_reply')),
+ CONSTRAINT agent_app_revision_plugin_revision_fk FOREIGN KEY (tenant_id, agent_app_id, revision)
+   REFERENCES public.agent_app_revision(tenant_id, agent_app_id, revision) ON DELETE CASCADE
+);
+CREATE TRIGGER agent_app_revision_plugin_draft_only
+ BEFORE INSERT OR DELETE OR UPDATE ON public.agent_app_revision_plugin
+ FOR EACH ROW EXECUTE FUNCTION public.guard_revision_child_write();
 
 COMMIT;

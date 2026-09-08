@@ -31,6 +31,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
+	toolawaitreply "trpc.group/trpc-go/trpc-agent-go/tool/awaitreply"
 )
 
 type InputDecoder interface {
@@ -268,6 +269,21 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	runOptions := []agentcore.RunOption{agentcore.WithAppName(appName), agentcore.WithRequestID(envelope.RequestID)}
 	if w.Governance != nil {
 		toolRule := func(value agenttool.Tool) governance.Decision {
+			// await_user_reply is a code-owned control-flow tool injected by
+			// llmagent, rather than a tenant ToolRef compiled by ToolSurfaceCompiler.
+			// Permit only the exact upstream type and only when the immutable
+			// published Revision explicitly enabled the extension. This does not
+			// broaden the tenant tool surface for arbitrary same-named tools.
+			if isEnabledAwaitUserReplyTool(snapshot, value) {
+				return governance.Decision{
+					TenantID:      permit.Policy.TenantID,
+					RequestID:     envelope.RequestID,
+					Stage:         "framework_control",
+					Action:        governance.ActionAllow,
+					ReasonCode:    governance.ReasonAllowed,
+					PolicyVersion: permit.Policy.Version,
+				}
+			}
 			versioned, ok := value.(governance.VersionedTool)
 			if !ok || value == nil || value.Declaration() == nil {
 				return governance.Decision{Action: governance.ActionDeny, ReasonCode: governance.ReasonToolDenied}
@@ -293,6 +309,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 				}
 				return agenttool.AllowPermission(), nil
 			}))
+		// The runner plugin receives this immutable policy only for catalog
+		// visibility. Final execution remains protected by the same RunOptions
+		// and by the guarded callable's exact-policy re-resolution.
+		runCtx = serviceagent.WithToolSearchPolicy(runCtx, permit.Policy)
 	}
 	usageOffset := governance.Usage{}
 	if continuation != nil {
@@ -1308,6 +1328,24 @@ func encodeResultRef(ctx context.Context, encoder ResultRefEncoder, envelope run
 	}
 	digest := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("result://%s/%s/%s", envelope.TenantID, envelope.RequestID, hex.EncodeToString(digest[:])), nil
+}
+
+// isEnabledAwaitUserReplyTool recognizes the single upstream control-flow
+// primitive injected by llmagent.WithAwaitUserReplyTool. It is not a
+// tenant-configured ToolRef: calling it only stages an SDK routing directive in
+// the current session and never performs external I/O. Keeping this exception
+// type- and Revision-bound prevents a tenant tool with the same declaration
+// name from bypassing normal governance.
+func isEnabledAwaitUserReplyTool(snapshot profile.ExecutionProfileSnapshot, value agenttool.Tool) bool {
+	if _, ok := value.(*toolawaitreply.Tool); !ok {
+		return false
+	}
+	for _, ref := range snapshot.PluginRefs {
+		if ref.ID == agentapp.PluginAwaitUserReply && ref.Version == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // JSONTextInputDecoder is used by the HTTP fake slice. Production Channel

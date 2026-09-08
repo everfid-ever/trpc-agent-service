@@ -76,7 +76,7 @@ if scan_forbidden_imports; then
   exit 1
 fi
 
-if ! grep -Eq '^go 1\.21([[:space:]]|$)' go.mod; then
-  echo "go.mod must retain the Go 1.21 baseline" >&2
+if ! grep -Eq '^go 1\.24([[:space:]]|\.|$)' go.mod; then
+  echo "go.mod must retain the Go 1.24 baseline" >&2
   exit 1
 fi

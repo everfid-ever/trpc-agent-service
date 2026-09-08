@@ -11,6 +11,7 @@ type VersionedRef struct {
 }
 
 type SkillRef = agentapp.SkillRef
+type PluginRef = agentapp.PluginRef
 type AgentSpecV1 = agentapp.AgentSpecV1
 
 type CapabilitySet map[string]bool
@@ -52,6 +53,7 @@ type ExecutionProfileSnapshot struct {
 	FallbackModelRefs   []VersionedRef
 	ToolRefs            []VersionedRef
 	SkillRefs           []SkillRef
+	PluginRefs          []PluginRef
 	KnowledgeRefs       []VersionedRef
 	GenerationConfig    GenerationConfigV1
 	RuntimePolicy       RuntimePolicyV1

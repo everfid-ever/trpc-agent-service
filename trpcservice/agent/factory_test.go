@@ -11,12 +11,19 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/skill"
 )
 
 type modelResolver struct{ value model.Model }
 
 func (r modelResolver) ResolveModel(context.Context, string, profile.VersionedRef) (model.Model, error) {
 	return r.value, nil
+}
+
+type skillResolver struct{ provider skill.RepositoryProvider }
+
+func (r skillResolver) RepositoryProvider(context.Context, string, []profile.SkillRef) (skill.RepositoryProvider, error) {
+	return r.provider, nil
 }
 
 func TestFactoryBuildsAllAgentKindsFromFixedChildProfiles(t *testing.T) {
@@ -72,5 +79,52 @@ func TestFactoryFailsClosedForRequiredCheckpoint(t *testing.T) {
 	})
 	if !errors.Is(err, runtime.ErrCapabilityUnsupported) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestFactorySkillsExplicitlyDisableLocalWorkspaceExecutor(t *testing.T) {
+	const digest = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	snapshot := profile.ExecutionProfileSnapshot{
+		Key: profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: 1,
+			ContentDigest: digest, ConfigVersion: 2, PolicyVersion: 3},
+		ContentDigest: digest, AgentKind: agentapp.AgentKindLLM, Instruction: "answer",
+		ModelProfileRef: profile.VersionedRef{ID: "model", Version: 1},
+		SkillRefs: []profile.SkillRef{{ID: "handbook", Version: 1,
+			ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+	}
+	factory := Factory{
+		Profiles: profilememory.NewResolver(snapshot),
+		Models:   modelResolver{value: mockmodel.New()},
+		Skills: skillResolver{provider: skill.RepositoryProviderFunc(
+			func(context.Context, skill.SkillScope) (skill.Repository, error) { return nil, nil },
+		)},
+	}
+	root, err := factory.Build(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range root.Tools() {
+		if value != nil && value.Declaration() != nil && value.Declaration().Name == "workspace_exec" {
+			t.Fatal("skills unexpectedly enabled the SDK local workspace executor")
+		}
+	}
+}
+
+func TestFactoryEnablesAwaitUserReplyOnlyForPublishedExtension(t *testing.T) {
+	const digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	snapshot := profile.ExecutionProfileSnapshot{
+		Key: profile.ExecutionProfileKey{TenantID: "tenant-a", AgentAppID: "app", AgentAppRevision: 1,
+			ContentDigest: digest, ConfigVersion: 2, PolicyVersion: 3},
+		ContentDigest: digest, AgentKind: agentapp.AgentKindLLM, Instruction: "answer",
+		ModelProfileRef: profile.VersionedRef{ID: "model", Version: 1},
+		PluginRefs:      []profile.PluginRef{{ID: agentapp.PluginAwaitUserReply, Version: 1}},
+	}
+	factory := Factory{Profiles: profilememory.NewResolver(snapshot), Models: modelResolver{value: mockmodel.New()}}
+	root, err := factory.Build(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasToolNamed(root, "await_user_reply") {
+		t.Fatalf("await_user_reply is missing from extension-enabled root; tools=%v", toolNames(root))
 	}
 }

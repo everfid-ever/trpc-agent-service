@@ -103,6 +103,22 @@ func FakeModelSchema() Schema {
 	}
 }
 
+// OpenAIEmbeddingSchema is the reviewed profile shape used by the framework
+// Knowledge embedder. It is deliberately separate from chat-model schemas:
+// an embedding profile cannot be selected as an Agent model and its immutable
+// dimensions are checked against the bound vector collection at runtime.
+func OpenAIEmbeddingSchema() Schema {
+	return Schema{
+		Kind: KindModel, Name: "openai-embedding", SchemaVersion: 1,
+		AllowedModels:   []string{"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"},
+		EndpointSchemes: []string{"https"}, EndpointHosts: []string{"api.openai.com"},
+		OptionRules: map[string]OptionRule{
+			"dimensions": {Type: OptionInteger, Required: true, Min: 1, Max: 65536},
+		},
+		SecretRequirement: "required",
+	}
+}
+
 // QdrantVectorSchema pins the configuration surface accepted for a Qdrant
 // Knowledge backend. Credentials deliberately remain a versioned SecretRef;
 // neither API keys nor connection strings may enter a backend profile.
@@ -113,6 +129,7 @@ func QdrantVectorSchema() Schema {
 			"collection":         {Type: OptionString, Required: true},
 			"endpoint":           {Type: OptionString, Required: true},
 			"snapshot_watermark": {Type: OptionString, Required: true},
+			"vector_generation":  {Type: OptionString, Required: true},
 			"timeout_ms":         {Type: OptionInteger, Default: "20000", Min: 100, Max: 600000},
 			"vector_size":        {Type: OptionInteger, Required: true, Min: 1, Max: 65536},
 		},

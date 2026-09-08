@@ -101,6 +101,24 @@ func TestFakeModelSchemaIsCredentialFreeAndScripted(t *testing.T) {
 	}
 }
 
+func TestOpenAIEmbeddingSchemaPinsDimensionsAndOfficialEndpoint(t *testing.T) {
+	catalog, err := NewCatalog(OpenAIEmbeddingSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeModel(ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "embed", ProfileKey: "embed",
+		Status: "active", Version: 2, SchemaVersion: 1, Provider: "openai-embedding", Model: "text-embedding-3-small",
+		Endpoint: "https://api.openai.com/v1", Options: map[string]string{"dimensions": "1536"},
+		SecretRef: secrets.SecretRef{Ref: "secret/embed", Version: 1}})
+	if err != nil || value.Options["dimensions"] != "1536" {
+		t.Fatalf("embedding profile=%#v err=%v", value, err)
+	}
+	value.Options = map[string]string{}
+	if _, err := catalog.NormalizeModel(value); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("missing dimensions=%v", err)
+	}
+}
+
 func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	catalog, err := NewCatalog(QdrantVectorSchema())
 	if err != nil {
@@ -108,7 +126,7 @@ func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	}
 	value, err := catalog.NormalizeBackend(BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "vector", ProfileKey: "qdrant",
 		Status: "active", Version: 1, SchemaVersion: 1, Provider: "qdrant", Configuration: map[string]string{
-			"endpoint": "https://qdrant.example.com", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a",
+			"endpoint": "https://qdrant.example.com", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a", "vector_generation": "generation-a",
 		}, CredentialRef: secrets.SecretRef{Ref: "secret/qdrant", Version: 1}, Capabilities: CapabilitySet{"tenant_filter": true}})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +138,7 @@ func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	if _, err := catalog.NormalizeBackend(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
 		t.Fatalf("secret-bearing configuration: %v", err)
 	}
-	value.Configuration = map[string]string{"endpoint": "https://qdrant.example.com?api_key=forbidden", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a"}
+	value.Configuration = map[string]string{"endpoint": "https://qdrant.example.com?api_key=forbidden", "collection": "knowledge", "vector_size": "1536", "snapshot_watermark": "snapshot-a", "vector_generation": "generation-a"}
 	if _, err := catalog.NormalizeBackend(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
 		t.Fatalf("secret-bearing endpoint: %v", err)
 	}

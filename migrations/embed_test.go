@@ -36,9 +36,9 @@ func TestServiceSchemaBaselineContainsFinalPlatformContract(t *testing.T) {
 		"CREATE FUNCTION public.commit_turn", "CREATE FUNCTION public.guard_outbox_idempotency", "CREATE FUNCTION public.begin_session_backend_observation",
 		"CREATE FUNCTION public.begin_knowledge_backend_observation", "CREATE ROLE audit_retention_purger",
 		"UNIQUE (tenant_id, kind, idempotency_key)", "GRANT ALL ON FUNCTION public.execute_business_audit_purge",
-		"CREATE TABLE public.config_release", "CREATE TABLE public.memory_entry", "CREATE TABLE public.memory_index_intent",
-		"memory-invalidation", "result_payload_content_type_check", "interaction_payload_content_type_check",
-		"fallback_model_refs", "max_llm_calls", "execution_record_hydrate_execution_budget",
+		"CREATE TABLE public.config_release", "CREATE TABLE public.memories", "CREATE TABLE public.agent_app_revision_plugin",
+		"result_payload_content_type_check", "interaction_payload_content_type_check",
+		"fallback_model_refs", "max_llm_calls", "execution_record_hydrate_execution_budget", "agent_app_revision_tool_content_digest_check",
 		"REVOKE ALL ON FUNCTION public.hydrate_execution_budget() FROM PUBLIC",
 	} {
 		if !strings.Contains(migration.Up, clause) {

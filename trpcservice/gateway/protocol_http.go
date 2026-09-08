@@ -12,8 +12,10 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	a2aprotocol "trpc.group/trpc-go/trpc-a2a-go/protocol"
-	a2aserver "trpc.group/trpc-go/trpc-a2a-go/server"
+	a2aserverapi "trpc.group/trpc-go/trpc-a2a-go/server"
+	a2ataskmanager "trpc.group/trpc-go/trpc-a2a-go/taskmanager"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
+	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
 	openaiserver "trpc.group/trpc-go/trpc-agent-go/server/openai"
 	trpcagentserver "trpc.group/trpc-go/trpc-agent-go/server/trpcagent"
 )
@@ -43,7 +45,7 @@ func NewProtocolHTTPHandler(options ProtocolHTTPOptions) (http.Handler, error) {
 		return nil, err
 	}
 	trpcFacade := TRPCAgentFacade{Runner: options.Runner, Timeout: options.RunTimeout}
-	a2aFacade := A2AFacade{Tasks: options.A2A, PublicURL: strings.TrimSuffix(options.PublicURL, "/")}
+	a2aFacade := A2AFacade{Runner: options.Runner, Tasks: options.A2A, PublicURL: strings.TrimSuffix(options.PublicURL, "/")}
 	routes := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/chat/completions":
@@ -64,6 +66,7 @@ func NewProtocolHTTPHandler(options ProtocolHTTPOptions) (http.Handler, error) {
 // manager. Agent cards are tenant/app scoped and advertise no unsupported push
 // notification or process-local history capability.
 type A2AFacade struct {
+	Runner    runner.Runner
 	Tasks     *DurableA2ATaskManager
 	PublicURL string
 }
@@ -71,7 +74,7 @@ type A2AFacade struct {
 func (h A2AFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	trusted, ok := ServerInvocationFromContext(r.Context())
 	appName, validPath := a2aAppForPath(r.URL.Path)
-	if h.Tasks == nil || !h.Tasks.valid() || !ok || trusted.Protocol != "a2a" || !validPath || appName != trusted.Tenant.AgentAppID || !validGatewayPublicURL(h.PublicURL) {
+	if h.Runner == nil || h.Tasks == nil || !h.Tasks.valid() || !ok || trusted.Protocol != "a2a" || !validPath || appName != trusted.Tenant.AgentAppID || !validGatewayPublicURL(h.PublicURL) {
 		writeControlError(w, ErrUnauthenticated)
 		return
 	}
@@ -82,12 +85,23 @@ func (h A2AFacade) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	streaming, push, history := true, false, false
 	scheme, bearerFormat := "bearer", "gw1"
 	basePath := "/a2a/v1/apps/" + appName
-	card := a2aserver.AgentCard{Name: appName, Description: "Durable trpc-agent-service A2A gateway", URL: h.PublicURL + basePath + "/",
-		Version: "gateway-durable-v1", Capabilities: a2aserver.AgentCapabilities{Streaming: &streaming, PushNotifications: &push, StateTransitionHistory: &history},
-		SecuritySchemes: map[string]a2aserver.SecurityScheme{"gatewayBearer": {Type: a2aserver.SecuritySchemeTypeHTTP, Scheme: &scheme, BearerFormat: &bearerFormat}},
+	card := a2aserverapi.AgentCard{Name: appName, Description: "Durable trpc-agent-service A2A gateway", URL: h.PublicURL + basePath + "/",
+		Version: "gateway-durable-v1", Capabilities: a2aserverapi.AgentCapabilities{Streaming: &streaming, PushNotifications: &push, StateTransitionHistory: &history},
+		SecuritySchemes: map[string]a2aserverapi.SecurityScheme{"gatewayBearer": {Type: a2aserverapi.SecuritySchemeTypeHTTP, Scheme: &scheme, BearerFormat: &bearerFormat}},
 		Security:        []map[string][]string{{"gatewayBearer": {}}}, DefaultInputModes: []string{"text"}, DefaultOutputModes: []string{"text"},
-		Skills: []a2aserver.AgentSkill{{ID: appName, Name: appName, Tags: []string{"agent"}, InputModes: []string{"text"}, OutputModes: []string{"text"}}}}
-	server, err := a2aserver.NewA2AServer(card, h.Tasks, a2aserver.WithBasePath(basePath), a2aserver.WithCORSEnabled(false))
+		Skills: []a2aserverapi.AgentSkill{{ID: appName, Name: appName, Tags: []string{"agent"}, InputModes: []string{"text"}, OutputModes: []string{"text"}}}}
+	// The public trpc-agent-go A2A façade owns protocol decoding and event
+	// conversion. Its task-manager hook deliberately returns the service's
+	// durable manager: no process-local A2A task map is constructed or used.
+	// The supplied runner is the GatewayRunnerBridge, not a local Agent runner.
+	server, err := a2aserver.New(
+		a2aserver.WithRunner(h.Runner),
+		a2aserver.WithAgentCard(card),
+		a2aserver.WithTaskManagerBuilder(func(a2ataskmanager.MessageProcessor) a2ataskmanager.TaskManager {
+			return h.Tasks
+		}),
+		a2aserver.WithADKCompatibility(false),
+	)
 	if err != nil {
 		writeControlError(w, runtime.ErrCapabilityUnsupported)
 		return

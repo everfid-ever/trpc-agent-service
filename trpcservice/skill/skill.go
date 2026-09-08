@@ -104,6 +104,9 @@ func (r Resolver) RepositoryProvider(ctx context.Context, tenantID string, refs 
 	if err != nil {
 		return nil, fmt.Errorf("load skill repository: %w", err)
 	}
+	if err := validatePublishedSkillNames(repository, refs); err != nil {
+		return nil, err
+	}
 	// The repository is already fixed to one trusted tenant and immutable
 	// versions. AppName is diagnostic/scoping input, never a tenant credential.
 	return upstream.RepositoryProviderFunc(func(_ context.Context, scope upstream.SkillScope) (upstream.Repository, error) {
@@ -112,6 +115,44 @@ func (r Resolver) RepositoryProvider(ctx context.Context, tenantID string, refs 
 		}
 		return repository, nil
 	}), nil
+}
+
+// validatePublishedSkillNames ties the SDK's public Skill name (which is
+// derived from SKILL.md front matter) to the immutable Revision SkillRef ID.
+// Without this check a staged package could mount under one catalog ID but
+// advertise a different name to the model, making the Revision allow-list
+// ambiguous and defeating the SDK visibility filter installed by Factory.
+func validatePublishedSkillNames(repository upstream.Repository, refs []profile.SkillRef) error {
+	if repository == nil || len(refs) == 0 {
+		return runtime.ErrInvariantViolation
+	}
+	expected := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref.ID == "" || ref.Version < 1 || ref.ContentDigest == "" {
+			return runtime.ErrInvalidEnvelope
+		}
+		if _, exists := expected[ref.ID]; exists {
+			return runtime.ErrInvariantViolation
+		}
+		expected[ref.ID] = struct{}{}
+	}
+	summaries := repository.Summaries()
+	if len(summaries) != len(expected) {
+		return runtime.ErrVersionMismatch
+	}
+	for _, summary := range summaries {
+		if summary.Name == "" {
+			return runtime.ErrVersionMismatch
+		}
+		if _, exists := expected[summary.Name]; !exists {
+			return runtime.ErrVersionMismatch
+		}
+		delete(expected, summary.Name)
+	}
+	if len(expected) != 0 {
+		return runtime.ErrVersionMismatch
+	}
+	return nil
 }
 
 func secureTenantRoot(stagingRoot, tenantID string) (string, error) {
