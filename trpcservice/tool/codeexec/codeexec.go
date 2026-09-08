@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -119,6 +120,12 @@ func NewSandboxRegistration(tenantID, toolID string, version int64, expectedDige
 	if digest != expectedDigest {
 		return servicetool.Registration{}, runtime.ErrVersionMismatch
 	}
+	// The upstream managed sandbox isolates a running process, but workspace
+	// ownership is still a service responsibility. Refuse a symlink or a root
+	// shared with another local account before a Worker publishes this Tool.
+	if err := prepareWorkspaceRoot(config.WorkspaceRoot); err != nil {
+		return servicetool.Registration{}, err
+	}
 	executor := &Executor{tenantID: tenantID, config: config,
 		runtime: sandbox.NewRuntime(
 			sandbox.WithWorkspaceRoot(config.WorkspaceRoot),
@@ -170,7 +177,13 @@ func (e *Executor) ExecuteCode(ctx context.Context, input codeexecutor.CodeExecu
 	if err != nil {
 		return codeexecutor.CodeExecutionResult{}, fmt.Errorf("create sandbox workspace: %w", err)
 	}
+	// Cleanup must cover every post-create failure too. In particular, a
+	// permission error while tightening a directory must not leave a reusable
+	// per-turn workspace behind.
 	defer e.runtime.Cleanup(context.Background(), workspace)
+	if err := os.Chmod(workspace.Path, 0o700); err != nil {
+		return codeexecutor.CodeExecutionResult{}, fmt.Errorf("secure sandbox workspace: %w", err)
+	}
 
 	var output limitedOutput
 	output.limit = e.config.MaxOutputBytes
@@ -198,6 +211,26 @@ func (e *Executor) ExecuteCode(ctx context.Context, input codeexecutor.CodeExecu
 		}
 	}
 	return codeexecutor.CodeExecutionResult{Output: output.String()}, nil
+}
+
+// prepareWorkspaceRoot makes the deployment-owned parent private before the
+// framework creates per-turn directories beneath it. A symlink would make the
+// caller's absolute-path validation meaningless, so it is always rejected.
+func prepareWorkspaceRoot(root string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return runtime.ErrInvariantViolation
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *Executor) validateInput(input codeexecutor.CodeExecutionInput) error {

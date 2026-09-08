@@ -42,3 +42,16 @@ go run ./cmd/postgres-migration-test
 go test -count=1 ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
 TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test
 go test -count=1 ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant
+
+# These integrations deliberately use the same public tRPC-Agent-Go adapters
+# that the Worker wires at runtime. Keep them in the disposable backend job so
+# final acceptance proves the control-plane contracts alongside the actual
+# PostgreSQL/Qdrant/Vault adapters, not only during a developer's broad unit
+# test run.
+go test -count=1 \
+  ./trpcservice/admin \
+  ./trpcservice/agent \
+  ./trpcservice/agent/condition \
+  ./trpcservice/skill \
+  ./trpcservice/storage/knowledge \
+  ./trpcservice/tool/codeexec

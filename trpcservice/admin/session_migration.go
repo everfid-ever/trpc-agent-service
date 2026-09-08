@@ -14,7 +14,10 @@ const sessionMigrationDomain = "session"
 
 // SessionMigrationCreateInput deliberately derives the source from the active
 // ConfigSnapshot. The only operator choice is the immutable candidate config
-// and a stable idempotency identity for this migration.
+// and a stable idempotency identity for this migration. Configuration
+// snapshots are immutable once published; a candidate is distinguished from
+// the active source by the tenant's active-config pointer, not by a mutable
+// snapshot state.
 type SessionMigrationCreateInput struct {
 	MigrationID         string `json:"migration_id"`
 	TargetConfigVersion int64  `json:"target_config_version"`
@@ -59,7 +62,7 @@ func (s Service) CreateSessionMigration(ctx context.Context, principal Principal
 		return migration.Migration{}, err
 	}
 	if source.TenantID != pathTenant || target.TenantID != pathTenant || source.ConfigVersion < 1 ||
-		target.ConfigVersion <= source.ConfigVersion || target.State != config.StateStaged {
+		target.ConfigVersion <= source.ConfigVersion || target.State != config.StatePublished {
 		return migration.Migration{}, runtime.ErrInvariantViolation
 	}
 	sourceBinding, ok := sessionBinding(source.Payload)

@@ -14,6 +14,10 @@
 | Admission | `bash scripts/ci_admission.sh`；race 使用 `--race` | Go 1.24.x；或等价 Go 1.24 容器/CI runner | format、依赖边界、build、vet、test 全部通过 | 本地/CI |
 | 最终无凭据验收 | `bash scripts/ci_admission.sh --demo` | Go 1.24、Docker Desktop/CI Docker daemon、curl | 空 PostgreSQL 只记录 `000001`；demo bootstrap、fake chat、SSE delta、health/ready 全部通过 | 本地/CI |
 | 后端 adapter | `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | PostgreSQL、Redis、Qdrant、Vault contract 通过；临时资源自动清理 | 本地/CI |
+| Session 迁移控制面 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | current source 与 immutable candidate 的绑定推导；verification/watermark 仅从迁移 authority 读取；cutover/observe/rollback CAS 请求通过 | 本地/CI |
+| Skill / Knowledge 装配 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | published Skill 内容 digest/name 固定；Knowledge 的 manifest/backend/embedder/vector generation 不一致或缺失均 fail-closed | 本地/CI |
+| Graph 条件边 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | `present/empty` 分支固定；未知条件、缺分支、混合普通/条件边被拒绝 | 本地/CI |
+| CodeExec 控制面 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | ToolRef digest 固化、workspace root 为 `0700`、symlink root 被拒绝；实际启用另需 sandbox-capable worker 镜像 | 本地/CI |
 | MCP 适配器 | `go test ./trpcservice/tool/mcp ./trpcservice/tool ./trpcservice/worker` | Go 1.24.x | scoped secret、声明/binding digest、私网 DNS 拒绝、Worker 构建上下文与确认续跑的 binding 固定全部通过 | 本地/CI |
 | PostgreSQL/Redis runtime slice | `docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis` 后执行 `--profile runtime-test run --rm runtime-test` | Docker Desktop | migration 与真实 PostgreSQL/Redis slice 通过 | 本地 |
 | WebUI + 模型 | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；confirmation 只执行一次 | 本地 + 真实模型 |
@@ -30,5 +34,6 @@
 - WeCom 支持的是自建应用 Agent callback，不包含智能机器人长连接或 Bot 流式协议。
 - 非图片文件会下载、扫描和审计，但当前本地视觉模型不宣称理解 PDF 或 Office 内容。
 - 审计查询、保留和销毁的角色、权限与不可变约束见 [能力与兼容边界](../design/8.capability-boundaries.md)；破坏性 purge 不暴露 HTTP 端点。
+- 通用 distroless Worker 镜像没有打包 `bubblewrap`、`bash`、`python`。因此 CodeExec 的默认状态是未配置；启用它前必须使用专用 sandbox-capable Worker 镜像并完成禁网、cgroup/进程上限和每 turn 清理的部署演练。不能把本表的控制面契约当作主 Worker 内执行任意代码的证据。
 
 完整的启动、密钥格式、回调地址和故障排查步骤见 [本地 Docker Desktop 验收指南](getting-started.md)。
