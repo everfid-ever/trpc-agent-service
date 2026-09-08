@@ -196,11 +196,11 @@ func fixtureSnapshot() sessiondriver.SessionImage {
 	key := sessionstore.SessionKey{TenantID: "tenant-a", AgentAppID: "app-a", SessionID: "session-a"}
 	clock := time.Date(2026, 9, 8, 9, 0, 0, 0, time.UTC)
 	return sessiondriver.SessionImage{Head: sessionstore.SessionHead{SessionKey: key, Version: 1,
-		LastFence: 3, LastSessionSeq: 1, NextInputSeq: 2, State: map[string]any{"topic": "migration"}},
+		LastFence: 3, NextInputSeq: 2, State: map[string]any{}},
 		LastAllocatedInputSeq: 1,
-		Events: []sessiondriver.EventRecord{{SessionSeq: 1, InputSeq: 1, EventSeq: 1,
-			RequestID: "request-a", EventID: "event-a", EventType: "message", PayloadRef: "payload://event-a",
-			Payload: json.RawMessage(`{"type":"user","content":"hello"}`), CreatedAt: clock}},
+		SDK: &sessiondriver.SDKSessionImage{AppName: "tenant-a/app-a", UserID: "user-a", SessionID: key.SessionID,
+			State: json.RawMessage(`{"id":"session-a","state":{"topic":"migration"}}`), CreatedAt: clock, UpdatedAt: clock,
+			Events: []sessiondriver.SDKEventRecord{{Event: json.RawMessage(`{"id":"event-a","response":{"id":"response-a"}}`), CreatedAt: clock, UpdatedAt: clock}}},
 		Commits: []sessiondriver.CommitRecord{{CommitID: "commit-a", RequestID: "request-a",
 			RequestDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Stage: "terminal",
 			InputSeq: 1, Fence: 3, Outcome: runtime.OutcomeSucceeded, SessionVersion: 1, CreatedAt: clock}}}

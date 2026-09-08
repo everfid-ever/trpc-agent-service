@@ -96,12 +96,38 @@ type SnapshotReader interface {
 	LoadSessionImage(context.Context, sessionstore.SessionKey) (SessionImage, error)
 }
 
-type EventRecord struct {
-	SessionSeq, InputSeq, EventSeq uint64
-	RequestID, EventID, EventType  string
-	PayloadRef                     string
-	Payload                        json.RawMessage
-	CreatedAt                      time.Time
+// SDKSessionImage is a lossless image of the session-scoped rows owned by
+// trpc-agent-go/session/postgres. The migration driver deliberately treats
+// their JSON payloads as opaque framework data; it does not reinterpret or
+// recreate SDK event/state semantics.
+type SDKSessionImage struct {
+	AppName, UserID, SessionID string
+	State                      json.RawMessage
+	CreatedAt, UpdatedAt       time.Time
+	ExpiresAt                  *time.Time
+	Events                     []SDKEventRecord
+	TrackEvents                []SDKTrackEventRecord
+	Summaries                  []SDKSummaryRecord
+}
+
+type SDKEventRecord struct {
+	Event                json.RawMessage
+	CreatedAt, UpdatedAt time.Time
+	ExpiresAt            *time.Time
+}
+
+type SDKTrackEventRecord struct {
+	Track                string
+	Event                json.RawMessage
+	CreatedAt, UpdatedAt time.Time
+	ExpiresAt            *time.Time
+}
+
+type SDKSummaryRecord struct {
+	FilterKey string
+	Summary   json.RawMessage
+	UpdatedAt time.Time
+	ExpiresAt *time.Time
 }
 
 type CommitRecord struct {
@@ -113,24 +139,14 @@ type CommitRecord struct {
 	CreatedAt                                 time.Time
 }
 
-type SummaryRecord struct {
-	SummaryID      string
-	BaseSessionSeq uint64
-	LastEventID    string
-	CutoffAt       time.Time
-	ContentRef     string
-	CreatedAt      time.Time
-}
-
-// SessionImage contains every durable fact owned by the Session backend.
-// Messaging outbox and execution records remain in their own authorities.
+// SessionImage contains platform coordination facts plus the opaque,
+// framework-owned Session image. Messaging outbox and execution records stay
+// in their own authorities.
 type SessionImage struct {
 	Head                  sessionstore.SessionHead
 	LastAllocatedInputSeq uint64
-	SummaryID             string
-	Events                []EventRecord
+	SDK                   *SDKSessionImage
 	Commits               []CommitRecord
-	Summaries             []SummaryRecord
 }
 
 type ApplyRequest struct {

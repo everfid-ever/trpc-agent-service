@@ -153,12 +153,24 @@ func cloneImage(in sessiondriver.SessionImage) sessiondriver.SessionImage {
 	for key, value := range in.Head.State {
 		out.Head.State[key] = value
 	}
-	out.Events = append([]sessiondriver.EventRecord(nil), in.Events...)
-	for i := range out.Events {
-		out.Events[i].Payload = append([]byte(nil), in.Events[i].Payload...)
+	if in.SDK != nil {
+		sdk := *in.SDK
+		sdk.State = append([]byte(nil), in.SDK.State...)
+		sdk.Events = append([]sessiondriver.SDKEventRecord(nil), in.SDK.Events...)
+		for index := range sdk.Events {
+			sdk.Events[index].Event = append([]byte(nil), in.SDK.Events[index].Event...)
+		}
+		sdk.TrackEvents = append([]sessiondriver.SDKTrackEventRecord(nil), in.SDK.TrackEvents...)
+		for index := range sdk.TrackEvents {
+			sdk.TrackEvents[index].Event = append([]byte(nil), in.SDK.TrackEvents[index].Event...)
+		}
+		sdk.Summaries = append([]sessiondriver.SDKSummaryRecord(nil), in.SDK.Summaries...)
+		for index := range sdk.Summaries {
+			sdk.Summaries[index].Summary = append([]byte(nil), in.SDK.Summaries[index].Summary...)
+		}
+		out.SDK = &sdk
 	}
 	out.Commits = append([]sessiondriver.CommitRecord(nil), in.Commits...)
-	out.Summaries = append([]sessiondriver.SummaryRecord(nil), in.Summaries...)
 	return out
 }
 

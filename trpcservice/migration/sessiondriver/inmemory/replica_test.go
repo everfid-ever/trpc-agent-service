@@ -54,7 +54,8 @@ func TestReplicaIdempotencyNoRegressionAndFingerprint(t *testing.T) {
 func replicaImage(key sessionstore.SessionKey, version int64) sessiondriver.SessionImage {
 	clock := time.Date(2026, 9, 8, 9, 0, 0, 0, time.UTC)
 	image := sessiondriver.SessionImage{Head: sessionstore.SessionHead{SessionKey: key, Version: version,
-		NextInputSeq: 1, State: map[string]any{"version": version}}}
+		NextInputSeq: 1, State: map[string]any{}}, SDK: &sessiondriver.SDKSessionImage{AppName: key.TenantID + "/" + key.AgentAppID,
+		UserID: "user-a", SessionID: key.SessionID, State: []byte(`{"id":"session-a","state":{}}`), CreatedAt: clock, UpdatedAt: clock}}
 	for current := int64(1); current <= version; current++ {
 		image.Commits = append(image.Commits, sessiondriver.CommitRecord{CommitID: "commit-" + strconv.FormatInt(current, 10),
 			RequestID: "request", RequestDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

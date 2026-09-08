@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/sessiondriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -212,40 +213,47 @@ func loadImage(ctx context.Context, q queryer, key sessionstore.SessionKey) (ses
 	}
 	image := sessiondriver.SessionImage{}
 	image.Head.SessionKey = key
-	var state []byte
-	var summaryID sql.NullString
-	err := q.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,last_allocated_input_seq,state_json,summary_id
+	err := q.QueryRowContext(ctx, `SELECT version,last_fence,last_session_seq,next_input_seq,last_allocated_input_seq
 FROM public.session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`,
 		key.TenantID, key.AgentAppID, key.SessionID).Scan(&image.Head.Version, &image.Head.LastFence,
-		&image.Head.LastSessionSeq, &image.Head.NextInputSeq, &image.LastAllocatedInputSeq, &state, &summaryID)
+		&image.Head.LastSessionSeq, &image.Head.NextInputSeq, &image.LastAllocatedInputSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sessiondriver.SessionImage{}, runtime.ErrNotFound
 	}
 	if err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
-	if json.Unmarshal(state, &image.Head.State) != nil {
-		return sessiondriver.SessionImage{}, runtime.ErrInvariantViolation
-	}
-	image.SummaryID = summaryID.String
-	eventRows, err := q.QueryContext(ctx, `SELECT session_seq,request_id,input_seq,event_seq,event_id,event_type,
-payload_ref,COALESCE(event_payload,'null'::jsonb),created_at FROM public.session_event
-WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 ORDER BY session_seq`, key.TenantID, key.AgentAppID, key.SessionID)
+	appName := key.TenantID + "/" + key.AgentAppID
+	stateRows, err := q.QueryContext(ctx, `SELECT user_id,state,created_at,updated_at,expires_at
+FROM public.session_states WHERE app_name=$1 AND session_id=$2 AND deleted_at IS NULL ORDER BY id`, appName, key.SessionID)
 	if err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
-	for eventRows.Next() {
-		var item sessiondriver.EventRecord
-		if err := eventRows.Scan(&item.SessionSeq, &item.RequestID, &item.InputSeq, &item.EventSeq,
-			&item.EventID, &item.EventType, &item.PayloadRef, &item.Payload, &item.CreatedAt); err != nil {
-			eventRows.Close()
+	for stateRows.Next() {
+		if image.SDK != nil {
+			stateRows.Close()
+			return sessiondriver.SessionImage{}, runtime.ErrInvariantViolation
+		}
+		item := &sessiondriver.SDKSessionImage{AppName: appName, SessionID: key.SessionID}
+		var expiresAt sql.NullTime
+		if err := stateRows.Scan(&item.UserID, &item.State, &item.CreatedAt, &item.UpdatedAt, &expiresAt); err != nil {
+			stateRows.Close()
 			return sessiondriver.SessionImage{}, err
 		}
-		item.CreatedAt = item.CreatedAt.UTC()
-		image.Events = append(image.Events, item)
+		if item.UserID == "" || !json.Valid(item.State) {
+			stateRows.Close()
+			return sessiondriver.SessionImage{}, runtime.ErrInvariantViolation
+		}
+		item.CreatedAt, item.UpdatedAt, item.ExpiresAt = item.CreatedAt.UTC(), item.UpdatedAt.UTC(), nullableUTC(expiresAt)
+		image.SDK = item
 	}
-	if err := eventRows.Close(); err != nil {
+	if err := stateRows.Close(); err != nil {
 		return sessiondriver.SessionImage{}, err
+	}
+	if image.SDK != nil {
+		if err := loadSDKRows(ctx, q, image.SDK); err != nil {
+			return sessiondriver.SessionImage{}, err
+		}
 	}
 	commitRows, err := q.QueryContext(ctx, `SELECT commit_id,request_id,request_digest,input_seq,stage,outcome,fence,
 session_version,COALESCE(reply_cursor,''),COALESCE(result_ref,''),created_at FROM public.session_commit
@@ -267,26 +275,82 @@ WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 ORDER BY session_versio
 	if err := commitRows.Close(); err != nil {
 		return sessiondriver.SessionImage{}, err
 	}
-	summaryRows, err := q.QueryContext(ctx, `SELECT summary_id,base_session_seq,last_event_id,cutoff_at,content_ref,created_at
-FROM public.session_summary WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 ORDER BY base_session_seq`,
-		key.TenantID, key.AgentAppID, key.SessionID)
+	return image, nil
+}
+
+func loadSDKRows(ctx context.Context, q queryer, image *sessiondriver.SDKSessionImage) error {
+	events, err := q.QueryContext(ctx, `SELECT event,created_at,updated_at,expires_at FROM public.session_events
+WHERE app_name=$1 AND user_id=$2 AND session_id=$3 AND deleted_at IS NULL ORDER BY created_at,id`, image.AppName, image.UserID, image.SessionID)
 	if err != nil {
-		return sessiondriver.SessionImage{}, err
+		return err
 	}
-	for summaryRows.Next() {
-		var item sessiondriver.SummaryRecord
-		if err := summaryRows.Scan(&item.SummaryID, &item.BaseSessionSeq, &item.LastEventID,
-			&item.CutoffAt, &item.ContentRef, &item.CreatedAt); err != nil {
-			summaryRows.Close()
-			return sessiondriver.SessionImage{}, err
+	for events.Next() {
+		var item sessiondriver.SDKEventRecord
+		var expiresAt sql.NullTime
+		if err := events.Scan(&item.Event, &item.CreatedAt, &item.UpdatedAt, &expiresAt); err != nil {
+			events.Close()
+			return err
 		}
-		item.CutoffAt, item.CreatedAt = item.CutoffAt.UTC(), item.CreatedAt.UTC()
+		if !json.Valid(item.Event) {
+			events.Close()
+			return runtime.ErrInvariantViolation
+		}
+		item.CreatedAt, item.UpdatedAt, item.ExpiresAt = item.CreatedAt.UTC(), item.UpdatedAt.UTC(), nullableUTC(expiresAt)
+		image.Events = append(image.Events, item)
+	}
+	if err := events.Close(); err != nil {
+		return err
+	}
+	tracks, err := q.QueryContext(ctx, `SELECT track,event,created_at,updated_at,expires_at FROM public.session_track_events
+WHERE app_name=$1 AND user_id=$2 AND session_id=$3 AND deleted_at IS NULL ORDER BY created_at,id`, image.AppName, image.UserID, image.SessionID)
+	if err != nil {
+		return err
+	}
+	for tracks.Next() {
+		var item sessiondriver.SDKTrackEventRecord
+		var expiresAt sql.NullTime
+		if err := tracks.Scan(&item.Track, &item.Event, &item.CreatedAt, &item.UpdatedAt, &expiresAt); err != nil {
+			tracks.Close()
+			return err
+		}
+		if item.Track == "" || !json.Valid(item.Event) {
+			tracks.Close()
+			return runtime.ErrInvariantViolation
+		}
+		item.CreatedAt, item.UpdatedAt, item.ExpiresAt = item.CreatedAt.UTC(), item.UpdatedAt.UTC(), nullableUTC(expiresAt)
+		image.TrackEvents = append(image.TrackEvents, item)
+	}
+	if err := tracks.Close(); err != nil {
+		return err
+	}
+	summaries, err := q.QueryContext(ctx, `SELECT filter_key,summary,updated_at,expires_at FROM public.session_summaries
+WHERE app_name=$1 AND user_id=$2 AND session_id=$3 AND deleted_at IS NULL ORDER BY filter_key,id`, image.AppName, image.UserID, image.SessionID)
+	if err != nil {
+		return err
+	}
+	for summaries.Next() {
+		var item sessiondriver.SDKSummaryRecord
+		var expiresAt sql.NullTime
+		if err := summaries.Scan(&item.FilterKey, &item.Summary, &item.UpdatedAt, &expiresAt); err != nil {
+			summaries.Close()
+			return err
+		}
+		if !json.Valid(item.Summary) {
+			summaries.Close()
+			return runtime.ErrInvariantViolation
+		}
+		item.UpdatedAt, item.ExpiresAt = item.UpdatedAt.UTC(), nullableUTC(expiresAt)
 		image.Summaries = append(image.Summaries, item)
 	}
-	if err := summaryRows.Close(); err != nil {
-		return sessiondriver.SessionImage{}, err
+	return summaries.Close()
+}
+
+func nullableUTC(value sql.NullTime) *time.Time {
+	if !value.Valid {
+		return nil
 	}
-	return image, nil
+	result := value.Time.UTC()
+	return &result
 }
 
 func encodeCursor(value keyCursor) (string, error) {

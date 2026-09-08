@@ -215,16 +215,8 @@ func (d Driver) ShadowVerify(ctx context.Context, tenantID, migrationID string) 
 func SnapshotDigest(snapshot SessionImage) (string, error) {
 	if snapshot.Head.TenantID == "" || snapshot.Head.AgentAppID == "" || snapshot.Head.SessionID == "" ||
 		snapshot.Head.Version < 0 || snapshot.Head.NextInputSeq < 1 ||
-		snapshot.LastAllocatedInputSeq+1 < snapshot.Head.NextInputSeq ||
-		snapshot.Head.LastSessionSeq != uint64(len(snapshot.Events)) || snapshot.Head.Version != int64(len(snapshot.Commits)) {
+		snapshot.LastAllocatedInputSeq+1 < snapshot.Head.NextInputSeq || snapshot.Head.Version != int64(len(snapshot.Commits)) {
 		return "", runtime.ErrInvariantViolation
-	}
-	for index, event := range snapshot.Events {
-		if !json.Valid(event.Payload) || event.SessionSeq < 1 || event.InputSeq < 1 || event.EventSeq < 1 ||
-			event.SessionSeq != uint64(index+1) || event.RequestID == "" || event.EventID == "" ||
-			event.EventType == "" || event.PayloadRef == "" || event.CreatedAt.IsZero() {
-			return "", runtime.ErrInvariantViolation
-		}
 	}
 	for index, commit := range snapshot.Commits {
 		if commit.CommitID == "" || commit.RequestID == "" || !validDigest(commit.RequestDigest) || commit.Stage == "" ||
@@ -233,35 +225,37 @@ func SnapshotDigest(snapshot SessionImage) (string, error) {
 			return "", runtime.ErrInvariantViolation
 		}
 	}
-	var lastSummarySeq uint64
-	for _, summary := range snapshot.Summaries {
-		if summary.SummaryID == "" || summary.BaseSessionSeq < 1 || summary.LastEventID == "" ||
-			summary.BaseSessionSeq <= lastSummarySeq || summary.BaseSessionSeq > snapshot.Head.LastSessionSeq ||
-			summary.CutoffAt.IsZero() || summary.ContentRef == "" || summary.CreatedAt.IsZero() {
+	if sdk := snapshot.SDK; sdk != nil {
+		if sdk.AppName != snapshot.Head.TenantID+"/"+snapshot.Head.AgentAppID || sdk.UserID == "" ||
+			sdk.SessionID != snapshot.Head.SessionID || !json.Valid(sdk.State) || sdk.CreatedAt.IsZero() || sdk.UpdatedAt.IsZero() {
 			return "", runtime.ErrInvariantViolation
 		}
-		lastSummarySeq = summary.BaseSessionSeq
-	}
-	if (len(snapshot.Summaries) == 0 && snapshot.SummaryID != "") ||
-		(len(snapshot.Summaries) > 0 && snapshot.SummaryID != snapshot.Summaries[len(snapshot.Summaries)-1].SummaryID) {
-		return "", runtime.ErrInvariantViolation
+		for _, event := range sdk.Events {
+			if !json.Valid(event.Event) || event.CreatedAt.IsZero() || event.UpdatedAt.IsZero() {
+				return "", runtime.ErrInvariantViolation
+			}
+		}
+		for _, event := range sdk.TrackEvents {
+			if event.Track == "" || !json.Valid(event.Event) || event.CreatedAt.IsZero() || event.UpdatedAt.IsZero() {
+				return "", runtime.ErrInvariantViolation
+			}
+		}
+		for _, summary := range sdk.Summaries {
+			if !json.Valid(summary.Summary) || summary.UpdatedAt.IsZero() {
+				return "", runtime.ErrInvariantViolation
+			}
+		}
 	}
 	canonical := struct {
 		Key                sessionstore.SessionKey `json:"key"`
 		Version            int64                   `json:"version"`
 		LastFence          uint64                  `json:"last_fence"`
-		LastSequence       uint64                  `json:"last_session_seq"`
 		NextInput          uint64                  `json:"next_input_seq"`
 		LastAllocatedInput uint64                  `json:"last_allocated_input_seq"`
-		SummaryID          string                  `json:"summary_id"`
-		State              map[string]any          `json:"state"`
-		Events             []EventRecord           `json:"events"`
+		SDK                *SDKSessionImage        `json:"sdk,omitempty"`
 		Commits            []CommitRecord          `json:"commits"`
-		Summaries          []SummaryRecord         `json:"summaries"`
 	}{snapshot.Head.SessionKey, snapshot.Head.Version, snapshot.Head.LastFence,
-		snapshot.Head.LastSessionSeq, snapshot.Head.NextInputSeq, snapshot.LastAllocatedInputSeq,
-		snapshot.SummaryID, snapshot.Head.State,
-		snapshot.Events, snapshot.Commits, snapshot.Summaries}
+		snapshot.Head.NextInputSeq, snapshot.LastAllocatedInputSeq, snapshot.SDK, snapshot.Commits}
 	data, err := json.Marshal(canonical)
 	if err != nil {
 		return "", runtime.ErrInvariantViolation
