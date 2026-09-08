@@ -136,6 +136,20 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 			_ = memoryService.Close()
 		}
 	}()
+	// Session/Event/State are framework-owned capabilities. Keep their DDL in
+	// the service baseline, but use the official synchronous PostgreSQL
+	// implementation at runtime so a process exit cannot strand an async
+	// in-memory persistence queue.
+	sdkSessions, err := sessionpostgres.NewOfficialSessionService(configValue.PostgresDSN)
+	if err != nil {
+		return errors.New("session service configuration rejected")
+	}
+	sdkSessionsClosed := false
+	defer func() {
+		if !sdkSessionsClosed {
+			_ = sdkSessions.Close()
+		}
+	}()
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
 	// AppName is encoded as "tenantID/agentAppID" by the control plane, so the
 	// SDK-facing artifact service has to recover the tenant before the
@@ -186,8 +200,8 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("progress publisher configuration rejected")
 	}
-	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
-		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef,
+	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: sdkSessions,
+		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{},
 		Progress:          progressPublisher,
 		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}
@@ -430,6 +444,10 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if closeErr := bundles.Close(shutdownCtx); closeErr != nil && terminalErr == nil {
 		terminalErr = errors.New("runtime bundle shutdown timed out")
 	}
+	if closeErr := sdkSessions.Close(); closeErr != nil && terminalErr == nil {
+		terminalErr = errors.New("session service shutdown failed")
+	}
+	sdkSessionsClosed = true
 	if closeErr := memoryService.Close(); closeErr != nil && terminalErr == nil {
 		terminalErr = errors.New("memory service shutdown failed")
 	}

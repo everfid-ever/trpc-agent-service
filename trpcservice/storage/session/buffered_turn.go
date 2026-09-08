@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -10,97 +9,45 @@ import (
 	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 )
 
-// EventRefEncoder externalizes an upstream event and returns the durable event
-// type and payload reference used by CommitTurn.
-type EventRefEncoder func(context.Context, *agentevent.Event) (string, string, error)
-
 // BufferedTurn is the service-owned transaction bridge used until upstream
 // exposes a native atomic commit hook.
 type BufferedTurn struct {
-	mu           sync.Mutex
-	store        AtomicSessionStore
-	key          SessionKey
-	appName      string
-	userID       string
-	encode       EventRefEncoder
-	events       []BufferedEvent
-	agentEvents  []agentevent.Event
-	eventSeqBase uint64
-	state        StateDelta
-	summary      *SummaryCandidate
-	closed       bool
-	committed    bool
-	service      *bufferedSessionService
+	mu        sync.Mutex
+	store     AtomicSessionStore
+	backing   agentsession.Service
+	key       SessionKey
+	appName   string
+	userID    string
+	closed    bool
+	committed bool
+	service   *bufferedSessionService
 }
 
-func NewBufferedTurn(store AtomicSessionStore, backing agentsession.Service, key SessionKey, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
-	return NewBufferedTurnScoped(store, backing, key, key.AgentAppID, userID, encode)
+func NewBufferedTurn(store AtomicSessionStore, backing agentsession.Service, key SessionKey, userID string) (*BufferedTurn, error) {
+	return NewBufferedTurnScoped(store, backing, key, key.TenantID+"/"+key.AgentAppID, userID)
 }
 
-func NewBufferedTurnScoped(store AtomicSessionStore, backing agentsession.Service, key SessionKey, appName, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
-	return NewDurableBufferedTurnScoped(store, key, appName, userID, encode)
+func NewBufferedTurnScoped(store AtomicSessionStore, backing agentsession.Service, key SessionKey, appName, userID string) (*BufferedTurn, error) {
+	return NewDurableBufferedTurnScoped(store, backing, key, appName, userID)
 }
 
-// NewDurableBufferedTurnScoped reconstructs the base session exclusively from
-// the authoritative AtomicSessionStore. No process-local session is involved.
-func NewDurableBufferedTurnScoped(store AtomicSessionStore, key SessionKey, appName, userID string, encode EventRefEncoder) (*BufferedTurn, error) {
-	if store == nil || encode == nil || key.TenantID == "" || key.AgentAppID == "" || key.SessionID == "" || appName == "" || userID == "" {
+// NewDurableBufferedTurnScoped scopes one SDK session.Service to a fenced turn.
+// The backing SDK service is the only Session/Event/State persistence authority;
+// AtomicSessionStore remains a coordination journal for input order, fence and
+// durable outbox effects.
+func NewDurableBufferedTurnScoped(store AtomicSessionStore, backing agentsession.Service, key SessionKey, appName, userID string) (*BufferedTurn, error) {
+	if store == nil || backing == nil || key.TenantID == "" || key.AgentAppID == "" || key.SessionID == "" || appName == "" || userID == "" {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	turn := &BufferedTurn{store: store, key: key, appName: appName, userID: userID, encode: encode, state: StateDelta{}}
+	if appName != key.TenantID+"/"+key.AgentAppID {
+		return nil, runtime.ErrTenantScope
+	}
+	turn := &BufferedTurn{store: store, backing: backing, key: key, appName: appName, userID: userID}
 	turn.service = &bufferedSessionService{turn: turn}
 	return turn, nil
 }
 
 func (t *BufferedTurn) SessionService() agentsession.Service { return t.service }
-
-func (t *BufferedTurn) Events() []BufferedEvent {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return append([]BufferedEvent(nil), t.events...)
-}
-
-func (t *BufferedTurn) StateDelta() StateDelta {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return cloneStateDelta(t.state)
-}
-
-func (t *BufferedTurn) SummaryCandidate() *SummaryCandidate {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.summary == nil {
-		return nil
-	}
-	copy := *t.summary
-	return &copy
-}
-
-func (t *BufferedTurn) SetSummaryCandidate(candidate SummaryCandidate) error {
-	if candidate.SummaryID == "" || candidate.BaseSessionSeq < 1 || candidate.LastEventID == "" || candidate.CutoffAt.IsZero() || candidate.ContentRef == "" {
-		return runtime.ErrCommitConflict
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed {
-		return runtime.ErrCommitConflict
-	}
-	copy := candidate
-	t.summary = &copy
-	return nil
-}
-
-// SetEventSeqBase assigns the stable request-level cursor used by a later
-// continuation stage. It must be called before the first buffered event.
-func (t *BufferedTurn) SetEventSeqBase(base uint64) error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.closed || len(t.events) != 0 {
-		return runtime.ErrCommitConflict
-	}
-	t.eventSeqBase = base
-	return nil
-}
 
 func (t *BufferedTurn) Commit(ctx context.Context, request CommitTurnRequest) (CommitTurnResult, error) {
 	t.mu.Lock()
@@ -109,12 +56,13 @@ func (t *BufferedTurn) Commit(ctx context.Context, request CommitTurnRequest) (C
 		return CommitTurnResult{}, runtime.ErrCommitConflict
 	}
 	request.SessionKey = t.key
-	request.Events = append([]BufferedEvent(nil), t.events...)
-	request.StateDelta = cloneStateDelta(t.state)
-	if t.summary != nil {
-		copy := *t.summary
-		request.SummaryCandidate = &copy
-	}
+	// Session/Event/State have already been persisted through the official SDK
+	// service. Do not mirror them into the platform coordination tables: that
+	// would recreate a second Session source of truth. The remaining commit is
+	// deliberately best-effort coordination for fence/order/outbox semantics.
+	request.Events = nil
+	request.StateDelta = nil
+	request.SummaryCandidate = nil
 	t.mu.Unlock()
 	result, err := t.store.CommitTurn(ctx, request)
 	if err != nil {
@@ -136,19 +84,11 @@ func (t *BufferedTurn) Rollback(ctx context.Context) error {
 		return runtime.ErrCommitConflict
 	}
 	t.closed = true
-	t.events = nil
-	t.agentEvents = nil
-	t.state = nil
-	t.summary = nil
+	// The SDK may already have synchronously persisted events or state before
+	// a later platform coordination failure. Its public API has no atomic
+	// cross-store rollback hook, so rollback deliberately only discards this
+	// turn's in-process coordination metadata.
 	return nil
-}
-
-func cloneStateDelta(in StateDelta) StateDelta {
-	out := make(StateDelta, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-	return out
 }
 
 type bufferedSessionService struct{ turn *BufferedTurn }
@@ -160,54 +100,29 @@ func (s *bufferedSessionService) validateKey(key agentsession.Key) error {
 	return nil
 }
 
-func (s *bufferedSessionService) CreateSession(ctx context.Context, key agentsession.Key, state agentsession.StateMap, _ ...agentsession.Option) (*agentsession.Session, error) {
+func (s *bufferedSessionService) CreateSession(ctx context.Context, key agentsession.Key, state agentsession.StateMap, options ...agentsession.Option) (*agentsession.Session, error) {
 	if err := s.validateKey(key); err != nil {
 		return nil, err
 	}
-	if err := s.UpdateSessionState(ctx, key, state); err != nil {
+	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	return &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID, State: cloneAgentState(state)}, nil
+	return s.turn.backing.CreateSession(ctx, key, cloneAgentState(state), options...)
 }
 
 func (s *bufferedSessionService) GetSession(ctx context.Context, key agentsession.Key, options ...agentsession.Option) (*agentsession.Session, error) {
 	if err := s.validateKey(key); err != nil {
 		return nil, err
 	}
-	snapshot, err := s.turn.store.LoadSession(ctx, s.turn.key)
-	if err == runtime.ErrNotFound {
-		return &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID, State: agentsession.StateMap{}}, nil
-	}
+	copy, err := s.turn.backing.GetSession(ctx, key, options...)
 	if err != nil {
 		return nil, err
 	}
-	copy := &agentsession.Session{ID: key.SessionID, AppName: key.AppName, UserID: key.UserID, State: agentsession.StateMap{}}
-	for name, value := range snapshot.Head.State {
-		encoded, err := json.Marshal(value)
+	if copy == nil {
+		copy, err = s.turn.backing.CreateSession(ctx, key, agentsession.StateMap{})
 		if err != nil {
-			return nil, runtime.ErrInvariantViolation
+			return nil, err
 		}
-		copy.State[name] = encoded
-	}
-	for _, raw := range snapshot.Events {
-		var event agentevent.Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, runtime.ErrInvariantViolation
-		}
-		copy.Events = append(copy.Events, event)
-	}
-	s.turn.mu.Lock()
-	defer s.turn.mu.Unlock()
-	if copy.State == nil {
-		copy.State = agentsession.StateMap{}
-	}
-	for key, value := range s.turn.state {
-		if encoded, ok := value.(json.RawMessage); ok {
-			copy.State[key] = append([]byte(nil), encoded...)
-		}
-	}
-	for _, value := range s.turn.agentEvents {
-		copy.Events = append(copy.Events, *value.Clone())
 	}
 	return copy, nil
 }
@@ -258,54 +173,39 @@ func (s *bufferedSessionService) UpdateSessionState(ctx context.Context, key age
 	if err := s.validateKey(key); err != nil {
 		return err
 	}
-	s.turn.mu.Lock()
-	defer s.turn.mu.Unlock()
-	if s.turn.closed {
-		return runtime.ErrCommitConflict
+	if err := s.ensureOpen(); err != nil {
+		return err
 	}
-	for name, value := range state {
-		s.turn.state[name] = json.RawMessage(append([]byte(nil), value...))
-	}
-	return nil
+	return s.turn.backing.UpdateSessionState(ctx, key, cloneAgentState(state))
 }
 
-func (s *bufferedSessionService) AppendEvent(ctx context.Context, session *agentsession.Session, value *agentevent.Event, _ ...agentsession.Option) error {
+func (s *bufferedSessionService) AppendEvent(ctx context.Context, session *agentsession.Session, value *agentevent.Event, options ...agentsession.Option) error {
 	if session == nil || value == nil {
 		return runtime.ErrCommitConflict
 	}
 	if err := s.validateKey(agentsession.Key{AppName: session.AppName, UserID: session.UserID, SessionID: session.ID}); err != nil {
 		return err
 	}
-	eventType, payloadRef, err := s.turn.encode(ctx, value)
-	if err != nil {
-		return err
-	}
-	if value.ID == "" || eventType == "" || payloadRef == "" {
+	if value.ID == "" {
 		return runtime.ErrCommitConflict
 	}
-	payload, err := json.Marshal(value)
-	if err != nil {
+	if err := s.ensureOpen(); err != nil {
 		return err
 	}
+	// Append through the official implementation. In particular, do not append
+	// to a platform event table or mutate session.Events/session.State here:
+	// the SDK is their only persistence authority.
+	if err := s.turn.backing.AppendEvent(ctx, session, value, options...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *bufferedSessionService) ensureOpen() error {
 	s.turn.mu.Lock()
 	defer s.turn.mu.Unlock()
 	if s.turn.closed {
 		return runtime.ErrCommitConflict
-	}
-	eventSeq := s.turn.eventSeqBase + uint64(len(s.turn.events)+1)
-	s.turn.events = append(s.turn.events, BufferedEvent{EventID: value.ID, EventType: eventType, PayloadRef: payloadRef, EventSeq: eventSeq, Payload: payload})
-	s.turn.agentEvents = append(s.turn.agentEvents, *value.Clone())
-	for name, delta := range value.StateDelta {
-		s.turn.state[name] = json.RawMessage(append([]byte(nil), delta...))
-	}
-	session.EventMu.Lock()
-	session.Events = append(session.Events, *value.Clone())
-	session.EventMu.Unlock()
-	if session.State == nil {
-		session.State = agentsession.StateMap{}
-	}
-	for name, delta := range value.StateDelta {
-		session.State[name] = append([]byte(nil), delta...)
 	}
 	return nil
 }

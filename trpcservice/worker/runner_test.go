@@ -30,6 +30,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agentsessionmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 type staticModelResolver struct{ model model.Model }
@@ -63,9 +64,9 @@ func TestRunnerExecutorRejectsWorkAndCommitsDurableCancellation(t *testing.T) {
 		PayloadRef: "payload://request", CreatedAt: time.Now().UTC(),
 	}
 	sessions := sessionmemory.New()
-	executor := RunnerExecutor{Tasks: cancelledTaskStub{taskStub{envelope: envelope}}, Sessions: sessions,
+	executor := RunnerExecutor{Tasks: cancelledTaskStub{taskStub{envelope: envelope}}, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(),
 		Profiles: profilememory.NewResolver(), Bundles: profilememory.NewBundleManager(nil), Payloads: messagingmemory.New(),
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(context.Context, *event.Event) (string, string, error) { return "event", "event://cancel", nil }}
+		Inputs: JSONTextInputDecoder{}}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 7, nil); !errors.Is(err, runtime.ErrCancelRequested) {
 		t.Fatalf("execute after cancel=%v", err)
 	}
@@ -176,10 +177,8 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	var progressEvents []ProgressEvent
 	executor := RunnerExecutor{
 		Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles,
-		Sessions: sessions, Payloads: payloads,
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-			return "runner", "event://" + value.ID, nil
-		},
+		Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(), Payloads: payloads,
+		Inputs:   JSONTextInputDecoder{},
 		Progress: ProgressPublisherFunc(func(value ProgressEvent) { progressEvents = append(progressEvents, value) }),
 	}
 	for attempt := 0; attempt < 2; attempt++ {
@@ -229,10 +228,8 @@ func TestRunnerExecutorCommitsModelBudgetExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessions := sessionmemory.New()
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, Payloads: payloads,
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-			return "runner", "event://" + value.ID, nil
-		}}
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(), Payloads: payloads,
+		Inputs: JSONTextInputDecoder{}}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
 		t.Fatalf("execute = %v, want budget terminal", err)
 	}
@@ -277,10 +274,8 @@ func TestRunnerExecutorPersistsExplicitRichOutboundContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	card := []byte(`{"schema":"2.0","body":{"text":"hello"}}`)
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessionmemory.New(), Payloads: payloads,
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-			return "runner", "event://" + value.ID, nil
-		},
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessionmemory.New(), SDKSessions: agentsessionmemory.NewSessionService(), Payloads: payloads,
+		Inputs: JSONTextInputDecoder{},
 		OutputRenderer: OutboundRendererFunc(func(_ context.Context, got runtime.ExecutionEnvelope, modelContent string) (OutboundContent, error) {
 			if got.RequestID != envelope.RequestID || modelContent == "" {
 				t.Fatalf("renderer input envelope=%#v model=%q", got, modelContent)
@@ -323,8 +318,8 @@ func TestRunnerExecutorGovernanceDenyCommitsWithoutBuildingOrCallingModel(t *tes
 		t.Fatal(err)
 	}
 	sessions := sessionmemory.New()
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions,
-		Payloads: payloads, Inputs: JSONTextInputDecoder{}, EncodeEvent: func(context.Context, *event.Event) (string, string, error) { return "event", "event://denied", nil },
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(),
+		Payloads: payloads, Inputs: JSONTextInputDecoder{},
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 9, nil); err != nil {
 		t.Fatal(err)

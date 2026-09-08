@@ -281,6 +281,11 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 		return errors.New("memory service configuration rejected")
 	}
 	defer memoryService.Close()
+	sdkSessions, err := sessionpostgres.NewOfficialSessionService(configValue.PostgresDSN)
+	if err != nil {
+		return errors.New("session service configuration rejected")
+	}
+	defer sdkSessions.Close()
 	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Knowledge: knowledgeResolver,
 		Conditions: agentcondition.DefaultRegistry(),
 		Memory:     memoryService, Checkpoints: graphCheckpoints,
@@ -298,8 +303,8 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	})
 	defer bundles.Close(context.Background())
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
-		Sessions: sessionpostgres.NewWithTelemetry(db, telemetryProvider), Payloads: payloads, Artifacts: artifacts,
-		Inputs: worker.JSONTextInputDecoder{}, EncodeEvent: worker.DurableEventRef, EventDrainTimeout: 30 * time.Second,
+		Sessions: sessionpostgres.NewWithTelemetry(db, telemetryProvider), SDKSessions: sdkSessions, Payloads: payloads, Artifacts: artifacts,
+		Inputs: worker.JSONTextInputDecoder{}, EventDrainTimeout: 30 * time.Second,
 		Progress:   progressPublisher,
 		Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
 		ContinuationTools: agentFactory, Telemetry: telemetryProvider}

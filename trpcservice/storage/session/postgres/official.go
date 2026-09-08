@@ -7,7 +7,7 @@ package postgres
 // guarded by a fail-closed tenant hook. The official service owns the raw
 // event/state persistence; the platform coordination contract (fence /
 // version / outbox) stays in a service-owned coordination table (see
-// docs/design/10.session-sdk-reuse.md).
+// docs/design/6.module-boundaries.md §8.1).
 
 import (
 	"fmt"
@@ -61,11 +61,30 @@ func TenantGetSessionHook(tenantID, agentAppID string) session.GetSessionHook {
 	}
 }
 
-// NewOfficialSessionService builds the official session/postgres backend with
-// the platform tenant guard mounted. DB init is skipped so table creation
-// stays under the platform migration authority rather than the SDK's implicit
-// DDL.
-func NewOfficialSessionService(tenantID, agentAppID, dsn string) (*sessionpostgres.Service, error) {
+// NewOfficialSessionService builds the shared official session/postgres
+// backend used by a Worker role. Tenant scope is enforced by the per-turn
+// facade, not by a process-wide static hook: one Worker legitimately serves
+// multiple tenant/app pairs. DB init is skipped so table creation stays under
+// the platform migration authority rather than the SDK's implicit DDL.
+func NewOfficialSessionService(dsn string) (*sessionpostgres.Service, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, fmt.Errorf("official session postgres dsn is empty")
+	}
+	svc, err := sessionpostgres.NewService(
+		sessionpostgres.WithPostgresClientDSN(dsn),
+		sessionpostgres.WithSkipDBInit(true),
+		sessionpostgres.WithEnableAsyncPersist(false),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("new official session postgres service: %w", err)
+	}
+	return svc, nil
+}
+
+// NewTenantScopedOfficialSessionService is retained for single-scope callers
+// such as narrowly scoped maintenance jobs. Multi-tenant process roles must
+// use NewOfficialSessionService and the checked BufferedTurn facade instead.
+func NewTenantScopedOfficialSessionService(tenantID, agentAppID, dsn string) (*sessionpostgres.Service, error) {
 	svc, err := sessionpostgres.NewService(
 		sessionpostgres.WithPostgresClientDSN(dsn),
 		sessionpostgres.WithSkipDBInit(true),

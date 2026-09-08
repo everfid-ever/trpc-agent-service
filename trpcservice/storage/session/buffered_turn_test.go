@@ -12,10 +12,10 @@ import (
 	agentmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
-func TestBufferedTurnDoesNotPersistPartialEffects(t *testing.T) {
+func TestBufferedTurnPersistsSessionEffectsThroughOfficialService(t *testing.T) {
 	ctx := context.Background()
 	backing := agentmemory.NewSessionService()
-	key := agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"}
+	key := agentsession.Key{AppName: "tenant/app", UserID: "user", SessionID: "session"}
 	if _, err := backing.CreateSession(ctx, key, agentsession.StateMap{}); err != nil {
 		t.Fatal(err)
 	}
@@ -25,9 +25,7 @@ func TestBufferedTurnDoesNotPersistPartialEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := sessionstore.NewBufferedTurn(atomic, backing, storageKey, "user", func(_ context.Context, value *agentevent.Event) (string, string, error) {
-		return "agent_event", "event://" + value.ID, nil
-	})
+	turn, err := sessionstore.NewBufferedTurn(atomic, backing, storageKey, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,31 +41,29 @@ func TestBufferedTurnDoesNotPersistPartialEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Events) != 0 || len(base.State) != 0 {
-		t.Fatalf("backing mutated before commit: %#v", base)
+	if len(base.Events) != 1 || string(base.State["answer"]) != `"ready"` {
+		t.Fatalf("SDK session effects not persisted: %#v", base)
 	}
 	_, err = turn.Commit(ctx, sessionstore.CommitTurnRequest{RequestID: "request", CommitID: "request:terminal:0", Stage: "terminal", InputSeq: 1, Fence: 1, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded})
 	if err != nil {
 		t.Fatal(err)
 	}
 	events, _, _ := atomic.SnapshotEffects(storageKey)
-	if len(events) != 1 || events[0].EventID != "event-1" {
-		t.Fatalf("events=%#v", events)
+	if len(events) != 0 {
+		t.Fatalf("coordination store duplicated SDK events=%#v", events)
 	}
 }
 
-func TestBufferedTurnRollbackDropsEffects(t *testing.T) {
+func TestBufferedTurnRollbackOnlyDropsCoordinationMetadata(t *testing.T) {
 	ctx := context.Background()
 	backing := agentmemory.NewSessionService()
-	key := agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"}
+	key := agentsession.Key{AppName: "tenant/app", UserID: "user", SessionID: "session"}
 	if _, err := backing.CreateSession(ctx, key, agentsession.StateMap{}); err != nil {
 		t.Fatal(err)
 	}
 	atomic := sessionmemory.New()
 	storageKey := sessionstore.SessionKey{TenantID: "tenant", AgentAppID: "app", SessionID: "session"}
-	turn, err := sessionstore.NewBufferedTurn(atomic, backing, storageKey, "user", func(context.Context, *agentevent.Event) (string, string, error) {
-		return "event", "event://1", nil
-	})
+	turn, err := sessionstore.NewBufferedTurn(atomic, backing, storageKey, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,27 +77,26 @@ func TestBufferedTurnRollbackDropsEffects(t *testing.T) {
 	if err := turn.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(turn.Events()) != 0 {
-		t.Fatal("rollback retained events")
+	base, err := backing.GetSession(ctx, key)
+	if err != nil || len(base.Events) != 1 {
+		t.Fatalf("SDK event unexpectedly rolled back: session=%#v err=%v", base, err)
 	}
 }
 
 func TestDurableBufferedTurnRestoresCommittedHistory(t *testing.T) {
 	ctx := context.Background()
 	atomic := sessionmemory.New()
+	backing := agentmemory.NewSessionService()
 	storageKey := sessionstore.SessionKey{TenantID: "tenant", AgentAppID: "app", SessionID: "session"}
 	head, err := atomic.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: storageKey, RequestID: "request-1", InputSeq: 1, Fence: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoder := func(_ context.Context, value *agentevent.Event) (string, string, error) {
-		return "agent_event", "event://" + value.ID, nil
-	}
-	first, err := sessionstore.NewDurableBufferedTurnScoped(atomic, storageKey, "app", "user", encoder)
+	first, err := sessionstore.NewDurableBufferedTurnScoped(atomic, backing, storageKey, "tenant/app", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := first.SessionService().GetSession(ctx, agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"})
+	session, err := first.SessionService().GetSession(ctx, agentsession.Key{AppName: "tenant/app", UserID: "user", SessionID: "session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +109,11 @@ func TestDurableBufferedTurnRestoresCommittedHistory(t *testing.T) {
 	if _, err := atomic.OpenForRun(ctx, sessionstore.OpenForRunRequest{SessionKey: storageKey, RequestID: "request-2", InputSeq: 2, Fence: 2}); err != nil {
 		t.Fatal(err)
 	}
-	second, err := sessionstore.NewDurableBufferedTurnScoped(atomic, storageKey, "app", "user", encoder)
+	second, err := sessionstore.NewDurableBufferedTurnScoped(atomic, backing, storageKey, "tenant/app", "user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := second.SessionService().GetSession(ctx, agentsession.Key{AppName: "app", UserID: "user", SessionID: "session"})
+	restored, err := second.SessionService().GetSession(ctx, agentsession.Key{AppName: "tenant/app", UserID: "user", SessionID: "session"})
 	if err != nil {
 		t.Fatal(err)
 	}

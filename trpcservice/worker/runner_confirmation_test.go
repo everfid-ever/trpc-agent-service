@@ -25,6 +25,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	checkpointmemory "trpc.group/trpc-go/trpc-agent-go/graph/checkpoint/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agentsessionmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
@@ -269,10 +270,8 @@ func TestRunnerDangerousToolSuspendsAndResumesExactlyOnce(t *testing.T) {
 		return &serviceagent.Bundle{AppName: resolved.AppName, Root: root}, nil, err
 	})
 	guard := &confirmationRunGuard{policy: policy}
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, Payloads: payloads,
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-			return "runner", "event://" + value.ID, nil
-		},
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(), Payloads: payloads,
+		Inputs:     JSONTextInputDecoder{},
 		Governance: guard, Confirmations: coordinator, ContinuationTools: factory}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
 		t.Fatal(err)
@@ -369,10 +368,8 @@ func TestRunnerGraphDangerousToolResumesFromCheckpointExactlyOnce(t *testing.T) 
 		return &serviceagent.Bundle{AppName: resolved.AppName, Root: built}, nil, err
 	})
 	guard := &confirmationRunGuard{policy: policy}
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, Payloads: payloads,
-		Inputs: JSONTextInputDecoder{}, EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-			return "runner", "event://" + value.ID, nil
-		}, Governance: guard, Confirmations: coordinator, ContinuationTools: factory}
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(), Payloads: payloads,
+		Inputs: JSONTextInputDecoder{}, Governance: guard, Confirmations: coordinator, ContinuationTools: factory}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -451,9 +448,8 @@ func TestRunnerGraphDeniedConfirmationTerminalizesWithoutResuming(t *testing.T) 
 	coordinator := &memoryConfirmationCoordinator{sessions: sessions, confirmation: governance.Confirmation{
 		SuspensionRequest: governance.SuspensionRequest{ConfirmationID: "confirmation-denied", TenantID: envelope.TenantID,
 			RequestID: envelope.RequestID}, State: governance.ConfirmationDenied, Version: 2}}
-	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions,
-		Payloads: messagingmemory.New(), Inputs: JSONTextInputDecoder{}, Confirmations: coordinator, Governance: &confirmationRunGuard{},
-		EncodeEvent: func(context.Context, *event.Event) (string, string, error) { return "event", "event://denied", nil }}
+	executor := RunnerExecutor{Tasks: taskStub{envelope: envelope}, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: agentsessionmemory.NewSessionService(),
+		Payloads: messagingmemory.New(), Inputs: JSONTextInputDecoder{}, Confirmations: coordinator, Governance: &confirmationRunGuard{}}
 	if err := executor.ExecuteWithLease(context.Background(), envelope, 1, nil); err != nil {
 		t.Fatal(err)
 	}

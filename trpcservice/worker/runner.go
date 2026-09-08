@@ -30,6 +30,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 	agenttool "trpc.group/trpc-go/trpc-agent-go/tool"
 	toolawaitreply "trpc.group/trpc-go/trpc-agent-go/tool/awaitreply"
 )
@@ -55,10 +56,10 @@ type RunnerExecutor struct {
 	Profiles          profile.ExecutionProfileResolver
 	Bundles           profile.RuntimeBundleManager
 	Sessions          sessionstore.AtomicSessionStore
+	SDKSessions       agentsession.Service
 	Payloads          messaging.PayloadStore
 	Artifacts         artifact.Store
 	Inputs            InputDecoder
-	EncodeEvent       sessionstore.EventRefEncoder
 	EncodeResult      ResultRefEncoder
 	OutputRenderer    OutboundRenderer
 	Progress          ProgressPublisher
@@ -78,8 +79,8 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	ctx, finish := telemetry.StartOperation(ctx, w.Telemetry, envelope.TraceParent, telemetry.OperationWorkerExecute,
 		telemetry.ComponentAttribute(telemetry.ComponentWorker))
 	defer func() { finish(resultErr) }()
-	if w.Tasks == nil || w.Profiles == nil || w.Bundles == nil || w.Sessions == nil ||
-		w.Payloads == nil || w.Inputs == nil || w.EncodeEvent == nil {
+	if w.Tasks == nil || w.Profiles == nil || w.Bundles == nil || w.Sessions == nil || w.SDKSessions == nil ||
+		w.Payloads == nil || w.Inputs == nil {
 		return runtime.ErrCapabilityUnsupported
 	}
 	if err := envelope.Validate(); err != nil {
@@ -142,7 +143,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		return fmt.Errorf("open session turn: %w", err)
 	}
 
-	turn, err := sessionstore.NewDurableBufferedTurnScoped(w.Sessions, sessionKey, appName, envelope.UserID, w.EncodeEvent)
+	turn, err := sessionstore.NewDurableBufferedTurnScoped(w.Sessions, w.SDKSessions, sessionKey, appName, envelope.UserID)
 	if err != nil {
 		return fmt.Errorf("create durable turn buffer: %w", err)
 	}
@@ -324,7 +325,7 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 			}
 			graphResume = &coordinate
 		}
-		call, callErr := confirmedToolCall(ctx, w.Sessions, sessionKey, *continuation)
+		call, callErr := confirmedToolCall(ctx, w.SDKSessions, agentsession.Key{AppName: appName, UserID: envelope.UserID, SessionID: envelope.SessionID}, *continuation)
 		if callErr != nil {
 			return callErr
 		}
@@ -530,7 +531,10 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		}
 		commit := sessionstore.CommitTurnRequest{SessionKey: sessionKey, RequestID: envelope.RequestID,
 			CommitID: envelope.RequestID + ":waiting:" + call.ID, Stage: "waiting", InputSeq: envelope.InputSeq, Fence: fence,
-			ExpectedVersion: head.Version, Outcome: runtime.OutcomeWaitingConfirmation, Events: turn.Events(), StateDelta: turn.StateDelta(),
+			// Events and state are already owned by the SDK Session service.
+			// Suspend only records the platform coordination terminal and its
+			// outbox facts; copying them here would recreate a second history.
+			ExpectedVersion: head.Version, Outcome: runtime.OutcomeWaitingConfirmation,
 			ResultRef: checkpointRef,
 			Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "confirmation:" + confirmationID,
 				PayloadRef: promptRef, EventSeq: 1, TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}, {Kind: "reply", IdempotencyKey: "confirmation-reply:" + confirmationID,
@@ -1139,16 +1143,19 @@ func confirmationBindingID(ctx context.Context, payloads messaging.PayloadStore,
 	return payloadBindingID, nil
 }
 
-func confirmedToolCall(ctx context.Context, sessions sessionstore.AtomicSessionStore, key sessionstore.SessionKey, confirmation governance.Confirmation) (model.ToolCall, error) {
-	snapshot, err := sessions.LoadSession(ctx, key)
+func confirmedToolCall(ctx context.Context, sessions agentsession.Service, key agentsession.Key, confirmation governance.Confirmation) (model.ToolCall, error) {
+	if sessions == nil {
+		return model.ToolCall{}, runtime.ErrCapabilityUnsupported
+	}
+	snapshot, err := sessions.GetSession(ctx, key)
 	if err != nil {
 		return model.ToolCall{}, err
 	}
+	if snapshot == nil {
+		return model.ToolCall{}, runtime.ErrNotFound
+	}
 	for eventIndex := len(snapshot.Events) - 1; eventIndex >= 0; eventIndex-- {
-		var value event.Event
-		if err := json.Unmarshal(snapshot.Events[eventIndex], &value); err != nil {
-			return model.ToolCall{}, runtime.ErrInvariantViolation
-		}
+		value := snapshot.Events[eventIndex]
 		if value.Response == nil {
 			continue
 		}

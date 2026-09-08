@@ -6921,6 +6921,96 @@ CREATE INDEX idx_memories_app_user ON public.memories(app_name, user_id);
 CREATE INDEX idx_memories_updated_at ON public.memories(updated_at DESC);
 CREATE INDEX idx_memories_deleted_at ON public.memories(deleted_at);
 
+-- Framework-owned Session/Event/State persistence
+-- (trpc-agent-go/session/postgres). The platform keeps only ordering, fence,
+-- terminal and outbox coordination in its own session_* tables; these tables
+-- are the sole source of conversational session state and event history.
+-- Like memory, role composition uses WithSkipDBInit(true), so all schema
+-- changes remain visible and reviewable in the service migration baseline.
+CREATE TABLE public.session_states (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ user_id VARCHAR(255) NOT NULL,
+ session_id VARCHAR(255) NOT NULL,
+ state jsonb DEFAULT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE UNIQUE INDEX idx_session_states_unique_active ON public.session_states(app_name, user_id, session_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_session_states_expires ON public.session_states(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE public.session_events (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ user_id VARCHAR(255) NOT NULL,
+ session_id VARCHAR(255) NOT NULL,
+ event JSONB NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE INDEX idx_session_events_lookup ON public.session_events(app_name, user_id, session_id, created_at);
+CREATE INDEX idx_session_events_expires ON public.session_events(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE public.session_track_events (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ user_id VARCHAR(255) NOT NULL,
+ session_id VARCHAR(255) NOT NULL,
+ track VARCHAR(255) NOT NULL,
+ event JSONB NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE INDEX idx_session_track_events_lookup ON public.session_track_events(app_name, user_id, session_id, track, created_at);
+CREATE INDEX idx_session_track_events_expires ON public.session_track_events(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE public.session_summaries (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ user_id VARCHAR(255) NOT NULL,
+ session_id VARCHAR(255) NOT NULL,
+ filter_key VARCHAR(255) NOT NULL DEFAULT '',
+ summary JSONB DEFAULT NULL,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE UNIQUE INDEX idx_session_summaries_unique_active ON public.session_summaries(app_name, user_id, session_id, filter_key) WHERE deleted_at IS NULL;
+CREATE INDEX idx_session_summaries_expires ON public.session_summaries(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE public.app_states (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ key VARCHAR(255) NOT NULL,
+ value TEXT DEFAULT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE UNIQUE INDEX idx_app_states_unique_active ON public.app_states(app_name, key) WHERE deleted_at IS NULL;
+CREATE INDEX idx_app_states_expires ON public.app_states(expires_at) WHERE expires_at IS NOT NULL;
+
+CREATE TABLE public.user_states (
+ id BIGSERIAL PRIMARY KEY,
+ app_name VARCHAR(255) NOT NULL,
+ user_id VARCHAR(255) NOT NULL,
+ key VARCHAR(255) NOT NULL,
+ value TEXT DEFAULT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ expires_at TIMESTAMP DEFAULT NULL,
+ deleted_at TIMESTAMP DEFAULT NULL
+);
+CREATE UNIQUE INDEX idx_user_states_unique_active ON public.user_states(app_name, user_id, key) WHERE deleted_at IS NULL;
+CREATE INDEX idx_user_states_expires ON public.user_states(expires_at) WHERE expires_at IS NOT NULL;
+
 -- Runner plugins are immutable revision capabilities. The database repeats the
 -- reviewed allow-list so direct SQL cannot publish arbitrary framework hooks.
 CREATE TABLE public.agent_app_revision_plugin (

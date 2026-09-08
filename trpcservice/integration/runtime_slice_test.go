@@ -55,7 +55,6 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker/mockmodel"
 	redisclient "github.com/redis/go-redis/v9"
-	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -122,6 +121,11 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 	profiles := profilememory.NewResolver(snapshots...)
 	tasks := gatewaypostgres.NewTaskStore(db)
 	sessions := sessionpostgres.New(db)
+	sdkSessions, err := sessionpostgres.NewOfficialSessionService(os.Getenv("TRPC_POSTGRES_TEST_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sdkSessions.Close() })
 	inbox := messagingpostgres.New(db)
 	payloads := messagingpostgres.NewWithPayloadKey(db, bytes.Repeat([]byte{0x5a}, 32), 1)
 	model := &delayedModel{inner: mockmodel.New(), delay: 150 * time.Millisecond}
@@ -148,12 +152,9 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		executor := recordingExecutor{
 			workerID: workerID, used: usedWorkers, started: executionStarted,
 			inner: worker.RunnerExecutor{
-				Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions,
+				Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions, SDKSessions: sdkSessions,
 				Payloads: payloads, Inputs: worker.JSONTextInputDecoder{},
 				Governance: governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}, Confirmations: governanceStore,
-				EncodeEvent: func(_ context.Context, value *event.Event) (string, string, error) {
-					return "runner", "event://" + value.ID, nil
-				},
 			},
 		}
 		consumer := worker.Consumer{
@@ -678,7 +679,7 @@ park_deadline=now()+interval '1 minute',version=version+1 WHERE tenant_id=$1 AND
 		t.Fatal(err)
 	}
 	var durableEvents int
-	if err := db.QueryRow(`SELECT count(*) FROM session_event WHERE tenant_id=$1 AND session_id=$2 AND event_payload IS NOT NULL`, tenantA, sessionID).Scan(&durableEvents); err != nil || durableEvents == 0 {
+	if err := db.QueryRow(`SELECT count(*) FROM session_events WHERE app_name=$1 AND session_id=$2`, tenantA+"/"+appID, sessionID).Scan(&durableEvents); err != nil || durableEvents == 0 {
 		t.Fatalf("durable session events=%d err=%v", durableEvents, err)
 	}
 	if usedWorkers.count() < 2 {
