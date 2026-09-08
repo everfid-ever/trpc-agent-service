@@ -1,10 +1,11 @@
 name: trpc-agent-minimal
 
-# Disposable backend environment for the adapter smoke. Unlike the full local
-# compose (which binds 0.0.0.0 for local development), every host port here is
-# bound to 127.0.0.1 only. Services talk to each other over the compose network;
-# the host ports exist solely for optional debugging and never face the LAN.
-# Nothing here uses IM, model, S3, OTEL or Kubernetes credentials.
+# Disposable backend integration environment. Unlike the full local compose
+# (which binds 0.0.0.0 for local development), every host port here is bound to
+# 127.0.0.1 only. The suite starts real PostgreSQL 16, Redis 7, Qdrant and Vault
+# services; its Go container runs the opt-in repository, runtime and Qdrant
+# adapter integration tests. Nothing here uses IM, model, S3, OTEL or Kubernetes
+# credentials.
 
 services:
   jaeger:

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -63,6 +64,30 @@ func TestTenantStatusCASAndOutboxFactsPostgreSQL16(t *testing.T) {
 	}
 	if auditCount != 2 || controlCount != 2 {
 		t.Fatalf("audit=%d control=%d", auditCount, controlCount)
+	}
+}
+
+func TestTenantConfigurationPublishesRedactionRulesWithCASPostgreSQL16(t *testing.T) {
+	db := openContractDB(t)
+	ctx := context.Background()
+	const tenantID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+	metadata := tenant.ChangeMetadata{ActorType: "test", ActorID: "tenant", ReasonCode: "contract", CorrelationID: "redaction-contract", TraceID: "redaction-contract"}
+	repository := New(db)
+	created, err := repository.Create(ctx, tenant.CreateInput{Tenant: tenant.Tenant{TenantID: tenantID, TenantKey: "tenant-redaction-policy", DisplayName: "Tenant Redaction"}, ChangeMetadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := created
+	next.RedactionRules = []redaction.Rule{{ID: "case-reference", KeyFragments: []string{"case_ref"}, TextPattern: `CASE-[0-9]{6}`}}
+	updated, err := repository.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{Tenant: next, ExpectedVersion: created.Version, ChangeMetadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Tenant.Version != created.Version+1 || len(updated.Tenant.RedactionRules) != 1 || updated.Tenant.RedactionRules[0].ID != "case-reference" {
+		t.Fatalf("updated=%#v", updated.Tenant)
+	}
+	if _, err := repository.UpdateConfiguration(ctx, tenant.UpdateConfigurationInput{Tenant: next, ExpectedVersion: created.Version, ChangeMetadata: metadata}); !errors.Is(err, tenant.ErrVersionConflict) {
+		t.Fatalf("expected version conflict, got %v", err)
 	}
 }
 

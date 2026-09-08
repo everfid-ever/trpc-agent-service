@@ -11,19 +11,32 @@ required_a2a_version="v0.2.6-0.20260721084546-18c8244d0acb"
 required_feishu_module="github.com/larksuite/oapi-sdk-go/v3"
 required_feishu_version="v3.10.0"
 required_aws_module="github.com/aws/aws-sdk-go-v2"
-required_aws_version="v1.32.5"
+required_aws_version="v1.46.0"
 required_aws_config_module="github.com/aws/aws-sdk-go-v2/config"
-required_aws_config_version="v1.28.5"
+required_aws_config_version="v1.33.3"
 required_aws_credentials_module="github.com/aws/aws-sdk-go-v2/credentials"
-required_aws_credentials_version="v1.17.46"
+required_aws_credentials_version="v1.20.3"
 required_s3_module="github.com/aws/aws-sdk-go-v2/service/s3"
-required_s3_version="v1.67.1"
+required_s3_version="v1.111.0"
 required_smithy_module="github.com/aws/smithy-go"
-required_smithy_version="v1.22.1"
+required_smithy_version="v1.28.1"
 
 actual_version="$(go list -m -f '{{.Version}}' "$required_module")"
 if [[ "$actual_version" != "$required_version" ]]; then
   echo "dependency baseline mismatch: $required_module=$actual_version, want $required_version" >&2
+  exit 1
+fi
+
+# The service is permitted to consume only the official v1.11.2 module. A
+# replace can preserve the displayed version while silently compiling a fork,
+# so inspect the resolved module metadata as well as its version.
+if go list -m -json "$required_module" | grep -q '"Replace"'; then
+  echo "forbidden framework replacement: $required_module must resolve to the official $required_version module" >&2
+  exit 1
+fi
+
+if grep -Eq '^replace[[:space:]].*trpc\.group/trpc-go/trpc-agent-go' go.mod; then
+  echo "forbidden go.mod replacement for $required_module" >&2
   exit 1
 fi
 
@@ -76,7 +89,7 @@ if scan_forbidden_imports; then
   exit 1
 fi
 
-if ! grep -Eq '^go 1\.24([[:space:]]|\.|$)' go.mod; then
-  echo "go.mod must retain the Go 1.24 baseline" >&2
+if ! grep -Eq '^go 1\.25([[:space:]]|\.|$)' go.mod; then
+  echo "go.mod must retain the Go 1.25 baseline" >&2
   exit 1
 fi

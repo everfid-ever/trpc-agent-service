@@ -3,6 +3,7 @@ package gateway
 import (
 	"net/http"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
@@ -40,5 +41,9 @@ func (m ProtocolInvocationMiddleware) ServeHTTP(w http.ResponseWriter, r *http.R
 		writeControlError(w, ErrForbidden)
 		return
 	}
-	m.Next.ServeHTTP(w, r.WithContext(WithServerInvocationContext(r.Context(), trusted)))
+	ctx := r.Context()
+	if trusted.RedactionProgram != nil {
+		ctx = redaction.ContextWithProgram(ctx, trusted.RedactionProgram)
+	}
+	m.Next.ServeHTTP(w, r.WithContext(WithServerInvocationContext(ctx, trusted)))
 }

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -84,6 +86,56 @@ func TestStrictMaskingAndInvalidConfiguration(t *testing.T) {
 		if _, err := New(config); err == nil {
 			t.Fatalf("expected invalid configuration rejection: %#v", config)
 		}
+	}
+}
+
+func TestLoggerUsesCompiledCustomRedactionRules(t *testing.T) {
+	var output bytes.Buffer
+	logger, err := New(Config{
+		Writer: &output, Level: LevelInfo, MaskingLevel: MaskBasic, Role: "worker",
+		RedactionRules: []redaction.Rule{{ID: "case-reference", KeyFragments: []string{"case_ref"}, TextPattern: `CASE-[0-9]{6}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info(context.Background(), "processing CASE-123456", String("case-ref", "CASE-654321"))
+	if strings.Contains(output.String(), "CASE-") {
+		t.Fatalf("custom rule leaked a reference: %s", output.String())
+	}
+	record := decodeRecord(t, &output)
+	if record["case-ref"] != redaction.Replacement {
+		t.Fatalf("custom key rule was not applied: %#v", record)
+	}
+}
+
+func TestNewForTenantUsesVersionedPolicy(t *testing.T) {
+	var output bytes.Buffer
+	logger, err := NewForTenant(Config{Writer: &output, Level: LevelInfo, Role: "worker"}, tenant.Tenant{
+		LogMaskingLevel: tenant.MaskingBasic,
+		RedactionRules:  []redaction.Rule{{ID: "case", TextPattern: `CASE-[0-9]{6}`}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info(context.Background(), "CASE-123456")
+	if strings.Contains(output.String(), "CASE-123456") {
+		t.Fatalf("tenant policy was not used: %s", output.String())
+	}
+}
+
+func TestLoggerUsesTenantPolicyBoundToContext(t *testing.T) {
+	var output bytes.Buffer
+	logger, err := New(Config{Writer: &output, Level: LevelInfo, Role: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := (tenant.Tenant{LogMaskingLevel: tenant.MaskingBasic, RedactionRules: []redaction.Rule{{ID: "case", TextPattern: `CASE-[0-9]{6}`}}}).ContextWithRedaction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger.Info(ctx, "CASE-123456")
+	if strings.Contains(output.String(), "CASE-123456") {
+		t.Fatalf("context policy was not used: %s", output.String())
 	}
 }
 

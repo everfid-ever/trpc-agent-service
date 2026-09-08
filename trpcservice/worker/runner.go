@@ -26,6 +26,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	agentcore "trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
@@ -52,7 +53,11 @@ type ConfirmedToolResolver interface {
 }
 
 type RunnerExecutor struct {
-	Tasks           gateway.TaskStore
+	Tasks gateway.TaskStore
+	// TenantPolicies is optional for unit-level executors. Production workers
+	// provide it to bind the exact versioned tenant redaction program before
+	// any downstream model/tool/storage call receives this execution context.
+	TenantPolicies  tenant.Repository
 	Profiles        profile.ExecutionProfileResolver
 	Bundles         profile.RuntimeBundleManager
 	Sessions        sessionstore.AtomicSessionStore
@@ -99,6 +104,19 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 	}
 	if err := envelope.Validate(); err != nil {
 		return err
+	}
+	if w.TenantPolicies != nil {
+		policy, policyErr := w.TenantPolicies.Get(ctx, envelope.TenantID)
+		if policyErr != nil {
+			return fmt.Errorf("resolve tenant redaction policy: %w", policyErr)
+		}
+		if policy.Version != envelope.TenantVersion {
+			return runtime.ErrVersionMismatch
+		}
+		ctx, policyErr = policy.ContextWithRedaction(ctx)
+		if policyErr != nil {
+			return fmt.Errorf("compile tenant redaction policy: %w", policyErr)
+		}
 	}
 	if fence == 0 {
 		return runtime.ErrStaleFence

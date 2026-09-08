@@ -11,14 +11,17 @@
 | 验证项 | 命令或操作 | 所需资源 | 通过证据 | 范围 |
 | --- | --- | --- | --- | --- |
 | Compose 契约 | `docker compose -f deploy/compose/docker-compose.local.yml config --quiet` | Docker Compose v2 | 退出码 0 | 本地 |
-| Admission | `bash scripts/ci_admission.sh`；race 使用 `--race` | Go 1.24.x；或等价 Go 1.24 容器/CI runner | format、依赖边界、build、vet、test 全部通过 | 本地/CI |
-| 最终无凭据验收 | `bash scripts/ci_admission.sh --demo` | Go 1.24、Docker Desktop/CI Docker daemon、curl | 空 PostgreSQL 只记录 `000001`；demo bootstrap、fake chat、SSE delta、health/ready 全部通过 | 本地/CI |
-| 后端 adapter | `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | PostgreSQL、Redis、Qdrant、Vault contract 通过；临时资源自动清理 | 本地/CI |
+| Admission | `bash scripts/ci_admission.sh`；race 使用 `--race` | Go 1.25.x；或等价 Go 1.25 容器/CI runner | format、依赖边界、build、vet、test 全部通过 | 本地/CI |
+| 最终无凭据验收 | `bash scripts/ci_admission.sh --demo` | Go 1.25、Docker Desktop/CI Docker daemon、curl | 空 PostgreSQL 记录当前全部业务迁移；demo bootstrap、fake chat、SSE delta、health/ready 全部通过 | 本地/CI |
+| 后端集成 | `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | 真正启动 PostgreSQL 16、Redis 7、Qdrant、Vault；migration/runtime/repository、Redis 与 Qdrant adapter integration 均不再因环境变量跳过；临时资源自动清理 | 本地/CI |
+| Prometheus 配置 | `docker run --rm --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro" --entrypoint promtool prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml` | Docker daemon | `promtool` 成功解析 scrape 配置；GitHub Actions 的 `backend-integration` job 同步执行 | 本地/CI |
 | Session 迁移控制面 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | current source 与 immutable candidate 的绑定推导；verification/watermark 仅从迁移 authority 读取；cutover/observe/rollback CAS 请求通过 | 本地/CI |
+| Knowledge 迁移 operator role | `go test ./cmd/trpc-service ./trpcservice/migration/... ./trpcservice/storage/knowledge/qdrant`（亦包含于 `bash scripts/backend_adapter_smoke.sh`） | Go 1.25.x、后端集成 job 另需 Docker | `knowledge-migrate` 已注册；缺失确认、控制面、secret 或 migration identity 环境变量时 role 在建立外部依赖前拒启；step 覆盖 completed backfill→verify 与 observe drain；journal recovery 在解析 published Qdrant source/target binding 前执行 | 本地/CI |
+| Knowledge 迁移切换与收尾所有权 | `POST /v1/tenants/{tenant}/knowledge-migrations/{migration}/{cutover,observe,rollback,cleanup}` | 认证 Admin principal、PostgreSQL control plane | `knowledge-migrate` 只 repair/推进 pre-cutover phase 并在 observe 报告 drain；Admin 显式执行切流、观察窗、回滚和 cleanup。cleanup 仅在观察窗届满、旧 binding 在途 execution 与全部未 applied mutation 清零时由 publisher 接受 | 生产控制面 |
 | Skill / Knowledge 装配 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | published Skill 内容 digest/name 固定；Knowledge 的 manifest/backend/embedder/vector generation 不一致或缺失均 fail-closed | 本地/CI |
 | Graph 条件边 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | `present/empty` 分支固定；未知条件、缺分支、混合普通/条件边被拒绝 | 本地/CI |
 | CodeExec 控制面 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | ToolRef digest 固化、workspace root 为 `0700`、symlink root 被拒绝；实际启用另需 sandbox-capable worker 镜像 | 本地/CI |
-| MCP 适配器 | `go test ./trpcservice/tool/mcp ./trpcservice/tool ./trpcservice/worker` | Go 1.24.x | scoped secret、声明/binding digest、私网 DNS 拒绝、Worker 构建上下文与确认续跑的 binding 固定全部通过 | 本地/CI |
+| MCP 适配器 | `go test ./trpcservice/tool/mcp ./trpcservice/tool ./trpcservice/worker` | Go 1.25.x | scoped secret、声明/binding digest、私网 DNS 拒绝、Worker 构建上下文与确认续跑的 binding 固定全部通过 | 本地/CI |
 | PostgreSQL/Redis runtime slice | `docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis` 后执行 `--profile runtime-test run --rm runtime-test` | Docker Desktop | migration 与真实 PostgreSQL/Redis slice 通过 | 本地 |
 | WebUI + 模型/Knowledge | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；启动时 Qdrant fixture、fake embedding profile、published Skill 与 Knowledge manifest 已就绪 | 本地 + 真实模型 |
 | CodeExec Worker | `docker compose -f deploy/compose/docker-compose.local.yml --profile codeexec up worker-codeexec` | Docker Desktop、`.env.local` 中经 digest 审核的 `TRPC_CODE_EXECUTORS` | 独立 `codeexec` image target、bubblewrap/Bash/Python、私有 workspace volume；工具仍需 published ToolRef 与治理许可 | 本地 |

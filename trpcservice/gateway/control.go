@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
@@ -30,6 +31,10 @@ type Principal struct {
 	CanCancel     bool
 	CanRun        bool
 	TraceParent   string
+	// RedactionProgram is derived only by a trusted principal resolver from
+	// the tenant version it has just authorized. HTTP handlers attach it to
+	// downstream context; request payloads never choose a logging policy.
+	RedactionProgram *redaction.Program
 }
 
 type PrincipalResolver interface {

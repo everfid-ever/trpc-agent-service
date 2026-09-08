@@ -34,7 +34,7 @@ func TestHMACPrincipalResolverBindsTenantVersionAndCanonicalRoute(t *testing.T) 
 	request := httptest.NewRequest("GET", "http://gateway/v1/agent-runs/req-1", nil)
 	request.Header.Set("Authorization", "Bearer "+token)
 	principal, err := resolver.Resolve(request)
-	if err != nil || !principal.Authenticated || principal.TenantID != "tenant-a" || principal.UserID != "user" || principal.SessionID != "session" {
+	if err != nil || !principal.Authenticated || principal.TenantID != "tenant-a" || principal.UserID != "user" || principal.SessionID != "session" || principal.RedactionProgram == nil {
 		t.Fatalf("principal=%#v err=%v", principal, err)
 	}
 	request.Header.Set("X-Tenant-ID", "tenant-b")

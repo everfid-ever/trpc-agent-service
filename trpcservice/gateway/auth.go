@@ -110,10 +110,15 @@ func (r *HMACPrincipalResolver) principalForClaims(request *http.Request, claims
 	if current.Status == tenant.StatusDisabled || current.Version != claims.TenantVersion {
 		return Principal{}, runtime.ErrTenantScope
 	}
+	program, err := current.RedactionProgram()
+	if err != nil {
+		return Principal{}, runtime.ErrInvariantViolation
+	}
 	return Principal{Authenticated: true, TenantID: claims.TenantID, TenantVersion: claims.TenantVersion,
 		SubjectID: claims.SubjectID, UserID: claims.UserID, AgentAppID: claims.AgentAppID,
 		SessionID: claims.SessionID, CanRead: claims.CanRead, CanCancel: claims.CanCancel,
-		CanRun: claims.CanRun && current.Status == tenant.StatusActive, TraceParent: claims.TraceParent}, nil
+		CanRun: claims.CanRun && current.Status == tenant.StatusActive, TraceParent: claims.TraceParent,
+		RedactionProgram: program}, nil
 }
 
 func (r *HMACPrincipalResolver) ResolveProtocolInvocation(request *http.Request) (ServerInvocationContext, error) {
@@ -163,7 +168,8 @@ func (r *HMACPrincipalResolver) ResolveProtocolInvocation(request *http.Request)
 			SubjectID: principal.SubjectID, Channel: "http", TrustedSource: "authenticated_api"},
 			PrincipalID: principal.SubjectID, UserID: principal.UserID, SessionID: principal.SessionID,
 			Protocol: protocol, IdempotencyKey: value, TraceParent: firstNonEmpty(principal.TraceParent, request.Header.Get("traceparent")),
-			CanRead: principal.CanRead, CanCancel: principal.CanCancel, CanRun: principal.CanRun}, nil
+			CanRead: principal.CanRead, CanCancel: principal.CanCancel, CanRun: principal.CanRun,
+			RedactionProgram: principal.RedactionProgram}, nil
 	}
 }
 

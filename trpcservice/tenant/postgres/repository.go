@@ -5,9 +5,11 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -42,7 +44,11 @@ func (r *Repository) Create(ctx context.Context, in tenant.CreateInput) (tenant.
 		return tenant.Tenant{}, classify(err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	row := tx.QueryRowContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name,status,request_limit_per_minute,max_concurrent_executions,monthly_token_budget,monthly_cost_budget_micros,billing_currency,audit_retention_days,audit_payload_mode,log_masking_level,trace_sampling_rate,version) VALUES($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,1) RETURNING created_at,updated_at`, value.TenantID, value.TenantKey, value.DisplayName, value.RequestLimitPerMinute, value.MaxConcurrentExecutions, value.MonthlyTokenBudget, value.MonthlyCostBudgetMicros, value.BillingCurrency, value.AuditRetentionDays, value.AuditPayloadMode, value.LogMaskingLevel, value.TraceSamplingRate)
+	rules, err := marshalRules(value.RedactionRules)
+	if err != nil {
+		return tenant.Tenant{}, fmt.Errorf("encode redaction rules: %w", err)
+	}
+	row := tx.QueryRowContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name,status,request_limit_per_minute,max_concurrent_executions,monthly_token_budget,monthly_cost_budget_micros,billing_currency,audit_retention_days,audit_payload_mode,log_masking_level,redaction_rules,trace_sampling_rate,version) VALUES($1,$2,$3,'active',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1) RETURNING created_at,updated_at`, value.TenantID, value.TenantKey, value.DisplayName, value.RequestLimitPerMinute, value.MaxConcurrentExecutions, value.MonthlyTokenBudget, value.MonthlyCostBudgetMicros, value.BillingCurrency, value.AuditRetentionDays, value.AuditPayloadMode, value.LogMaskingLevel, rules, value.TraceSamplingRate)
 	if err = row.Scan(&value.CreatedAt, &value.UpdatedAt); err != nil {
 		return tenant.Tenant{}, classify(err)
 	}
@@ -72,8 +78,12 @@ func (r *Repository) UpdateConfiguration(ctx context.Context, in tenant.UpdateCo
 	if err := in.Tenant.Validate(); err != nil {
 		return tenant.ChangeResult{}, err
 	}
+	rules, err := marshalRules(in.Tenant.RedactionRules)
+	if err != nil {
+		return tenant.ChangeResult{}, fmt.Errorf("encode redaction rules: %w", err)
+	}
 	var next int64
-	err := r.db.QueryRowContext(ctx, `SELECT update_tenant_configuration($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`, in.Tenant.TenantID, in.ExpectedVersion, in.Tenant.DisplayName, in.Tenant.RequestLimitPerMinute, in.Tenant.MaxConcurrentExecutions, in.Tenant.MonthlyTokenBudget, in.Tenant.MonthlyCostBudgetMicros, in.Tenant.BillingCurrency, in.Tenant.AuditRetentionDays, in.Tenant.AuditPayloadMode, in.Tenant.LogMaskingLevel, in.Tenant.TraceSamplingRate, nullString(in.Tenant.DefaultAgentAppID), nullString(in.Tenant.DefaultBackendProfileID), nullInt64(in.Tenant.ActiveConfigVersion), in.ChangeMetadata.ActorID, in.ChangeMetadata.ReasonCode, in.ChangeMetadata.CorrelationID, in.ChangeMetadata.TraceID, nil).Scan(&next)
+	err = r.db.QueryRowContext(ctx, `SELECT update_tenant_configuration($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`, in.Tenant.TenantID, in.ExpectedVersion, in.Tenant.DisplayName, in.Tenant.RequestLimitPerMinute, in.Tenant.MaxConcurrentExecutions, in.Tenant.MonthlyTokenBudget, in.Tenant.MonthlyCostBudgetMicros, in.Tenant.BillingCurrency, in.Tenant.AuditRetentionDays, in.Tenant.AuditPayloadMode, in.Tenant.LogMaskingLevel, rules, in.Tenant.TraceSamplingRate, nullString(in.Tenant.DefaultAgentAppID), nullString(in.Tenant.DefaultBackendProfileID), nullInt64(in.Tenant.ActiveConfigVersion), in.ChangeMetadata.ActorID, in.ChangeMetadata.ReasonCode, in.ChangeMetadata.CorrelationID, in.ChangeMetadata.TraceID, nil).Scan(&next)
 	if err != nil {
 		return tenant.ChangeResult{}, classify(err)
 	}
@@ -106,7 +116,7 @@ func (r *Repository) TransitionStatus(ctx context.Context, in tenant.TransitionS
 	return tenant.ChangeResult{Tenant: value}, nil
 }
 
-const tenantSelect = `SELECT tenant_id,tenant_key,display_name,status,request_limit_per_minute,max_concurrent_executions,monthly_token_budget,monthly_cost_budget_micros,billing_currency,audit_retention_days,audit_payload_mode,log_masking_level,trace_sampling_rate,default_agent_app_id,default_backend_profile_id,active_config_version,version,created_at,updated_at FROM tenant`
+const tenantSelect = `SELECT tenant_id,tenant_key,display_name,status,request_limit_per_minute,max_concurrent_executions,monthly_token_budget,monthly_cost_budget_micros,billing_currency,audit_retention_days,audit_payload_mode,log_masking_level,redaction_rules,trace_sampling_rate,default_agent_app_id,default_backend_profile_id,active_config_version,version,created_at,updated_at FROM tenant`
 
 type scanner interface{ Scan(...any) error }
 
@@ -115,7 +125,8 @@ func scanTenant(row scanner) (tenant.Tenant, error) {
 	var request, token, cost, active sql.NullInt64
 	var concurrent sql.NullInt64
 	var defaultApp, defaultBackend sql.NullString
-	err := row.Scan(&value.TenantID, &value.TenantKey, &value.DisplayName, &value.Status, &request, &concurrent, &token, &cost, &value.BillingCurrency, &value.AuditRetentionDays, &value.AuditPayloadMode, &value.LogMaskingLevel, &value.TraceSamplingRate, &defaultApp, &defaultBackend, &active, &value.Version, &value.CreatedAt, &value.UpdatedAt)
+	var rulesJSON []byte
+	err := row.Scan(&value.TenantID, &value.TenantKey, &value.DisplayName, &value.Status, &request, &concurrent, &token, &cost, &value.BillingCurrency, &value.AuditRetentionDays, &value.AuditPayloadMode, &value.LogMaskingLevel, &rulesJSON, &value.TraceSamplingRate, &defaultApp, &defaultBackend, &active, &value.Version, &value.CreatedAt, &value.UpdatedAt)
 	if err != nil {
 		return tenant.Tenant{}, err
 	}
@@ -134,6 +145,12 @@ func scanTenant(row scanner) (tenant.Tenant, error) {
 	}
 	if active.Valid {
 		value.ActiveConfigVersion = active.Int64
+	}
+	if err := json.Unmarshal(rulesJSON, &value.RedactionRules); err != nil {
+		return tenant.Tenant{}, fmt.Errorf("decode redaction rules: %w", err)
+	}
+	if err := value.Validate(); err != nil {
+		return tenant.Tenant{}, err
 	}
 	return value, nil
 }
@@ -155,6 +172,13 @@ func nullInt64(value int64) any {
 		return nil
 	}
 	return value
+}
+
+func marshalRules(rules []redaction.Rule) ([]byte, error) {
+	if len(rules) == 0 {
+		return []byte("[]"), nil
+	}
+	return json.Marshal(rules)
 }
 
 type sqlStater interface{ SQLState() string }

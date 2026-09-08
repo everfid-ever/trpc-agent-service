@@ -11,14 +11,80 @@ func serviceSchemaBaseline(t *testing.T) Migration {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("migrations=%d, want one first-delivery baseline", len(all))
+	if len(all) == 0 {
+		t.Fatal("expected first-delivery baseline")
 	}
 	migration := all[0]
 	if migration.Version != "000001" || migration.Name != "service_schema" {
 		t.Fatalf("migration=%#v", migration)
 	}
 	return migration
+}
+
+func TestMigrationControlsAreAppendOnlyAndTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 || all[1].Version != "000002" || all[1].Name != "migration_controls" {
+		t.Fatalf("migrations=%#v", all)
+	}
+	for _, body := range []string{all[1].Up, all[1].Down} {
+		if _, err := transactionBody(body); err != nil {
+			t.Fatalf("migration controls transaction: %v", err)
+		}
+	}
+	for _, clause := range []string{
+		"ADD COLUMN paused_from_state", "CREATE TABLE public.backend_migration_control",
+		"backend_migration_control_immutable", "'paused'::text", "'aborted'::text",
+	} {
+		if !strings.Contains(all[1].Up, clause) {
+			t.Errorf("migration controls lacks %q", clause)
+		}
+	}
+}
+
+func TestTenantRedactionRulesMigrationIsAppendOnlyAndTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 || all[2].Version != "000003" || all[2].Name != "tenant_redaction_rules" {
+		t.Fatalf("migrations=%#v", all)
+	}
+	for _, body := range []string{all[2].Up, all[2].Down} {
+		if _, err := transactionBody(body); err != nil {
+			t.Fatalf("tenant redaction rules transaction: %v", err)
+		}
+	}
+	for _, clause := range []string{"ADD COLUMN redaction_rules jsonb", "tenant_redaction_rules_array_check", "p_redaction_rules jsonb"} {
+		if !strings.Contains(all[2].Up, clause) {
+			t.Errorf("tenant redaction rules migration lacks %q", clause)
+		}
+	}
+}
+
+func TestMigrationPhaseJournalIsAppendOnlyAndTransactionWrapped(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 || all[3].Version != "000004" || all[3].Name != "migration_phase_journal" {
+		t.Fatalf("migrations=%#v", all)
+	}
+	for _, body := range []string{all[3].Up, all[3].Down} {
+		if _, err := transactionBody(body); err != nil {
+			t.Fatalf("migration phase journal transaction: %v", err)
+		}
+	}
+	for _, clause := range []string{
+		"CREATE TABLE public.backend_migration_phase_intent", "request_digest", "status = ANY",
+		"backend_migration_phase_intent_pending_idx", "guard_backend_migration_phase_intent_update",
+	} {
+		if !strings.Contains(all[3].Up, clause) {
+			t.Errorf("migration phase journal lacks %q", clause)
+		}
+	}
 }
 
 func TestServiceSchemaBaselineContainsFinalPlatformContract(t *testing.T) {

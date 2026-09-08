@@ -64,6 +64,16 @@ type Adapter struct {
 	embedder          Embedder
 }
 
+// SnapshotWatermark returns the immutable snapshot fence selected from the
+// published backend profile. Migration orchestration persists this value in
+// its authority record; it never derives a watermark from Qdrant responses.
+func (a *Adapter) SnapshotWatermark() string {
+	if a == nil {
+		return ""
+	}
+	return a.snapshotWatermark
+}
+
 func New(config Config, embedder Embedder) (*Adapter, error) {
 	endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||

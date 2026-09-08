@@ -130,6 +130,33 @@ func TestSemanticVerificationRejectsScopeLeakAndLowRecall(t *testing.T) {
 	}
 }
 
+func TestKnowledgePhaseJournalRecoversAuthorityCommitCrashWindow(t *testing.T) {
+	ctx := context.Background()
+	clock := time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)
+	store, current := authorityAtBackfill(t, ctx, clock)
+	batch, err := store.CommitBatch(ctx, migration.BatchRequest{TenantID: current.TenantID, MigrationID: current.MigrationID,
+		BatchID: "journal-empty", Epoch: current.Epoch, ExpectedVersion: current.Version, BatchSeq: current.NextBatchSeq,
+		ToCheckpoint: "knowledge-chunk-v1:eof", Digest: digest('e'), Complete: true, CommittedAt: clock.Add(4 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := migration.TransitionRequest{TenantID: current.TenantID, MigrationID: current.MigrationID,
+		ExpectedVersion: batch.Migration.Version, To: migration.StateVerify, At: clock.Add(5 * time.Minute)}
+	if _, err := store.BeginPhaseIntent(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	// Fault injection: the state write commits but process shutdown prevents
+	// journal completion. The same service journal protects both domains.
+	if _, err := store.Transition(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	journaled := migration.NewJournaledRepository(store, store)
+	recovered, err := journaled.RecoverPending(ctx, current.TenantID, current.MigrationID)
+	if err != nil || len(recovered) != 1 || recovered[0].State != migration.StateVerify || recovered[0].Version != request.ExpectedVersion+1 {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+}
+
 func fixtureImage() knowledgedriver.ChunkImage {
 	return knowledgedriver.ChunkImage{Key: knowledgedriver.ChunkKey{TenantID: "tenant-a", KnowledgeID: "kb-a", KnowledgeVersion: 3, ChunkID: "chunk-a"},
 		Revision: 2, Operation: knowledgedriver.OperationUpsert, SourceDigest: digest('a'), ContentDigest: hashText("bounded content"), MetadataDigest: hashValue(map[string]string{"source": "doc-a"}),

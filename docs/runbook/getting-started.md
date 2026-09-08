@@ -26,7 +26,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    ./start.sh --demo
    ```
 
-   命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.24）。
+命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.25）。
 
 3. 只有需要真实模型闭环时，才创建仅本机可读的 DeepSeek 模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
 
@@ -357,7 +357,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 ## 7. 本地验证命令
 
 ```bash
-# 纯 Go 静态、单元与 race 检查（Go 1.24）
+# 纯 Go 静态、单元与 race 检查（Go 1.25）
 bash scripts/ci_admission.sh
 bash scripts/ci_admission.sh --race
 

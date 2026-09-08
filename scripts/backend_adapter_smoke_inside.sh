@@ -42,12 +42,16 @@ go run ./cmd/postgres-migration-test
 go test -count=1 ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
 TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test
 go test -count=1 ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant
+# The operator role itself stays bounded and needs no production credentials in
+# this disposable environment. Its transition/journal suite is nevertheless a
+# required member of the same real-backend integration job, rather than a
+# developer-only test that CI can silently omit.
+go test -count=1 ./cmd/trpc-service ./trpcservice/migration/...
 
-# These integrations deliberately use the same public tRPC-Agent-Go adapters
-# that the Worker wires at runtime. Keep them in the disposable backend job so
-# final acceptance proves the control-plane contracts alongside the actual
-# PostgreSQL/Qdrant/Vault adapters, not only during a developer's broad unit
-# test run.
+# These are real, opt-in integration tests: the surrounding Compose job has
+# supplied PostgreSQL 16, Redis 7, Qdrant and Vault endpoints, so their usual
+# environment-based skips cannot hide an unavailable backend. They deliberately
+# use the same public tRPC-Agent-Go adapters that the Worker wires at runtime.
 go test -count=1 \
   ./trpcservice/admin \
   ./trpcservice/agent \

@@ -27,6 +27,9 @@ func (t Tenant) Validate() error {
 	if t.LogMaskingLevel != MaskingNone && t.LogMaskingLevel != MaskingBasic && t.LogMaskingLevel != MaskingStrict {
 		return fmt.Errorf("%w: masking level", ErrInvalid)
 	}
+	if _, err := t.RedactionProgram(); err != nil {
+		return fmt.Errorf("%w: redaction rules", ErrInvalid)
+	}
 	return nil
 }
 

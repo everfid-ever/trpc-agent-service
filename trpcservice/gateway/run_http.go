@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
@@ -55,6 +56,9 @@ func (h RunHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !principal.CanRun {
 		writeControlError(w, ErrForbidden)
 		return
+	}
+	if principal.RedactionProgram != nil {
+		r = r.WithContext(redaction.ContextWithProgram(r.Context(), principal.RedactionProgram))
 	}
 	limit := h.MaxBody
 	if limit <= 0 {

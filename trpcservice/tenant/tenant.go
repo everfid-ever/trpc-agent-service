@@ -2,7 +2,12 @@
 // audit, and cost ownership.
 package tenant
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
+)
 
 type Status string
 
@@ -39,6 +44,7 @@ type Tenant struct {
 	AuditRetentionDays      int
 	AuditPayloadMode        AuditPayloadMode
 	LogMaskingLevel         LogMaskingLevel
+	RedactionRules          []redaction.Rule
 	TraceSamplingRate       float64
 	DefaultAgentAppID       string
 	DefaultBackendProfileID string
@@ -46,4 +52,21 @@ type Tenant struct {
 	Version                 int64
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
+}
+
+// RedactionProgram compiles the versioned tenant policy before it can be
+// handed to a sink. Callers must reject a compilation error rather than log
+// under a weaker policy.
+func (t Tenant) RedactionProgram() (*redaction.Program, error) {
+	return redaction.Compile(redaction.Config{Level: redaction.Level(t.LogMaskingLevel), Rules: t.RedactionRules})
+}
+
+// ContextWithRedaction binds this immutable tenant version's compiled policy
+// to a request context for downstream sinks.
+func (t Tenant) ContextWithRedaction(ctx context.Context) (context.Context, error) {
+	program, err := t.RedactionProgram()
+	if err != nil {
+		return nil, err
+	}
+	return redaction.ContextWithProgram(ctx, program), nil
 }

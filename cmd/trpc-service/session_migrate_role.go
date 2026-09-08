@@ -110,7 +110,14 @@ func runSessionMigrate(parent context.Context, getenv func(string) string, logge
 		return errors.New("session migration data-plane resolver rejected")
 	}
 	defer planes.Close()
-	authority := migrationpostgres.New(controlDB)
+	baseAuthority := migrationpostgres.New(controlDB)
+	// The journal shares the control-plane database with the authority. Domain
+	// drivers still see only migration.Repository; crash recovery remains a
+	// role concern rather than a dependency of the session data plane.
+	authority := migration.NewJournaledRepository(baseAuthority, baseAuthority)
+	if _, err := authority.RecoverPending(ctx, config.TenantID, config.MigrationID); err != nil {
+		return fmt.Errorf("recover pending session migration phase intent: %w", err)
+	}
 	current, err := authority.Get(ctx, config.TenantID, config.MigrationID)
 	if err != nil {
 		return fmt.Errorf("load session migration authority: %w", err)

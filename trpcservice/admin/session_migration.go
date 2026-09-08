@@ -38,6 +38,12 @@ type SessionMigrationObserveInput struct {
 	ObserveUntil             time.Time `json:"observe_until"`
 }
 
+// SessionMigrationControlInput is intentionally migration-CAS-only: these
+// controls never repoint tenant configuration, unlike cutover and rollback.
+type SessionMigrationControlInput struct {
+	ExpectedMigrationVersion int64 `json:"expected_migration_version"`
+}
+
 type SessionMigrationStatus struct {
 	Migration migration.Migration          `json:"migration"`
 	Drain     migration.SessionDrainStatus `json:"drain"`
@@ -121,6 +127,42 @@ func (s Service) GetSessionMigrationStatus(ctx context.Context, principal Princi
 		return SessionMigrationStatus{}, err
 	}
 	return SessionMigrationStatus{Migration: value, Drain: drain}, nil
+}
+
+func (s Service) PauseSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationControlInput, metadata tenant.ChangeMetadata) (migration.Migration, error) {
+	if s.Migrations == nil {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	return s.controlSessionMigration(ctx, principal, pathTenant, migrationID, in, metadata, s.Migrations.Pause)
+}
+
+func (s Service) ResumeSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationControlInput, metadata tenant.ChangeMetadata) (migration.Migration, error) {
+	if s.Migrations == nil {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	return s.controlSessionMigration(ctx, principal, pathTenant, migrationID, in, metadata, s.Migrations.Resume)
+}
+
+func (s Service) AbortSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationControlInput, metadata tenant.ChangeMetadata) (migration.Migration, error) {
+	if s.Migrations == nil {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	return s.controlSessionMigration(ctx, principal, pathTenant, migrationID, in, metadata, s.Migrations.Abort)
+}
+
+func (s Service) controlSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationControlInput, metadata tenant.ChangeMetadata, apply func(context.Context, migration.ControlRequest) (migration.Migration, error)) (migration.Migration, error) {
+	if in.ExpectedMigrationVersion < 1 {
+		return migration.Migration{}, runtime.ErrInvariantViolation
+	}
+	if _, err := s.GetSessionMigration(ctx, principal, pathTenant, migrationID); err != nil {
+		return migration.Migration{}, err
+	}
+	if err := metadata.Validate(); err != nil {
+		return migration.Migration{}, err
+	}
+	return apply(ctx, migration.ControlRequest{TenantID: pathTenant, MigrationID: migrationID, ExpectedVersion: in.ExpectedMigrationVersion,
+		At: time.Now().UTC(), Metadata: migration.ControlMetadata{ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
+			CorrelationID: metadata.CorrelationID, TraceID: metadata.TraceID}})
 }
 
 func (s Service) CutoverSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (migration.SessionSwitchResult, error) {

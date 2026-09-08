@@ -200,7 +200,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("progress publisher configuration rejected")
 	}
-	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles, Sessions: sessions, SessionServices: sdkSessions,
+	executor := worker.RunnerExecutor{Tasks: tasks, TenantPolicies: tenantRepo, Profiles: profiles, Bundles: bundles, Sessions: sessions, SessionServices: sdkSessions,
 		Payloads: payloads, Artifacts: artifacts, Inputs: worker.JSONTextInputDecoder{},
 		Progress:          progressPublisher,
 		EventDrainTimeout: configValue.WorkerBundleCloseTimeout, Governance: runGovernance, Confirmations: governanceStore,

@@ -54,6 +54,20 @@ func Run(t *testing.T, factory Factory) {
 	if err := transition(migration.StateDualWrite, func(in *migration.TransitionRequest) { in.DualWriteRef = "outbox://migration-1" }); err != nil {
 		t.Fatal(err)
 	}
+	control := migration.ControlRequest{TenantID: current.TenantID, MigrationID: current.MigrationID, ExpectedVersion: current.Version,
+		At: clock.Add(time.Duration(current.Version) * time.Minute), Metadata: migration.ControlMetadata{ActorID: "operator", ReasonCode: "maintenance", CorrelationID: "control-1", TraceID: "trace-1"}}
+	paused, err := store.Pause(ctx, control)
+	if err != nil || paused.State != migration.StatePaused || paused.PausedFrom != migration.StateDualWrite {
+		t.Fatalf("pause=%+v err=%v", paused, err)
+	}
+	if _, err := store.Resume(ctx, control); !errors.Is(err, runtime.ErrVersionConflict) {
+		t.Fatalf("stale resume=%v", err)
+	}
+	control.ExpectedVersion, control.At = paused.Version, paused.UpdatedAt.Add(time.Minute)
+	current, err = store.Resume(ctx, control)
+	if err != nil || current.State != migration.StateDualWrite || current.PausedFrom != "" {
+		t.Fatalf("resume=%+v err=%v", current, err)
+	}
 	if err := transition(migration.StateBackfill, nil); err != nil {
 		t.Fatal(err)
 	}

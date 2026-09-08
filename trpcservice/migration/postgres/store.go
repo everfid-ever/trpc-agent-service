@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -238,13 +239,71 @@ WHERE tenant_id=$1 AND migration_id=$2 AND state='verify' AND version=$12`, next
 	return next, nil
 }
 
+func (s *Store) Pause(ctx context.Context, in migration.ControlRequest) (migration.Migration, error) {
+	return s.control(ctx, in, "pause", migration.ApplyPause)
+}
+
+func (s *Store) Resume(ctx context.Context, in migration.ControlRequest) (migration.Migration, error) {
+	return s.control(ctx, in, "resume", migration.ApplyResume)
+}
+
+func (s *Store) Abort(ctx context.Context, in migration.ControlRequest) (migration.Migration, error) {
+	return s.control(ctx, in, "abort", migration.ApplyAbort)
+}
+
+func (s *Store) control(ctx context.Context, in migration.ControlRequest, action string, apply func(migration.Migration, migration.ControlRequest) (migration.Migration, error)) (migration.Migration, error) {
+	if s == nil || s.db == nil {
+		return migration.Migration{}, runtime.ErrBackendUnavailable
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	defer tx.Rollback()
+	current, err := scanMigration(tx.QueryRowContext(ctx, selectMigration+` WHERE tenant_id=$1 AND migration_id=$2 FOR UPDATE`, in.TenantID, in.MigrationID))
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	next, err := apply(current, in)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE public.backend_migration SET state=$3,paused_from_state=$4,version=$5,updated_at=$6
+WHERE tenant_id=$1 AND migration_id=$2 AND version=$7`, next.TenantID, next.MigrationID, next.State, next.PausedFrom,
+		next.Version, next.UpdatedAt, current.Version)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return migration.Migration{}, runtime.ErrVersionConflict
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO public.backend_migration_control(
+tenant_id,migration_id,control_version,action,from_state,to_state,actor_id,reason_code,correlation_id,trace_id,traceparent,occurred_at)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, next.TenantID, next.MigrationID, next.Version, action,
+		current.State, next.State, in.Metadata.ActorID, in.Metadata.ReasonCode, in.Metadata.CorrelationID, in.Metadata.TraceID,
+		in.Metadata.Traceparent, next.UpdatedAt); err != nil {
+		return migration.Migration{}, err
+	}
+	outboxID := "migration-control-audit:" + next.TenantID + ":" + next.MigrationID + ":" + strconv.FormatInt(next.Version, 10)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO public.outbox(
+tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref,traceparent)
+VALUES($1,$2,'audit',$3,$4,$2,$5,$6)`, next.TenantID, outboxID, next.MigrationID, next.Version,
+		"backend-migration-control://"+next.TenantID+"/"+next.MigrationID+"/"+strconv.FormatInt(next.Version, 10), in.Metadata.Traceparent); err != nil {
+		return migration.Migration{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return migration.Migration{}, err
+	}
+	return next, nil
+}
+
 const selectMigration = `SELECT tenant_id,migration_id,domain,epoch,
 source_config_version,source_backend_profile_id,source_backend_version,
 target_config_version,target_backend_profile_id,target_backend_version,state,
 snapshot_watermark,dual_write_ref,backfill_checkpoint,next_batch_seq,backfill_count,backfill_complete,
 verify_source_count,verify_target_count,verify_source_digest,verify_target_digest,
 verify_source_watermark,verify_target_watermark,verify_sample_digest,cutover_config_version,cutover_at,
-observe_until,rollback_sync_watermark,created_at,updated_at,version FROM public.backend_migration`
+observe_until,rollback_sync_watermark,paused_from_state,created_at,updated_at,version FROM public.backend_migration`
 
 type scanner interface{ Scan(...any) error }
 
@@ -258,7 +317,7 @@ func scanMigration(row scanner) (migration.Migration, error) {
 		&value.SnapshotWatermark, &value.DualWriteRef, &value.BackfillCheckpoint, &value.NextBatchSeq, &value.BackfillCount,
 		&value.BackfillComplete, &sourceCount, &targetCount, &value.Verification.SourceDigest, &value.Verification.TargetDigest,
 		&value.Verification.SourceWatermark, &value.Verification.TargetWatermark, &value.Verification.SampleDigest, &cutoverConfig,
-		&cutoverAt, &observeUntil, &value.RollbackSyncWatermark, &value.CreatedAt, &value.UpdatedAt, &value.Version)
+		&cutoverAt, &observeUntil, &value.RollbackSyncWatermark, &value.PausedFrom, &value.CreatedAt, &value.UpdatedAt, &value.Version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return migration.Migration{}, runtime.ErrNotFound
 	}

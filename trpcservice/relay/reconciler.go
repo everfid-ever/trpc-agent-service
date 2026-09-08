@@ -14,9 +14,17 @@ type ReconciliationHandler interface {
 	Reconcile(context.Context, messaging.ReconciliationIssue) error
 }
 
+type reconciliationIdentity struct {
+	Kind                         messaging.ReconciliationIssueKind
+	TenantID, AggregateID, RefID string
+}
+
 type Reconciler struct {
-	Store        messaging.ReconciliationStore
-	Handler      ReconciliationHandler
+	Store   messaging.ReconciliationStore
+	Handler ReconciliationHandler
+	// Now makes the stale-watermark query deterministic in tests and avoids
+	// coupling the reconciliation contract to the process clock.
+	Now          func() time.Time
 	StuckAfter   time.Duration
 	BatchSize    int
 	PollInterval time.Duration
@@ -54,18 +62,41 @@ func (r Reconciler) RunOnce(ctx context.Context) (int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	issues, err := r.Store.FindReconciliationIssues(ctx, time.Now().Add(-stuckAfter), limit)
+	issues, err := r.Store.FindReconciliationIssues(ctx, r.now().Add(-stuckAfter), limit)
 	if err != nil {
 		return 0, err
 	}
-	handled := 0
+	latest := make(map[reconciliationIdentity]messaging.ReconciliationIssue, len(issues))
+	order := make([]reconciliationIdentity, 0, len(issues))
 	for _, issue := range issues {
+		key := reconciliationIdentity{Kind: issue.Kind, TenantID: issue.TenantID, AggregateID: issue.AggregateID, RefID: issue.RefID}
+		current, exists := latest[key]
+		if !exists {
+			order = append(order, key)
+		}
+		// A reconciliation issue describes the current durable record. If one
+		// page contains a replay or an older out-of-order watermark, dispatch
+		// only its newest version to the typed transition handler.
+		if !exists || issue.Version > current.Version {
+			latest[key] = issue
+		}
+	}
+	handled := 0
+	for _, key := range order {
+		issue := latest[key]
 		if err := r.Handler.Reconcile(ctx, issue); err != nil {
 			return handled, err
 		}
 		handled++
 	}
 	return handled, nil
+}
+
+func (r Reconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (r Reconciler) validate() error {

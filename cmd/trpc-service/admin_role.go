@@ -15,6 +15,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/admin"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
+	knowledgedriverpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver/postgres"
 	migrationpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/migration/postgres"
 	sessionmigrationpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/migration/sessiondriver/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
@@ -106,7 +107,7 @@ func runAdminRole(parent context.Context, getenv func(string) string, logger *ro
 	mux.Handle("/livez", health.Handler{Checker: monitor})
 	mux.Handle("/readyz", health.Handler{Checker: monitor})
 	api := admin.Handler{Service: admin.Service{Configs: configpostgres.New(db, tenantRepo), Migrations: migrationpostgres.New(db),
-		SessionMigrationPublisher: sessionmigrationpostgres.NewPublisher(db)}, Principals: resolver,
+		SessionMigrationPublisher: sessionmigrationpostgres.NewPublisher(db), KnowledgeMigrationPublisher: knowledgedriverpostgres.NewPublisher(db)}, Principals: resolver,
 		Catalog: admin.PostgreSQLCatalog{DB: db}}
 	console := admin.Console{API: readinessGate{Checker: monitor, Handler: api}, Principals: resolver,
 		AllowInsecureSessionCookie: configValue.AdminAllowInsecureSessionCookie}

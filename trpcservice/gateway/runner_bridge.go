@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
@@ -21,16 +22,17 @@ type invocationContextKey struct{}
 // ServerInvocationContext is injected only after protocol authentication and
 // route authorization. Bridge.Run fails closed when it is absent.
 type ServerInvocationContext struct {
-	Tenant         tenant.Context
-	PrincipalID    string
-	UserID         string
-	SessionID      string
-	Protocol       string
-	IdempotencyKey string
-	TraceParent    string
-	CanRead        bool
-	CanCancel      bool
-	CanRun         bool
+	Tenant           tenant.Context
+	PrincipalID      string
+	UserID           string
+	SessionID        string
+	Protocol         string
+	IdempotencyKey   string
+	TraceParent      string
+	CanRead          bool
+	CanCancel        bool
+	CanRun           bool
+	RedactionProgram *redaction.Program
 }
 
 func WithServerInvocationContext(ctx context.Context, value ServerInvocationContext) context.Context {

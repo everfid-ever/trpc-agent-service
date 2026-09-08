@@ -23,6 +23,8 @@ const (
 	StateCutover   State = "cutover"
 	StateObserve   State = "observe"
 	StateCleanup   State = "cleanup"
+	StatePaused    State = "paused"
+	StateAborted   State = "aborted"
 )
 
 type Binding struct {
@@ -116,6 +118,7 @@ type Migration struct {
 	CutoverConfigVersion          int64
 	CutoverAt, ObserveUntil       time.Time
 	RollbackSyncWatermark         string
+	PausedFrom                    State
 	CreatedAt, UpdatedAt          time.Time
 	Version                       int64
 }
@@ -151,6 +154,29 @@ type TransitionRequest struct {
 	CutoverConfigVersion  int64
 	ObserveUntil          time.Time
 	RollbackSyncWatermark string
+}
+
+// ControlMetadata identifies the operator who pauses, resumes, or aborts an
+// online migration. These changes do not move a tenant configuration pointer,
+// but they are still durable control-plane decisions and must be auditable.
+type ControlMetadata struct {
+	ActorID, ReasonCode, CorrelationID, TraceID, Traceparent string
+}
+
+func (m ControlMetadata) Valid() bool {
+	return validText(m.ActorID, 256) && validText(m.ReasonCode, 128) &&
+		validText(m.CorrelationID, 256) && validText(m.TraceID, 128) &&
+		(m.Traceparent == "" || validText(m.Traceparent, 512))
+}
+
+// ControlRequest applies a migration-only CAS. Tenant configuration versions
+// are intentionally absent: pause, resume, and pre-dual-write abort never
+// mutate the active tenant backend pointer.
+type ControlRequest struct {
+	TenantID, MigrationID string
+	ExpectedVersion       int64
+	At                    time.Time
+	Metadata              ControlMetadata
 }
 
 type BatchRequest struct {
@@ -190,6 +216,9 @@ type Repository interface {
 	Transition(context.Context, TransitionRequest) (Migration, error)
 	CommitBatch(context.Context, BatchRequest) (BatchResult, error)
 	RecordVerification(context.Context, VerificationRequest) (Migration, error)
+	Pause(context.Context, ControlRequest) (Migration, error)
+	Resume(context.Context, ControlRequest) (Migration, error)
+	Abort(context.Context, ControlRequest) (Migration, error)
 }
 
 func NewMigration(in CreateRequest) (Migration, error) {
@@ -209,7 +238,7 @@ func ApplyTransition(current Migration, in TransitionRequest) (Migration, error)
 	if in.ExpectedVersion != current.Version {
 		return Migration{}, runtime.ErrVersionConflict
 	}
-	if in.At.IsZero() || in.At.Before(current.UpdatedAt) || nextState(current.State) != in.To {
+	if in.At.IsZero() || in.At.Before(current.UpdatedAt) || !CanTransition(current.State, in.To) {
 		return Migration{}, runtime.ErrInvariantViolation
 	}
 	next := current
@@ -251,6 +280,64 @@ func ApplyTransition(current Migration, in TransitionRequest) (Migration, error)
 		return Migration{}, runtime.ErrInvariantViolation
 	}
 	next.State = in.To
+	next.Version++
+	next.UpdatedAt = in.At.UTC()
+	return next, nil
+}
+
+// ApplyPause freezes migration advancement without turning off an already
+// enabled dual-write path. It is allowed only before cutover; a cutover or
+// observation window has stronger rollback and drain invariants.
+func ApplyPause(current Migration, in ControlRequest) (Migration, error) {
+	if err := validControl(current, in); err != nil {
+		return Migration{}, err
+	}
+	if !pausable(current.State) {
+		return Migration{}, runtime.ErrInvariantViolation
+	}
+	next := current
+	next.State = StatePaused
+	next.PausedFrom = current.State
+	next.Version++
+	next.UpdatedAt = in.At.UTC()
+	return next, nil
+}
+
+// ApplyResume restores exactly the phase that was paused. It never permits an
+// operator to use resume as an arbitrary state transition.
+func ApplyResume(current Migration, in ControlRequest) (Migration, error) {
+	if err := validControl(current, in); err != nil {
+		return Migration{}, err
+	}
+	if current.State != StatePaused || !pausable(current.PausedFrom) {
+		return Migration{}, runtime.ErrInvariantViolation
+	}
+	next := current
+	next.State = current.PausedFrom
+	next.PausedFrom = ""
+	next.Version++
+	next.UpdatedAt = in.At.UTC()
+	return next, nil
+}
+
+// ApplyAbort is deliberately limited to the pre-dual-write phases. Once a
+// dual-write ledger exists, abort needs domain-specific drain and compensation
+// work; accepting a generic abort there would make the source/target contract
+// unsafe. Operators can pause such migrations while that procedure runs.
+func ApplyAbort(current Migration, in ControlRequest) (Migration, error) {
+	if err := validControl(current, in); err != nil {
+		return Migration{}, err
+	}
+	state := current.State
+	if state == StatePaused {
+		state = current.PausedFrom
+	}
+	if state != StatePlanned && state != StateSnapshot {
+		return Migration{}, runtime.ErrInvariantViolation
+	}
+	next := current
+	next.State = StateAborted
+	next.PausedFrom = ""
 	next.Version++
 	next.UpdatedAt = in.At.UTC()
 	return next, nil
@@ -310,25 +397,55 @@ func SameBatch(left Batch, right BatchRequest) bool {
 		left.ToCheckpoint == right.ToCheckpoint && left.Digest == right.Digest && left.RecordCount == right.RecordCount && left.Complete == right.Complete
 }
 
-func nextState(state State) State {
+// CanTransition is the authoritative migration phase graph. Keeping the
+// graph as data, rather than deriving it from a switch order, makes review of
+// every permitted edge straightforward and prevents future states from
+// implicitly gaining transitions.
+var allowedTransitions = map[State]map[State]struct{}{
+	StatePlanned:   {StateSnapshot: {}},
+	StateSnapshot:  {StateDualWrite: {}},
+	StateDualWrite: {StateBackfill: {}},
+	StateBackfill:  {StateVerify: {}},
+	StateVerify:    {StateCutover: {}},
+	StateCutover:   {StateObserve: {}},
+	StateObserve:   {StateCleanup: {}},
+	StateCleanup:   {},
+	StatePaused:    {},
+	StateAborted:   {},
+}
+
+// CanTransition reports whether a direct phase transition is permitted. It
+// deliberately has no permissive fallback for an unknown or terminal state.
+func CanTransition(from, to State) bool {
+	_, ok := allowedTransitions[from][to]
+	return ok
+}
+
+// Terminal reports whether a migration can never be resumed or advanced.
+func Terminal(state State) bool {
+	return state == StateCleanup || state == StateAborted
+}
+
+func pausable(state State) bool {
 	switch state {
-	case StatePlanned:
-		return StateSnapshot
-	case StateSnapshot:
-		return StateDualWrite
-	case StateDualWrite:
-		return StateBackfill
-	case StateBackfill:
-		return StateVerify
-	case StateVerify:
-		return StateCutover
-	case StateCutover:
-		return StateObserve
-	case StateObserve:
-		return StateCleanup
+	case StatePlanned, StateSnapshot, StateDualWrite, StateBackfill, StateVerify:
+		return true
 	default:
-		return ""
+		return false
 	}
+}
+
+func validControl(current Migration, in ControlRequest) error {
+	if in.TenantID != current.TenantID || in.MigrationID != current.MigrationID {
+		return runtime.ErrTenantScope
+	}
+	if in.ExpectedVersion != current.Version {
+		return runtime.ErrVersionConflict
+	}
+	if in.At.IsZero() || in.At.Before(current.UpdatedAt) || !in.Metadata.Valid() {
+		return runtime.ErrInvariantViolation
+	}
+	return nil
 }
 
 func validBinding(value Binding) bool {

@@ -55,6 +55,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveSessionMigration(w, r, principal, parts)
 		return
 	}
+	if len(parts) >= 4 && parts[0] == "v1" && parts[1] == "tenants" && parts[3] == "knowledge-migrations" {
+		h.serveKnowledgeMigration(w, r, principal, parts)
+		return
+	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
 		http.NotFound(w, r)
 		return
@@ -149,6 +153,13 @@ func (h Handler) serveSessionMigration(w http.ResponseWriter, r *http.Request, p
 		}
 		return input, nil
 	}
+	controlInput := func() (SessionMigrationControlInput, error) {
+		var input SessionMigrationControlInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			return SessionMigrationControlInput{}, err
+		}
+		return input, nil
+	}
 	switch {
 	case r.Method == http.MethodGet && len(parts) == 4:
 		value, err := h.Service.ListSessionMigrations(r.Context(), principal, tenantID)
@@ -226,6 +237,178 @@ func (h Handler) serveSessionMigration(w http.ResponseWriter, r *http.Request, p
 				return
 			}
 			err = cleanupErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "pause":
+		input, err := controlInput()
+		if err == nil {
+			value, controlErr := h.Service.PauseSessionMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+			if controlErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = controlErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "resume":
+		input, err := controlInput()
+		if err == nil {
+			value, controlErr := h.Service.ResumeSessionMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+			if controlErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = controlErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "abort":
+		input, err := controlInput()
+		if err == nil {
+			value, controlErr := h.Service.AbortSessionMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+			if controlErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = controlErr
+		}
+		writeError(w, err)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (h Handler) serveKnowledgeMigration(w http.ResponseWriter, r *http.Request, principal Principal, parts []string) {
+	tenantID := parts[2]
+	switchInput := func() (KnowledgeMigrationSwitchInput, error) {
+		var input KnowledgeMigrationSwitchInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			return input, err
+		}
+		return input, nil
+	}
+	controlInput := func() (KnowledgeMigrationControlInput, error) {
+		var input KnowledgeMigrationControlInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			return input, err
+		}
+		return input, nil
+	}
+	switch {
+	case r.Method == http.MethodGet && len(parts) == 4:
+		value, err := h.Service.ListKnowledgeMigrations(r.Context(), principal, tenantID)
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 4:
+		var input KnowledgeMigrationCreateInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.CreateKnowledgeMigration(r.Context(), principal, tenantID, input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusCreated, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodGet && len(parts) == 5:
+		value, err := h.Service.GetKnowledgeMigration(r.Context(), principal, tenantID, parts[4])
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodGet && len(parts) == 6 && parts[5] == "status":
+		value, err := h.Service.GetKnowledgeMigrationStatus(r.Context(), principal, tenantID, parts[4])
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "cutover":
+		input, err := switchInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.CutoverKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "observe":
+		var input KnowledgeMigrationObserveInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.BeginKnowledgeMigrationObserve(r.Context(), principal, tenantID, parts[4], input)
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "rollback":
+		input, err := switchInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.RollbackKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "cleanup":
+		input, err := switchInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.CleanupKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input)
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "pause":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.PauseKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "resume":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.ResumeKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "abort":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.AbortKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
 		}
 		writeError(w, err)
 	default:

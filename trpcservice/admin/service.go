@@ -7,6 +7,7 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -24,9 +25,10 @@ type Principal struct {
 }
 
 type Service struct {
-	Configs                   config.Repository
-	Migrations                migration.Repository
-	SessionMigrationPublisher migration.SessionCutoverPublisher
+	Configs                     config.Repository
+	Migrations                  migration.Repository
+	SessionMigrationPublisher   migration.SessionCutoverPublisher
+	KnowledgeMigrationPublisher knowledgedriver.CutoverPublisher
 }
 
 func authorize(principal Principal, pathTenant string) error {

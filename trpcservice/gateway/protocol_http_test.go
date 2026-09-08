@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/gateway"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -19,9 +20,11 @@ import (
 type protocolRunnerStub struct {
 	userID, sessionID, appName, requestID string
 	emitted                               *event.Event
+	ctx                                   context.Context
 }
 
-func (r *protocolRunnerStub) Run(_ context.Context, userID, sessionID string, _ model.Message, options ...agent.RunOption) (<-chan *event.Event, error) {
+func (r *protocolRunnerStub) Run(ctx context.Context, userID, sessionID string, _ model.Message, options ...agent.RunOption) (<-chan *event.Event, error) {
+	r.ctx = ctx
 	opts := agent.NewRunOptions(options...)
 	r.userID, r.sessionID, r.appName, r.requestID = userID, sessionID, opts.AppName, opts.RequestID
 	out := make(chan *event.Event, 1)
@@ -36,8 +39,12 @@ func (*protocolRunnerStub) Close() error { return nil }
 
 func TestProtocolHTTPHandlerMountsCanonicalTRPCAgentFacade(t *testing.T) {
 	underlying := &protocolRunnerStub{}
+	program, err := redaction.Compile(redaction.Config{Level: redaction.LevelStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
 	trusted := gateway.ServerInvocationContext{Tenant: newRunFixture().route.Tenant, PrincipalID: "principal-a",
-		UserID: "canonical-user", SessionID: "canonical-session", Protocol: "trpc-agent", IdempotencyKey: "stable-key", CanRun: true}
+		UserID: "canonical-user", SessionID: "canonical-session", Protocol: "trpc-agent", IdempotencyKey: "stable-key", CanRun: true, RedactionProgram: program}
 	handler, err := gateway.NewProtocolHTTPHandler(gateway.ProtocolHTTPOptions{Runner: gateway.CanonicalRunner{Next: underlying},
 		Resolver: staticInvocationResolver{trusted: trusted}, Readiness: readinessStub{ready: true}, MaxBody: 1 << 20, RunTimeout: time.Second,
 		A2A: newProtocolA2AManager(), PublicURL: "https://gateway.example.test"})
@@ -53,6 +60,9 @@ func TestProtocolHTTPHandlerMountsCanonicalTRPCAgentFacade(t *testing.T) {
 	}
 	if underlying.userID != "canonical-user" || underlying.sessionID != "canonical-session" || underlying.appName != "app" || underlying.requestID != "wire-request" {
 		t.Fatalf("runner identity user=%q session=%q app=%q request=%q", underlying.userID, underlying.sessionID, underlying.appName, underlying.requestID)
+	}
+	if scoped, ok := redaction.ProgramFromContext(underlying.ctx); !ok || scoped != program {
+		t.Fatalf("tenant redaction program was not bound to runner context")
 	}
 	var payload struct {
 		Events []struct {

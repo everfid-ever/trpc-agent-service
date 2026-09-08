@@ -92,7 +92,7 @@ func (r BackendAdapterResolver) ResolveKnowledgeBackend(ctx context.Context, ten
 	return serviceqdrant.New(serviceqdrant.Config{Endpoint: endpoint, Collection: collection, VectorSize: vectorSize,
 		SnapshotWatermark: watermark, VectorGeneration: generation,
 		AllowInsecureHTTP: backend.Provider == "qdrant-local",
-		HTTPClient: &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond}, TokenSource: tokens}, nil)
+		HTTPClient:        &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond}, TokenSource: tokens}, nil)
 }
 
 func knowledgeBinding(bindings []config.BackendBinding) (config.BackendBinding, bool) {

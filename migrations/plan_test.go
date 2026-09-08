@@ -54,3 +54,21 @@ func TestBuildPlanIsForwardOnlyAndIdempotent(t *testing.T) {
 		t.Fatal("expected unknown target rejection")
 	}
 }
+
+func TestBuildPlanRejectsChecksumDriftAfterBaselineCompression(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) == 0 {
+		t.Fatal("expected embedded baseline")
+	}
+	// This models a released, compressed baseline: its recorded checksum is
+	// immutable, so a later edit to the embedded SQL must be rejected.
+	edited := append([]Migration(nil), all...)
+	edited[0].Up += "\n-- accidental baseline rewrite"
+	applied := map[string]string{all[0].Version: migrationChecksum(all[0].Up)}
+	if _, err := buildPlan(edited, applied, edited[len(edited)-1].Version); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected baseline checksum drift rejection, got %v", err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/redaction"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -184,6 +185,13 @@ func clone(in tenant.Tenant) tenant.Tenant {
 	if in.MonthlyCostBudgetMicros != nil {
 		v := *in.MonthlyCostBudgetMicros
 		out.MonthlyCostBudgetMicros = &v
+	}
+	if in.RedactionRules != nil {
+		out.RedactionRules = make([]redaction.Rule, len(in.RedactionRules))
+		for index, rule := range in.RedactionRules {
+			out.RedactionRules[index] = rule
+			out.RedactionRules[index].KeyFragments = append([]string(nil), rule.KeyFragments...)
+		}
 	}
 	return out
 }

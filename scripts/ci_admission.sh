@@ -12,8 +12,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${repo_root}"
 
 go_version="$(go env GOVERSION)"
-if [[ "${go_version}" != go1.24.* ]]; then
-  echo "Go 1.24.x is required for the CI compatibility gate; found ${go_version}" >&2
+if [[ "${go_version}" != go1.25.* ]]; then
+  echo "Go 1.25.x is required for the CI compatibility gate; found ${go_version}" >&2
   exit 2
 fi
 

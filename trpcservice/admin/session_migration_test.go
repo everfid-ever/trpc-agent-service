@@ -45,6 +45,16 @@ func TestSessionMigrationControlPlaneUsesAuthorityHeldEvidence(t *testing.T) {
 	if created.Source.ConfigVersion != published.Snapshot.ConfigVersion || created.Target.ConfigVersion != candidate.ConfigVersion || created.Source.BackendProfileID != "source" || created.Target.BackendProfileID != "target" {
 		t.Fatalf("migration bindings=%#v", created)
 	}
+	paused, err := service.PauseSessionMigration(ctx, principal, "tenant-a", created.MigrationID,
+		SessionMigrationControlInput{ExpectedMigrationVersion: created.Version}, metadata)
+	if err != nil || paused.State != migration.StatePaused || paused.PausedFrom != migration.StatePlanned {
+		t.Fatalf("pause=%#v err=%v", paused, err)
+	}
+	created, err = service.ResumeSessionMigration(ctx, principal, "tenant-a", created.MigrationID,
+		SessionMigrationControlInput{ExpectedMigrationVersion: paused.Version}, metadata)
+	if err != nil || created.State != migration.StatePlanned || created.PausedFrom != "" {
+		t.Fatalf("resume=%#v err=%v", created, err)
+	}
 
 	verified := advanceSessionMigrationToVerify(t, ctx, migrations, created)
 	result, err := service.CutoverSessionMigration(ctx, principal, "tenant-a", created.MigrationID, SessionMigrationSwitchInput{
