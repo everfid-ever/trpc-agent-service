@@ -21,6 +21,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb
 	trpc.group/trpc-go/trpc-agent-go v1.11.2
+	trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant v1.11.0
 	trpc.group/trpc-go/trpc-agent-go/memory/postgres v1.11.0
 	trpc.group/trpc-go/trpc-agent-go/session/postgres v1.11.0
 	trpc.group/trpc-go/trpc-mcp-go v0.0.10
@@ -72,6 +73,7 @@ require (
 	github.com/openai/openai-go v1.12.0 // indirect
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/qdrant/go-client v1.16.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
@@ -98,4 +100,5 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	trpc.group/trpc-go/trpc-agent-go/storage/postgres v0.8.0 // indirect
+	trpc.group/trpc-go/trpc-agent-go/storage/qdrant v1.1.2-0.20260108033914-7a20241f1ad5 // indirect
 )

@@ -37,9 +37,15 @@ type ReadOnlyVectorStore struct {
 	scope   RuntimeScope
 }
 
-func NewReadOnlyVectorStore(adapter *Adapter, scope RuntimeScope) (*ReadOnlyVectorStore, error) {
+func NewReadOnlyVectorStore(adapter *Adapter, scope RuntimeScope) (vectorstore.VectorStore, error) {
 	if adapter == nil || adapter.VectorSize() < 1 || !scope.valid() {
 		return nil, runtime.ErrInvariantViolation
+	}
+	if adapter.RuntimeEngine() == "sdk" {
+		return newSDKReadOnlyVectorStore(adapter, scope, newOfficialSDKStore)
+	}
+	if adapter.RuntimeEngine() != "native" {
+		return nil, runtime.ErrCapabilityUnsupported
 	}
 	return &ReadOnlyVectorStore{adapter: adapter, scope: scope}, nil
 }

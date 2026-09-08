@@ -141,8 +141,12 @@ func QdrantVectorSchema() Schema {
 	return Schema{
 		Kind: KindBackend, Name: "qdrant", SchemaVersion: 1,
 		OptionRules: map[string]OptionRule{
-			"collection":         {Type: OptionString, Required: true},
-			"endpoint":           {Type: OptionString, Required: true},
+			"collection": {Type: OptionString, Required: true},
+			"endpoint":   {Type: OptionString, Required: true},
+			// sdk uses the official Qdrant VectorStore over gRPC. native keeps
+			// the compatibility reader for pre-SDK collections.
+			"runtime_engine":     {Type: OptionString, Default: "native", Enum: []string{"native", "sdk"}},
+			"grpc_port":          {Type: OptionInteger, Default: "6334", Min: 1, Max: 65535},
 			"snapshot_watermark": {Type: OptionString, Required: true},
 			"vector_generation":  {Type: OptionString, Required: true},
 			"timeout_ms":         {Type: OptionInteger, Default: "20000", Min: 100, Max: 600000},

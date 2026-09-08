@@ -83,7 +83,7 @@ func (w DeterministicTestExecutor) ExecuteWithLease(ctx context.Context, envelop
 			return err
 		}
 	}
-	_, err = w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: sk, RequestID: envelope.RequestID, CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1"})
+	_, err = w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: sk, RequestID: envelope.RequestID, CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1", Outbox: []sessionstore.OutboxEvent{terminalAuditOutbox(ctx, envelope, runtime.OutcomeSucceeded)}})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
 	}

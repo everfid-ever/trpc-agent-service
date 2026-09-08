@@ -41,7 +41,15 @@ type Config struct {
 	// VectorGeneration is the immutable collection generation selected by a
 	// tenant BackendProfile. Runtime retrieval checks it against the published
 	// Knowledge Manifest before querying this adapter.
-	VectorGeneration  string
+	VectorGeneration string
+	// RuntimeEngine chooses the read-only framework retrieval implementation.
+	// "native" preserves the existing REST search path; "sdk" delegates
+	// retrieval to trpc-agent-go's public Qdrant VectorStore over gRPC. Durable
+	// ingestion and migration always retain this adapter's integrity envelope.
+	RuntimeEngine string
+	// GRPCPort is used only by the SDK runtime engine. Qdrant's REST endpoint
+	// remains the data-plane authority used by ingestion and verification.
+	GRPCPort          int
 	AllowInsecureHTTP bool
 	HTTPClient        *http.Client
 	TokenSource       TokenSource
@@ -59,6 +67,8 @@ type Adapter struct {
 	vectorSize        int
 	snapshotWatermark string
 	vectorGeneration  string
+	runtimeEngine     string
+	grpcPort          int
 	client            *http.Client
 	tokens            TokenSource
 	embedder          Embedder
@@ -75,10 +85,17 @@ func (a *Adapter) SnapshotWatermark() string {
 }
 
 func New(config Config, embedder Embedder) (*Adapter, error) {
+	if config.RuntimeEngine == "" {
+		config.RuntimeEngine = "native"
+	}
+	if config.GRPCPort == 0 {
+		config.GRPCPort = 6334
+	}
 	endpoint, err := url.Parse(strings.TrimSpace(config.Endpoint))
 	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
 		(endpoint.Scheme != "https" && !(config.AllowInsecureHTTP && endpoint.Scheme == "http")) ||
-		!validName(config.Collection) || config.VectorSize < 1 || strings.TrimSpace(config.SnapshotWatermark) == "" {
+		!validName(config.Collection) || config.VectorSize < 1 || strings.TrimSpace(config.SnapshotWatermark) == "" ||
+		(config.RuntimeEngine != "native" && config.RuntimeEngine != "sdk") || config.GRPCPort < 1 || config.GRPCPort > 65535 {
 		return nil, runtime.ErrInvariantViolation
 	}
 	if config.HTTPClient == nil {
@@ -86,6 +103,7 @@ func New(config Config, embedder Embedder) (*Adapter, error) {
 	}
 	return &Adapter{endpoint: endpoint, collection: config.Collection, vectorSize: config.VectorSize,
 		snapshotWatermark: config.SnapshotWatermark, vectorGeneration: config.VectorGeneration,
+		runtimeEngine: config.RuntimeEngine, grpcPort: config.GRPCPort,
 		client: config.HTTPClient, tokens: config.TokenSource, embedder: embedder}, nil
 }
 
@@ -144,6 +162,9 @@ func (a *Adapter) ApplyChunk(ctx context.Context, in knowledgedriver.ApplyReques
 	payload["migration_epoch"] = in.Epoch
 	payload["image_digest"] = digest
 	payload["snapshot_watermark"] = a.snapshotWatermark
+	sdkScope := payload["metadata"].(map[string]any)[sdkScopeMetadataKey].(map[string]any)
+	sdkScope["image_digest"] = digest
+	sdkScope["snapshot_watermark"] = a.snapshotWatermark
 	vector := in.Image.Vector
 	if in.Image.Operation == knowledgedriver.OperationDelete {
 		vector = make([]float32, a.vectorSize)
@@ -445,6 +466,13 @@ func (a *Adapter) VectorGeneration() string {
 	}
 	return a.vectorGeneration
 }
+
+func (a *Adapter) RuntimeEngine() string {
+	if a == nil {
+		return ""
+	}
+	return a.runtimeEngine
+}
 func pointID(key knowledgedriver.ChunkKey) string {
 	sum := sha256.Sum256([]byte(key.TenantID + "\x00" + key.KnowledgeID + "\x00" + strconv.FormatInt(key.KnowledgeVersion, 10) + "\x00" + key.ChunkID))
 	raw := hex.EncodeToString(sum[:])
@@ -472,8 +500,32 @@ func validKey(key knowledgedriver.ChunkKey) bool {
 	return key.TenantID != "" && key.KnowledgeID != "" && key.KnowledgeVersion >= 1 && key.ChunkID != ""
 }
 
+const sdkScopeMetadataKey = "__trpc_agent_service_scope"
+
 func encodeImage(image knowledgedriver.ChunkImage) map[string]any {
-	return map[string]any{"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID, "knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID, "revision": image.Revision, "operation": string(image.Operation), "source_digest": image.SourceDigest, "content_digest": image.ContentDigest, "metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID, "embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration, "content": image.Content, "metadata": image.Metadata}
+	metadata := make(map[string]any, len(image.Metadata)+1)
+	for key, value := range image.Metadata {
+		metadata[key] = value
+	}
+	// The SDK Qdrant implementation scopes filters below "metadata.". Keep a
+	// namespaced mirror of immutable routing facts there while retaining the
+	// top-level migration envelope as the authority for read-back verification.
+	metadata[sdkScopeMetadataKey] = map[string]any{
+		"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID,
+		"knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID,
+		"revision": image.Revision, "operation": string(image.Operation),
+		"source_digest": image.SourceDigest, "content_digest": image.ContentDigest,
+		"metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID,
+		"embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration,
+	}
+	name, _ := image.Metadata["title"]
+	return map[string]any{"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID, "knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID, "revision": image.Revision, "operation": string(image.Operation), "source_digest": image.SourceDigest, "content_digest": image.ContentDigest, "metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID, "embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration, "content": image.Content, "metadata": metadata,
+		// These are the public trpc-agent-go Qdrant payload fields. They make a
+		// newly migrated collection directly consumable by the SDK implementation.
+		// Keep the point ID as the SDK document ID. Our migration key includes
+		// tenant and knowledge version, whereas the SDK's generic document ID
+		// does not; this avoids cross-scope UUID collisions in one collection.
+		"original_id": pointID(image.Key), "name": name}
 }
 func decodeImage(payload map[string]any, vector []float32) (knowledgedriver.ChunkImage, error) {
 	tenant, ok := text(payload, "tenant_id")
@@ -552,6 +604,12 @@ func decodeMetadata(payload map[string]any) (map[string]string, error) {
 	}
 	metadata := make(map[string]string, len(values))
 	for key, value := range values {
+		if key == sdkScopeMetadataKey {
+			if _, ok := value.(map[string]any); !ok {
+				return nil, runtime.ErrInvariantViolation
+			}
+			continue
+		}
 		text, ok := value.(string)
 		if !ok {
 			return nil, runtime.ErrInvariantViolation

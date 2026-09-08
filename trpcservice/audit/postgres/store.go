@@ -65,6 +65,10 @@ func (s *Store) ResolveAuditEvent(ctx context.Context, record messaging.OutboxRe
 		if err := s.resolveExecutionBudget(ctx, record, &event); err != nil {
 			return audit.Event{}, err
 		}
+	case strings.HasPrefix(record.PayloadRef, "execution-terminal://"):
+		if err := s.resolveExecutionTerminal(ctx, record, &event); err != nil {
+			return audit.Event{}, err
+		}
 	default:
 		if err := s.resolveExecution(ctx, record.TenantID, record.AggregateID, &event); err == nil {
 			event.RequestID = record.AggregateID
@@ -76,6 +80,21 @@ func (s *Store) ResolveAuditEvent(ctx context.Context, record messaging.OutboxRe
 		return audit.Event{}, err
 	}
 	return event, nil
+}
+
+func (s *Store) resolveExecutionTerminal(ctx context.Context, record messaging.OutboxRecord, event *audit.Event) error {
+	parts, err := scopedParts(record.PayloadRef, "execution-terminal://", record.TenantID, 2)
+	if err != nil || len(parts) != 2 || parts[0] != record.AggregateID || record.EventSeq != 1 {
+		return runtime.ErrInvalidEnvelope
+	}
+	switch runtime.Outcome(parts[1]) {
+	case runtime.OutcomeSucceeded, runtime.OutcomeDenied, runtime.OutcomeFailed, runtime.OutcomeCancelled,
+		runtime.OutcomeConfirmationDenied, runtime.OutcomeConfirmationTimeout:
+	default:
+		return runtime.ErrInvalidEnvelope
+	}
+	event.Action, event.Decision, event.RequestID = "execution.terminal", parts[1], parts[0]
+	return s.resolveExecution(ctx, record.TenantID, parts[0], event)
 }
 
 func (s *Store) resolveExecutionBudget(ctx context.Context, record messaging.OutboxRecord, event *audit.Event) error {

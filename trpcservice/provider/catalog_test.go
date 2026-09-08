@@ -147,7 +147,7 @@ func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value.Configuration["timeout_ms"] != "20000" || len(value.ContentDigest) != 64 {
+	if value.Configuration["timeout_ms"] != "20000" || value.Configuration["runtime_engine"] != "native" || value.Configuration["grpc_port"] != "6334" || len(value.ContentDigest) != 64 {
 		t.Fatalf("not normalized: %#v", value)
 	}
 	value.Configuration["api_key"] = "forbidden"

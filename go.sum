@@ -130,6 +130,8 @@ github.com/panjf2000/ants/v2 v2.10.0/go.mod h1:7ZxyxsqE4vvW0M7LSD8aI3cKwgFhBHbxn
 github.com/perimeterx/marshmallow v1.1.5 h1:a2LALqQ1BlHM8PZblsDdidgv1mWi1DgC2UmX50IvK2s=
 github.com/perimeterx/marshmallow v1.1.5/go.mod h1:dsXbUu8CRzfYP5a87xpp0xq9S3u0Vchtcl8we9tYaXw=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/qdrant/go-client v1.16.0 h1:DTkC3eppWXKhjQs+IgA9LFKOkSjJ4sTHs2jJPCni7dY=
+github.com/qdrant/go-client v1.16.0/go.mod h1:I+EL3h4HRoRTeHtbfOd/4kDXwCukZfkd41j/9wryGkw=
 github.com/redis/go-redis/v9 v9.11.0 h1:E3S08Gl/nJNn5vkxd2i78wZxWAPNZgUNTp8WIJUAiIs=
 github.com/redis/go-redis/v9 v9.11.0/go.mod h1:huWgSWd8mW6+m0VPhJjSSQ+d6Nh1VICQ6Q5lHuCH/Iw=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
@@ -262,11 +264,15 @@ trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb h1:hW6SMv4qf
 trpc.group/trpc-go/trpc-a2a-go v0.2.6-0.20260721084546-18c8244d0acb/go.mod h1:7nbGA66/9AZ2j8+juvl7IsH0FC9jEdrxgsmBLrdKnLw=
 trpc.group/trpc-go/trpc-agent-go v1.11.2 h1:qBgrX48JXvgf+k6cq1BSWR4oPfFXxp8/boYydAs4PNM=
 trpc.group/trpc-go/trpc-agent-go v1.11.2/go.mod h1:bIZcN4N9sGpA42sWfE98XCPl9ZgMi6fMDLGYOaXNe9A=
+trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant v1.11.0 h1:qexIzzrbbcwlpf1ud5SRbEevpSqgpHHn6yvgdtXx88E=
+trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant v1.11.0/go.mod h1:wuMclRNqIz0+py1xfHma4L2TmSzTf+cZf7p3rT1s9w0=
 trpc.group/trpc-go/trpc-agent-go/memory/postgres v1.11.0 h1:l5osN13fRX8oj3luKydVbxd/s+VKXwDd5RN1DkT/w2g=
 trpc.group/trpc-go/trpc-agent-go/memory/postgres v1.11.0/go.mod h1:TQFM2o53kVU0lQDqTX2GRB+wz1HV74CnOp62oIgFUL4=
 trpc.group/trpc-go/trpc-agent-go/session/postgres v1.11.0 h1:k6a6Sa9i2mjlLVZVmRnYwEFLdQeOsbIXb2aRFCVHxlg=
 trpc.group/trpc-go/trpc-agent-go/session/postgres v1.11.0/go.mod h1:f8iE70qCVVnXE/ECpMzSbtYwLcwE7oFGrXK37wit/M4=
 trpc.group/trpc-go/trpc-agent-go/storage/postgres v0.8.0 h1:8phxJucSgwhdhS0UP6uyaVtWyNL3z1RW7OfLHYUtzco=
 trpc.group/trpc-go/trpc-agent-go/storage/postgres v0.8.0/go.mod h1:q1/qPdLQ8hgyGhvq2t0lmfhRcekm0chBc5+ZI32pBv0=
+trpc.group/trpc-go/trpc-agent-go/storage/qdrant v1.1.2-0.20260108033914-7a20241f1ad5 h1:HLG4fztMJvbFIkw0dg74whNZXxz/rarB82TUG49MGzY=
+trpc.group/trpc-go/trpc-agent-go/storage/qdrant v1.1.2-0.20260108033914-7a20241f1ad5/go.mod h1:jMNuP3MIesUStb5xThuAvazlrtA4NrrT2cGwbBcf9dk=
 trpc.group/trpc-go/trpc-mcp-go v0.0.10 h1:kKPfevmikMojfOgtUBf5SJQ/v6aDugckodgyH1uDu2Q=
 trpc.group/trpc-go/trpc-mcp-go v0.0.10/go.mod h1:OT6rLglkdaQ17D2T1Y87Y/ckItzdsEldDbw7dHAbGEA=

@@ -6,6 +6,8 @@ cd "$repo_root"
 
 required_module="trpc.group/trpc-go/trpc-agent-go"
 required_version="v1.11.2"
+required_qdrant_module="trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/qdrant"
+required_qdrant_version="v1.11.0"
 required_a2a_module="trpc.group/trpc-go/trpc-a2a-go"
 required_a2a_version="v0.2.6-0.20260721084546-18c8244d0acb"
 required_feishu_module="github.com/larksuite/oapi-sdk-go/v3"
@@ -37,6 +39,20 @@ fi
 
 if grep -Eq '^replace[[:space:]].*trpc\.group/trpc-go/trpc-agent-go' go.mod; then
   echo "forbidden go.mod replacement for $required_module" >&2
+  exit 1
+fi
+
+# Qdrant's official implementation is published as a public leaf module. The
+# root SDK has no v1.11.2 leaf release, so pin its matching public v1.11.0
+# module and reject replacements exactly as for the root SDK.
+actual_qdrant_version="$(go list -m -f '{{.Version}}' "$required_qdrant_module")"
+if [[ "$actual_qdrant_version" != "$required_qdrant_version" ]]; then
+  echo "dependency baseline mismatch: $required_qdrant_module=$actual_qdrant_version, want $required_qdrant_version" >&2
+  exit 1
+fi
+
+if go list -m -json "$required_qdrant_module" | grep -q '"Replace"'; then
+  echo "forbidden framework replacement: $required_qdrant_module must resolve to the official $required_qdrant_version module" >&2
   exit 1
 fi
 

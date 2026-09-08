@@ -2,10 +2,10 @@ name: trpc-agent-minimal
 
 # Disposable backend integration environment. Unlike the full local compose
 # (which binds 0.0.0.0 for local development), every host port here is bound to
-# 127.0.0.1 only. The suite starts real PostgreSQL 16, Redis 7, Qdrant and Vault
-# services; its Go container runs the opt-in repository, runtime and Qdrant
-# adapter integration tests. Nothing here uses IM, model, S3, OTEL or Kubernetes
-# credentials.
+# 127.0.0.1 only. The suite starts real PostgreSQL 16 with pgvector, Redis 7,
+# MinIO, Qdrant and Vault services; its Go container runs the opt-in repository,
+# runtime and adapter integration tests. Nothing here uses IM, model, OTEL or
+# Kubernetes credentials.
 
 services:
   jaeger:
@@ -45,7 +45,9 @@ services:
   postgres:
     # Digests keep the disposable CI environment reproducible. Keep the human
     # readable tag as well so an operator can identify the intended release.
-    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    # pgvector is part of the production PostgreSQL capability surface even
+    # though this suite currently exercises only relational contracts.
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
     # The migration matrix executes several repository contract suites against
     # this disposable cluster. Keep its test-only connection ceiling above the
     # default so a short-lived pool burst cannot mask an adapter failure.
@@ -60,6 +62,11 @@ services:
     ports:
       - "127.0.0.1:${TRPC_MINIMAL_REDIS_PORT:-56381}:6379"
     healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 2s, timeout: 3s, retries: 30}
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z@sha256:a929054ae025fa7997857cd0e2a2e3029238e31ad89877326dc032f4c1a14259
+    command: server /data --console-address ":9001"
+    environment: {MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: minioadmin}
 
   # The Qdrant image ships a Debian-slim runtime with neither wget, curl nor
   # bash, so it cannot self-report a shell healthcheck. The smoke container
@@ -87,11 +94,23 @@ services:
       TRPC_POSTGRES_ADMIN_DSN: postgres://trpc:trpc_test_password@postgres:5432/postgres?sslmode=disable
       TRPC_REDIS_TEST_ADDR: redis:6379
       TRPC_QDRANT_TEST_ENDPOINT: http://qdrant:6333
+      TRPC_MINIO_TEST_ENDPOINT: http://minio:9000
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_BUCKET: trpc-smoke
+      TRPC_S3_REGION: us-east-1
+      TRPC_S3_ACCESS_KEY: minioadmin
+      TRPC_S3_SECRET_KEY: minioadmin
+      TRPC_S3_ALLOW_INSECURE: "1"
+      TRPC_OBJECTSTORE_SMOKE: "1"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
       TRPC_VAULT_TEST_ENDPOINT: http://vault:8200
       TRPC_VAULT_TEST_TOKEN: trpc-dev-token
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       qdrant: {condition: service_started}
+      minio: {condition: service_started}
       vault: {condition: service_healthy}
     command: ["bash", "scripts/backend_adapter_smoke_inside.sh"]

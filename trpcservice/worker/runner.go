@@ -642,8 +642,11 @@ func (w RunnerExecutor) ExecuteWithLease(ctx context.Context, envelope runtime.E
 		CommitID: envelope.RequestID + ":terminal:0", Stage: "terminal",
 		InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version,
 		Outcome: runtime.OutcomeSucceeded, ResultRef: resultRef, ReplyCursor: envelope.RequestID + ":1",
-		Outbox: []sessionstore.OutboxEvent{{Kind: "reply", IdempotencyKey: replyID, PayloadRef: resultRef, EventSeq: 1,
-			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}},
+		Outbox: []sessionstore.OutboxEvent{
+			{Kind: "reply", IdempotencyKey: replyID, PayloadRef: resultRef, EventSeq: 1,
+				TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)},
+			terminalAuditOutbox(ctx, envelope, runtime.OutcomeSucceeded),
+		},
 	})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
@@ -716,9 +719,7 @@ func (w RunnerExecutor) CancelWithLease(ctx context.Context, envelope runtime.Ex
 		CommitID: envelope.RequestID + ":cancelled", Stage: "terminal",
 		InputSeq: envelope.InputSeq, Fence: fence, ExpectedVersion: head.Version,
 		Outcome: runtime.OutcomeCancelled,
-		Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "cancel-terminal:" + envelope.RequestID,
-			PayloadRef: "execution://" + envelope.TenantID + "/" + envelope.RequestID, EventSeq: uint64(status.CancelVersion),
-			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}},
+		Outbox:  []sessionstore.OutboxEvent{terminalAuditOutbox(ctx, envelope, runtime.OutcomeCancelled)},
 	})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
@@ -745,7 +746,7 @@ func verifyAuthoritativeEnvelope(trusted, delivered runtime.ExecutionEnvelope) e
 }
 
 func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope, head sessionstore.SessionHead,
-	fence uint64, beforeCommit func(context.Context) error, outcome runtime.Outcome, decision governance.Decision) error {
+	fence uint64, beforeCommit func(context.Context) error, outcome runtime.Outcome, _ governance.Decision) error {
 	if turn != nil {
 		_ = turn.Rollback(ctx)
 	}
@@ -756,9 +757,8 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 	}
 	_, err := w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: head.SessionKey, RequestID: envelope.RequestID,
 		CommitID: envelope.RequestID + ":" + string(outcome) + ":governance", Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
-		ExpectedVersion: head.Version, Outcome: outcome, Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "governance:" + decision.DecisionID,
-			PayloadRef: "governance://" + envelope.TenantID + "/" + decision.DecisionID, EventSeq: 1,
-			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}})
+		ExpectedVersion: head.Version, Outcome: outcome,
+		Outbox: []sessionstore.OutboxEvent{terminalAuditOutbox(ctx, envelope, outcome)}})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
 	}
@@ -766,8 +766,8 @@ func (w RunnerExecutor) commitGovernanceTerminal(ctx context.Context, turn *sess
 }
 
 // commitBudgetTerminal records a bounded execution failure without touching
-// governance's billing reservation/settlement path. The audit fact names the
-// exact local circuit breaker which stopped the run.
+// governance's billing reservation/settlement path. The terminal audit remains
+// uniform; the breaker reason is retained in the idempotent commit identity.
 func (w RunnerExecutor) commitBudgetTerminal(ctx context.Context, turn *sessionstore.BufferedTurn, envelope runtime.ExecutionEnvelope, head sessionstore.SessionHead,
 	fence uint64, beforeCommit func(context.Context) error, cause error,
 ) error {
@@ -783,13 +783,21 @@ func (w RunnerExecutor) commitBudgetTerminal(ctx context.Context, turn *sessions
 	_, err := w.Sessions.CommitTurn(ctx, sessionstore.CommitTurnRequest{SessionKey: head.SessionKey, RequestID: envelope.RequestID,
 		CommitID: envelope.RequestID + ":budget:" + reason, Stage: "terminal", InputSeq: envelope.InputSeq, Fence: fence,
 		ExpectedVersion: head.Version, Outcome: runtime.OutcomeFailed,
-		Outbox: []sessionstore.OutboxEvent{{Kind: "audit", IdempotencyKey: "execution-budget:" + envelope.RequestID,
-			PayloadRef: "execution-budget://" + envelope.TenantID + "/" + envelope.RequestID + "/" + reason, EventSeq: 1,
-			TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}}})
+		Outbox: []sessionstore.OutboxEvent{terminalAuditOutbox(ctx, envelope, runtime.OutcomeFailed)}})
 	if errors.Is(err, runtime.ErrAlreadyTerminal) {
 		return nil
 	}
 	return err
+}
+
+// terminalAuditOutbox is the sole terminal-message audit shape. It is built
+// alongside the fenced CommitTurn because only that commit knows whether this
+// delivery actually became the durable terminal outcome; retries that lose the
+// CAS must not emit a second terminal audit fact.
+func terminalAuditOutbox(ctx context.Context, envelope runtime.ExecutionEnvelope, outcome runtime.Outcome) sessionstore.OutboxEvent {
+	return sessionstore.OutboxEvent{Kind: "audit", IdempotencyKey: "execution-terminal:" + envelope.RequestID,
+		PayloadRef: "execution-terminal://" + envelope.TenantID + "/" + envelope.RequestID + "/" + string(outcome), EventSeq: 1,
+		TraceParent: telemetry.EffectiveTraceParent(ctx, envelope.TraceParent)}
 }
 
 type runnerResult struct {

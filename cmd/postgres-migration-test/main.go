@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -187,23 +188,40 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	// database and some fixtures truncate cross-domain tables. Run them
 	// serially; the default package parallelism otherwise creates test-order
 	// races that look like random foreign-key/version conflicts.
-	command := exec.CommandContext(ctx, "go", "test", "-p=1", "-count=1", "./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres", "./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres", "./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres")
-	command.Dir = repoRoot
-	command.Env = append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn)
-	output, err := command.CombinedOutput()
+	output, err := goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
+		"-p=1", "./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres", "./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres", "./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres")
 	if err != nil {
 		return fmt.Errorf("PostgreSQL repository contracts: %w\n%s", err, output)
 	}
 	if os.Getenv("TRPC_RUNTIME_TEST") == "1" {
-		command = exec.CommandContext(ctx, "go", "test", "-count=1", "./trpcservice/integration")
-		command.Dir = repoRoot
-		command.Env = append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn)
-		output, err = command.CombinedOutput()
+		// The package also contains intentionally manual provider-smoke tests.
+		// Select the disposable two-worker contract explicitly, so CI can make
+		// every test it claims to exercise a no-skip requirement.
+		output, err = goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
+			"-run", "^TestHTTPPostgreSQLRedisTwoWorkerSlice$", "./trpcservice/integration")
 		if err != nil {
 			return fmt.Errorf("runtime slice: %w\n%s", err, output)
 		}
 	}
 	return nil
+}
+
+// goTestWithoutSkips makes the disposable contract matrix a real admission
+// gate. A conditional skip is useful for a developer without Docker, but in
+// this command every dependency has already been provisioned; accepting one
+// would turn a missing backend or test setup into a false green build.
+func goTestWithoutSkips(ctx context.Context, directory string, environment []string, arguments ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, "go", append([]string{"test", "-count=1", "-json"}, arguments...)...)
+	command.Dir = directory
+	command.Env = environment
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return output, err
+	}
+	if bytes.Contains(output, []byte(`"Action":"skip"`)) {
+		return output, fmt.Errorf("contract test skipped despite provisioned backend")
+	}
+	return output, nil
 }
 
 func testDSNForDatabase(adminDSN, databaseName string) (string, error) {

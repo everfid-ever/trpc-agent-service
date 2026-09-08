@@ -93,6 +93,49 @@ VALUES($1,'audit-outbox','audit','tenant-change',1,'tenant-status:1','tenant://t
 	}
 }
 
+// TestExecutionTerminalAuditUsesTerminalClassification pins the resolver side
+// of the single-terminal-audit rule against a migrated database. The worker
+// owns the CAS and idempotency key; this test ensures the relay cannot silently
+// turn that durable fact back into a generic execution audit.
+func TestExecutionTerminalAuditUsesTerminalClassification(t *testing.T) {
+	if os.Getenv("TRPC_MIGRATION_TEST") != "1" {
+		t.Skip("TRPC_MIGRATION_TEST=1 is required")
+	}
+	dsn := os.Getenv("TRPC_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("TRPC_POSTGRES_TEST_DSN is required")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	store := New(db)
+	record := messaging.OutboxRecord{TenantID: "t_01ARZ3NDEKTSV4RRFFQ69G5FAV", OutboxID: "terminal-audit-contract",
+		Kind: "audit", AggregateID: "probe-request", EventSeq: 1, IdempotencyKey: "execution-terminal:probe-request",
+		PayloadRef: "execution-terminal://t_01ARZ3NDEKTSV4RRFFQ69G5FAV/probe-request/succeeded", CreatedAt: time.Now().UTC()}
+	event, err := store.ResolveAuditEvent(context.Background(), record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Action != "execution.terminal" || event.Decision != "succeeded" || event.RequestID != "probe-request" {
+		t.Fatalf("terminal event=%#v", event)
+	}
+	if err := store.Emit(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Emit(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM audit_event WHERE tenant_id=$1 AND audit_id=$2`, event.TenantID, event.AuditID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("terminal audit count=%d", count)
+	}
+}
+
 func sqlState(err error) string {
 	type state interface{ SQLState() string }
 	var value state

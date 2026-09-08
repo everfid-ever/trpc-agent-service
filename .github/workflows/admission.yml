@@ -39,6 +39,24 @@ jobs:
       - name: Fresh-cache race tests
         run: bash scripts/ci_admission.sh --race
 
+  coverage:
+    name: Coverage floor and PR diff ratchet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Enforce repository and changed-line coverage
+        env:
+          TRPC_MIN_TOTAL_COVERAGE: '40.0'
+          TRPC_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/coverage_gate.sh
+
   vulnerabilities:
     name: Go vulnerability scan
     runs-on: ubuntu-24.04
@@ -55,7 +73,7 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" ./...
 
   backend-integration:
-    name: PG16, Redis7, Qdrant and Vault integration
+    name: PGvector, Redis, MinIO, Qdrant and Vault integration
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

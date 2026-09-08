@@ -80,7 +80,8 @@ func TestRunnerExecutorRejectsWorkAndCommitsDurableCancellation(t *testing.T) {
 		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 	_, outbox, _ := sessions.SnapshotEffects(sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID})
-	if len(outbox) != 1 || outbox[0].Kind != "audit" || outbox[0].IdempotencyKey != "cancel-terminal:request" {
+	if len(outbox) != 1 || outbox[0].Kind != "audit" || outbox[0].IdempotencyKey != "execution-terminal:request" ||
+		outbox[0].PayloadRef != "execution-terminal://tenant-a/request/cancelled" {
 		t.Fatalf("outbox=%#v", outbox)
 	}
 }
@@ -196,6 +197,19 @@ func TestRunnerExecutorUsesUpstreamRunnerAndKeepsRedeliveryIdempotent(t *testing
 	if err != nil || result.KeyVersion != 7 || result.ContentType != messaging.ContentTypeText {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
+	_, outbox, _ := sessions.SnapshotEffects(sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID})
+	terminalAudits := 0
+	for _, item := range outbox {
+		if item.Kind == "audit" && item.IdempotencyKey == "execution-terminal:"+envelope.RequestID {
+			terminalAudits++
+			if item.PayloadRef != "execution-terminal://tenant-a/request/succeeded" {
+				t.Fatalf("terminal audit payload=%q", item.PayloadRef)
+			}
+		}
+	}
+	if terminalAudits != 1 {
+		t.Fatalf("terminal audits=%d outbox=%#v", terminalAudits, outbox)
+	}
 }
 
 func TestRunnerExecutorCommitsModelBudgetExhaustion(t *testing.T) {
@@ -239,7 +253,7 @@ func TestRunnerExecutorCommitsModelBudgetExhaustion(t *testing.T) {
 		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 	_, outbox, _ := sessions.SnapshotEffects(sessionstore.SessionKey{TenantID: envelope.TenantID, AgentAppID: envelope.AgentAppID, SessionID: envelope.SessionID})
-	if len(outbox) != 1 || outbox[0].PayloadRef != "execution-budget://tenant-a/budget-request/max_llm_calls" {
+	if len(outbox) != 1 || outbox[0].PayloadRef != "execution-terminal://tenant-a/budget-request/failed" {
 		t.Fatalf("outbox=%#v", outbox)
 	}
 }

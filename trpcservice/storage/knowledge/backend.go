@@ -80,6 +80,14 @@ func (r BackendAdapterResolver) ResolveKnowledgeBackend(ctx context.Context, ten
 	if err != nil || timeoutMS < 100 || timeoutMS > 600000 {
 		return nil, runtime.ErrInvariantViolation
 	}
+	grpcPort, err := strconv.Atoi(backend.Configuration["grpc_port"])
+	if err != nil || grpcPort < 1 || grpcPort > 65535 {
+		return nil, runtime.ErrInvariantViolation
+	}
+	runtimeEngine := strings.TrimSpace(backend.Configuration["runtime_engine"])
+	if runtimeEngine != "native" && runtimeEngine != "sdk" {
+		return nil, runtime.ErrInvariantViolation
+	}
 	endpoint := strings.TrimSpace(backend.Configuration["endpoint"])
 	collection := strings.TrimSpace(backend.Configuration["collection"])
 	watermark := strings.TrimSpace(backend.Configuration["snapshot_watermark"])
@@ -91,6 +99,7 @@ func (r BackendAdapterResolver) ResolveKnowledgeBackend(ctx context.Context, ten
 		Purpose: secrets.PurposeBackendConnect, ResourceID: backend.ProfileID, ResourceVersion: backend.Version}, ref: backend.CredentialRef}
 	return serviceqdrant.New(serviceqdrant.Config{Endpoint: endpoint, Collection: collection, VectorSize: vectorSize,
 		SnapshotWatermark: watermark, VectorGeneration: generation,
+		RuntimeEngine: runtimeEngine, GRPCPort: grpcPort,
 		AllowInsecureHTTP: backend.Provider == "qdrant-local",
 		HTTPClient:        &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond}, TokenSource: tokens}, nil)
 }
