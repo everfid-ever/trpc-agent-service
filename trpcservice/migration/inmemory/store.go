@@ -116,6 +116,25 @@ func (s *Store) CommitBatch(ctx context.Context, in migration.BatchRequest) (mig
 	return cloneBatchResult(result), nil
 }
 
+func (s *Store) RecordVerification(ctx context.Context, in migration.VerificationRequest) (migration.Migration, error) {
+	if err := ctx.Err(); err != nil {
+		return migration.Migration{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := migrationKey(in.TenantID, in.MigrationID)
+	current, ok := s.migrations[key]
+	if !ok {
+		return migration.Migration{}, runtime.ErrNotFound
+	}
+	next, err := migration.ApplyVerification(current, in)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	s.migrations[key] = next
+	return cloneMigration(next), nil
+}
+
 func migrationKey(tenantID, migrationID string) string { return tenantID + "\x00" + migrationID }
 
 func sameCreation(left, right migration.Migration) bool {

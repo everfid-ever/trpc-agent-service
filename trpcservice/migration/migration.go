@@ -60,6 +60,19 @@ type CreateRequest struct {
 	Epoch                         int64
 	Source, Target                Binding
 	CreatedAt                     time.Time
+	Audit                         CreateAudit
+}
+
+// CreateAudit is durable operator attribution for creation of a migration
+// authority. It is optional for lower-level contract fixtures, but required
+// by the Admin control plane and emitted with the same transaction as create.
+type CreateAudit struct {
+	ActorID, ReasonCode, CorrelationID, TraceID string
+}
+
+func (a CreateAudit) Valid() bool {
+	return validText(a.ActorID, 256) && validText(a.ReasonCode, 128) &&
+		validText(a.CorrelationID, 256) && validText(a.TraceID, 128)
 }
 
 type TransitionRequest struct {
@@ -84,6 +97,17 @@ type BatchRequest struct {
 	CommittedAt                          time.Time
 }
 
+// VerificationRequest records evidence produced by a trusted migration
+// operator. Evidence is versioned independently while the migration remains
+// in verify, so an Admin caller can only cut over using authority-held facts
+// rather than browser-supplied digests.
+type VerificationRequest struct {
+	TenantID, MigrationID string
+	ExpectedVersion       int64
+	Verification          Verification
+	RecordedAt            time.Time
+}
+
 type Batch struct {
 	BatchRequest
 	ResultVersion int64
@@ -99,6 +123,7 @@ type Repository interface {
 	Get(context.Context, string, string) (Migration, error)
 	Transition(context.Context, TransitionRequest) (Migration, error)
 	CommitBatch(context.Context, BatchRequest) (BatchResult, error)
+	RecordVerification(context.Context, VerificationRequest) (Migration, error)
 }
 
 func NewMigration(in CreateRequest) (Migration, error) {
@@ -183,6 +208,27 @@ func ApplyBatch(current Migration, in BatchRequest) (Migration, Batch, error) {
 	next.Version++
 	next.UpdatedAt = in.CommittedAt.UTC()
 	return next, Batch{BatchRequest: in, ResultVersion: next.Version}, nil
+}
+
+// ApplyVerification accepts evidence only from the verify phase. Replaying
+// identical evidence is idempotent; changed evidence advances the migration
+// version so a stale cutover CAS is rejected.
+func ApplyVerification(current Migration, in VerificationRequest) (Migration, error) {
+	if in.TenantID != current.TenantID || in.MigrationID != current.MigrationID {
+		return Migration{}, runtime.ErrTenantScope
+	}
+	if current.State != StateVerify || in.ExpectedVersion != current.Version || in.RecordedAt.IsZero() ||
+		in.RecordedAt.Before(current.UpdatedAt) || !validVerification(in.Verification) {
+		return Migration{}, runtime.ErrInvariantViolation
+	}
+	if current.Verification == in.Verification {
+		return current, nil
+	}
+	next := current
+	next.Verification = in.Verification
+	next.Version++
+	next.UpdatedAt = in.RecordedAt.UTC()
+	return next, nil
 }
 
 func BatchDigest(in BatchRequest) string {

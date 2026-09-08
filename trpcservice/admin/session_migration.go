@@ -1,0 +1,201 @@
+package admin
+
+import (
+	"context"
+	"time"
+
+	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/sessiondriver"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
+)
+
+// SessionMigrationCreateInput deliberately derives the source from the active
+// ConfigSnapshot. The only operator choice is the immutable candidate config
+// and a stable idempotency identity for this migration.
+type SessionMigrationCreateInput struct {
+	MigrationID         string `json:"migration_id"`
+	TargetConfigVersion int64  `json:"target_config_version"`
+}
+
+// SessionMigrationSwitchInput contains only CAS and idempotency coordinates.
+// Verification and rollback watermark are loaded from migration authority,
+// never accepted from a browser request.
+type SessionMigrationSwitchInput struct {
+	ExpectedTenantVersion    int64  `json:"expected_tenant_version"`
+	ExpectedMigrationVersion int64  `json:"expected_migration_version"`
+	SwitchID                 string `json:"switch_id"`
+}
+
+type SessionMigrationObserveInput struct {
+	ExpectedTenantVersion    int64     `json:"expected_tenant_version"`
+	ExpectedMigrationVersion int64     `json:"expected_migration_version"`
+	ObserveUntil             time.Time `json:"observe_until"`
+}
+
+type SessionMigrationStatus struct {
+	Migration migration.Migration         `json:"migration"`
+	Drain     sessiondriver.DrainStatus   `json:"drain"`
+}
+
+func (s Service) CreateSessionMigration(ctx context.Context, principal Principal, pathTenant string, in SessionMigrationCreateInput, metadata tenant.ChangeMetadata) (migration.Migration, error) {
+	if err := authorize(principal, pathTenant); err != nil {
+		return migration.Migration{}, err
+	}
+	if s.Configs == nil || s.Migrations == nil || in.MigrationID == "" || in.TargetConfigVersion < 1 {
+		return migration.Migration{}, runtime.ErrInvariantViolation
+	}
+	if err := metadata.Validate(); err != nil {
+		return migration.Migration{}, err
+	}
+	source, err := s.Configs.GetCurrent(ctx, pathTenant)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	target, err := s.Configs.Get(ctx, pathTenant, in.TargetConfigVersion)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if source.TenantID != pathTenant || target.TenantID != pathTenant || source.ConfigVersion < 1 ||
+		target.ConfigVersion <= source.ConfigVersion || target.State != config.StateStaged {
+		return migration.Migration{}, runtime.ErrInvariantViolation
+	}
+	sourceBinding, ok := sessionBinding(source.Payload)
+	if !ok {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	targetBinding, ok := sessionBinding(target.Payload)
+	if !ok || (sourceBinding.BackendProfileID == targetBinding.BackendProfileID && sourceBinding.BackendVersion == targetBinding.BackendVersion) {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	return s.Migrations.Create(ctx, migration.CreateRequest{TenantID: pathTenant, MigrationID: in.MigrationID,
+		Domain: sessiondriver.Domain, Epoch: target.ConfigVersion,
+		Source: migration.Binding{ConfigVersion: source.ConfigVersion, BackendProfileID: sourceBinding.BackendProfileID, BackendVersion: sourceBinding.BackendVersion},
+		Target: migration.Binding{ConfigVersion: target.ConfigVersion, BackendProfileID: targetBinding.BackendProfileID, BackendVersion: targetBinding.BackendVersion},
+		CreatedAt: time.Now().UTC(), Audit: migration.CreateAudit{ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
+			CorrelationID: metadata.CorrelationID, TraceID: metadata.TraceID}})
+}
+
+func (s Service) GetSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string) (migration.Migration, error) {
+	if err := authorize(principal, pathTenant); err != nil {
+		return migration.Migration{}, err
+	}
+	if s.Migrations == nil || migrationID == "" {
+		return migration.Migration{}, runtime.ErrInvariantViolation
+	}
+	value, err := s.Migrations.Get(ctx, pathTenant, migrationID)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if value.Domain != sessiondriver.Domain {
+		return migration.Migration{}, runtime.ErrCapabilityUnsupported
+	}
+	return value, nil
+}
+
+func (s Service) GetSessionMigrationStatus(ctx context.Context, principal Principal, pathTenant, migrationID string) (SessionMigrationStatus, error) {
+	value, err := s.GetSessionMigration(ctx, principal, pathTenant, migrationID)
+	if err != nil {
+		return SessionMigrationStatus{}, err
+	}
+	if s.SessionMigrationPublisher == nil {
+		return SessionMigrationStatus{}, runtime.ErrCapabilityUnsupported
+	}
+	drain, err := s.SessionMigrationPublisher.DrainStatus(ctx, pathTenant, migrationID)
+	if err != nil {
+		return SessionMigrationStatus{}, err
+	}
+	return SessionMigrationStatus{Migration: value, Drain: drain}, nil
+}
+
+func (s Service) CutoverSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (sessiondriver.SwitchResult, error) {
+	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, metadata)
+	if err != nil {
+		return sessiondriver.SwitchResult{}, err
+	}
+	if current.Verification.SourceDigest == "" {
+		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+	}
+	return s.SessionMigrationPublisher.Cutover(ctx, sessiondriver.CutoverRequest{TenantID: pathTenant, MigrationID: migrationID,
+		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
+		Verification: current.Verification, At: time.Now().UTC(), Metadata: switchMetadata(in.SwitchID, metadata)})
+}
+
+func (s Service) BeginSessionMigrationObserve(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationObserveInput) (sessiondriver.SwitchResult, error) {
+	if _, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, tenant.ChangeMetadata{}); err != nil {
+		return sessiondriver.SwitchResult{}, err
+	}
+	return s.SessionMigrationPublisher.BeginObserve(ctx, sessiondriver.ObserveRequest{TenantID: pathTenant, MigrationID: migrationID,
+		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion, At: time.Now().UTC(), ObserveUntil: in.ObserveUntil.UTC()})
+}
+
+func (s Service) RollbackSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (sessiondriver.SwitchResult, error) {
+	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, metadata)
+	if err != nil {
+		return sessiondriver.SwitchResult{}, err
+	}
+	if current.Verification.TargetWatermark == "" {
+		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+	}
+	return s.SessionMigrationPublisher.Rollback(ctx, sessiondriver.RollbackRequest{TenantID: pathTenant, MigrationID: migrationID,
+		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
+		RollbackSyncWatermark: current.Verification.TargetWatermark, At: time.Now().UTC(), Metadata: switchMetadata(in.SwitchID, metadata)})
+}
+
+func (s Service) CleanupSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput) (sessiondriver.SwitchResult, error) {
+	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, tenant.ChangeMetadata{})
+	if err != nil {
+		return sessiondriver.SwitchResult{}, err
+	}
+	if current.Verification.TargetWatermark == "" {
+		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+	}
+	return s.SessionMigrationPublisher.Cleanup(ctx, sessiondriver.CleanupRequest{TenantID: pathTenant, MigrationID: migrationID,
+		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
+		RollbackSyncWatermark: current.Verification.TargetWatermark, At: time.Now().UTC()})
+}
+
+func (s Service) requireSessionSwitch(ctx context.Context, principal Principal, pathTenant, migrationID string, expectedMigrationVersion int64, metadata tenant.ChangeMetadata) (migration.Migration, error) {
+	current, err := s.GetSessionMigration(ctx, principal, pathTenant, migrationID)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if s.SessionMigrationPublisher == nil || expectedMigrationVersion < 1 || current.Version != expectedMigrationVersion {
+		return migration.Migration{}, runtime.ErrVersionConflict
+	}
+	if metadata != (tenant.ChangeMetadata{}) {
+		if err := metadata.Validate(); err != nil {
+			return migration.Migration{}, err
+		}
+	}
+	return current, nil
+}
+
+func sessionBinding(value config.ConfigV1) (config.BackendBinding, bool) {
+	var binding config.BackendBinding
+	for _, candidate := range value.BackendBindings {
+		if candidate.Domain != sessiondriver.Domain {
+			continue
+		}
+		if binding.Domain != "" || candidate.BackendProfileID == "" || candidate.BackendVersion < 1 || !hasCapability(candidate.Required, "atomic_turn_commit") {
+			return config.BackendBinding{}, false
+		}
+		binding = candidate
+	}
+	return binding, binding.Domain != ""
+}
+
+func hasCapability(values []string, capability string) bool {
+	for _, value := range values {
+		if value == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func switchMetadata(switchID string, metadata tenant.ChangeMetadata) sessiondriver.SwitchMetadata {
+	return sessiondriver.SwitchMetadata{SwitchID: switchID, ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
+		CorrelationID: metadata.CorrelationID, TraceID: metadata.TraceID}
+}

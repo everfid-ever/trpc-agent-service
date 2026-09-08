@@ -242,8 +242,14 @@ func runSessionMigrationStep(ctx context.Context, logger *roleLogger, authority 
 		if err != nil {
 			return fmt.Errorf("verify session migration: %w", err)
 		}
-		logger.Printf("session migration verified tenant=%q migration=%q repair_claimed=%d repair_applied=%d source_count=%d digest=%s; explicit cutover remains required",
-			current.TenantID, current.MigrationID, repair.Claimed, repair.Applied, verification.SourceCount, verification.SourceDigest)
+		recorded, err := authority.RecordVerification(ctx, migration.VerificationRequest{TenantID: current.TenantID,
+			MigrationID: current.MigrationID, ExpectedVersion: current.Version, Verification: verification, RecordedAt: now})
+		if err != nil {
+			return fmt.Errorf("record session migration verification: %w", err)
+		}
+		logger.Printf("session migration verified tenant=%q migration=%q version=%d repair_claimed=%d repair_applied=%d source_count=%d target_count=%d source_digest=%s target_digest=%s; explicit cutover remains required",
+			recorded.TenantID, recorded.MigrationID, recorded.Version, repair.Claimed, repair.Applied,
+			verification.SourceCount, verification.TargetCount, verification.SourceDigest, verification.TargetDigest)
 		return nil
 	case migration.StateCutover, migration.StateObserve:
 		repair, err := driver.Repair(ctx, sessiondriver.RepairRequest{TenantID: current.TenantID, MigrationID: current.MigrationID,

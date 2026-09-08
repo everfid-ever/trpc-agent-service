@@ -24,7 +24,15 @@ func (s *Store) Create(ctx context.Context, in migration.CreateRequest) (migrati
 	if s == nil || s.db == nil {
 		return migration.Migration{}, runtime.ErrBackendUnavailable
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO public.backend_migration(
+	if in.Audit != (migration.CreateAudit{}) && !in.Audit.Valid() {
+		return migration.Migration{}, runtime.ErrInvariantViolation
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO public.backend_migration(
 tenant_id,migration_id,domain,epoch,source_config_version,source_backend_profile_id,source_backend_version,
 target_config_version,target_backend_profile_id,target_backend_version,state,created_at,updated_at)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'planned',$11,$11)
@@ -43,14 +51,29 @@ ON CONFLICT (tenant_id,migration_id) DO NOTHING`, in.TenantID, in.MigrationID, i
 		return migration.Migration{}, err
 	}
 	if rows == 0 {
-		existing, err := s.Get(ctx, in.TenantID, in.MigrationID)
+		existing, err := scanMigration(tx.QueryRowContext(ctx, selectMigration+` WHERE tenant_id=$1 AND migration_id=$2`, in.TenantID, in.MigrationID))
 		if err != nil {
 			return migration.Migration{}, err
 		}
 		if !sameCreation(existing, created) {
 			return migration.Migration{}, runtime.ErrIdempotencyCollision
 		}
+		if err := tx.Commit(); err != nil {
+			return migration.Migration{}, err
+		}
 		return existing, nil
+	}
+	if in.Audit != (migration.CreateAudit{}) {
+		_, err = tx.ExecContext(ctx, `INSERT INTO public.outbox(
+tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref)
+VALUES($1,$2,'audit',$3,1,$4,$5)`, in.TenantID, "migration-create-audit:"+in.TenantID+":"+in.MigrationID,
+			in.MigrationID, "migration:"+in.MigrationID+":create-audit", "backend-migration://"+in.TenantID+"/"+in.MigrationID)
+		if err != nil {
+			return migration.Migration{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return migration.Migration{}, err
 	}
 	return s.Get(ctx, in.TenantID, in.MigrationID)
 }
@@ -150,6 +173,48 @@ WHERE tenant_id=$1 AND migration_id=$2 AND version=$9`, next.TenantID, next.Migr
 	return migration.BatchResult{Migration: next, Batch: batch}, nil
 }
 
+func (s *Store) RecordVerification(ctx context.Context, in migration.VerificationRequest) (migration.Migration, error) {
+	if s == nil || s.db == nil {
+		return migration.Migration{}, runtime.ErrBackendUnavailable
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	defer tx.Rollback()
+	current, err := scanMigration(tx.QueryRowContext(ctx, selectMigration+` WHERE tenant_id=$1 AND migration_id=$2 FOR UPDATE`, in.TenantID, in.MigrationID))
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	next, err := migration.ApplyVerification(current, in)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if next == current {
+		if err := tx.Commit(); err != nil {
+			return migration.Migration{}, err
+		}
+		return current, nil
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE public.backend_migration SET
+verify_source_count=$3,verify_target_count=$4,verify_source_digest=$5,verify_target_digest=$6,
+verify_source_watermark=$7,verify_target_watermark=$8,verify_sample_digest=$9,version=$10,updated_at=$11
+WHERE tenant_id=$1 AND migration_id=$2 AND state='verify' AND version=$12`, next.TenantID, next.MigrationID,
+		next.Verification.SourceCount, next.Verification.TargetCount, next.Verification.SourceDigest, next.Verification.TargetDigest,
+		next.Verification.SourceWatermark, next.Verification.TargetWatermark, next.Verification.SampleDigest,
+		next.Version, next.UpdatedAt, current.Version)
+	if err != nil {
+		return migration.Migration{}, err
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return migration.Migration{}, runtime.ErrVersionConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return migration.Migration{}, err
+	}
+	return next, nil
+}
+
 const selectMigration = `SELECT tenant_id,migration_id,domain,epoch,
 source_config_version,source_backend_profile_id,source_backend_version,
 target_config_version,target_backend_profile_id,target_backend_version,state,
@@ -217,7 +282,7 @@ func nullableInt64(value int64) any {
 }
 
 func nullableCount(value int64, state migration.State) any {
-	if state != migration.StateCutover && state != migration.StateObserve && state != migration.StateCleanup {
+	if state != migration.StateVerify && state != migration.StateCutover && state != migration.StateObserve && state != migration.StateCleanup {
 		return nil
 	}
 	return value

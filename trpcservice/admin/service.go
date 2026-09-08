@@ -6,6 +6,8 @@ import (
 	"errors"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/sessiondriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -22,7 +24,11 @@ type Principal struct {
 	CanManageReleases bool
 }
 
-type Service struct{ Configs config.Repository }
+type Service struct {
+	Configs                   config.Repository
+	Migrations                migration.Repository
+	SessionMigrationPublisher sessiondriver.CutoverPublisher
+}
 
 func authorize(principal Principal, pathTenant string) error {
 	if !principal.Authenticated {

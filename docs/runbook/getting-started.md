@@ -105,6 +105,21 @@ go run ./cmd/trpc-service session-migrate
 
 该 job 拒绝缺少确认、未应用 schema、未部署或指向同一数据平面的 source/target、非 Session domain 与非法 phase；不记录或打印任何 DSN。迁移期间保持使用与 Worker 相同的 `TRPC_SESSION_POSTGRES_CONNECTIONS` Secret projection，避免 job 与实际数据面路由产生偏差。
 
+创建、切换和收尾均经同源 Admin API，而不是直接写 `backend_migration`。创建请求只指定 stable migration ID 与**已 staged** 的 target ConfigVersion；服务从当前 active ConfigSnapshot 推导 source Session binding，固定 target binding，并拒绝未变更的 Session Profile。迁移作业在 `verify` 阶段把 shadow evidence 以 CAS 写入 authority；浏览器不能提交 count/digest/watermark。
+
+```text
+POST /v1/tenants/{tenant_id}/session-migrations
+  {"migration_id":"session-move-2026-01","target_config_version":42}
+
+GET  /v1/tenants/{tenant_id}/session-migrations/{migration_id}/status
+POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/cutover
+POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/observe
+POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/rollback
+POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/cleanup
+```
+
+切换、观察、回滚与清理请求均携带 authority 的 migration version 与 tenant version；切换和回滚还需要稳定 `switch_id`，并沿用 `X-Reason-Code`、`X-Correlation-ID`、`X-Trace-ID`。切换/回滚由数据库函数在同一事务内更新 active ConfigSnapshot、写 switch journal、追加 audit/config-invalidation outbox；创建也与其 audit outbox 原子提交。rollback/cleanup 的同步 watermark 同样从 authority 中读取，不能由浏览器覆盖。
+
 ## 2. 可选：配置一个审阅后的 MCP 工具
 
 MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。

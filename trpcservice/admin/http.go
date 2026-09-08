@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
 
@@ -48,6 +49,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) >= 2 && parts[0] == "v1" && parts[1] == "config-releases" {
 		h.serveRelease(w, r, principal, parts)
+		return
+	}
+	if len(parts) >= 4 && parts[0] == "v1" && parts[1] == "tenants" && parts[3] == "session-migrations" {
+		h.serveSessionMigration(w, r, principal, parts)
 		return
 	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
@@ -130,6 +135,92 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (h Handler) serveSessionMigration(w http.ResponseWriter, r *http.Request, principal Principal, parts []string) {
+	tenantID := parts[2]
+	switchInput := func() (SessionMigrationSwitchInput, error) {
+		var input SessionMigrationSwitchInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			return SessionMigrationSwitchInput{}, err
+		}
+		return input, nil
+	}
+	switch {
+	case r.Method == http.MethodPost && len(parts) == 4:
+		var input SessionMigrationCreateInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.CreateSessionMigration(r.Context(), principal, tenantID, input, metadata(r, principal))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, value)
+	case r.Method == http.MethodGet && len(parts) == 5:
+		value, err := h.Service.GetSessionMigration(r.Context(), principal, tenantID, parts[4])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	case r.Method == http.MethodGet && len(parts) == 6 && parts[5] == "status":
+		value, err := h.Service.GetSessionMigrationStatus(r.Context(), principal, tenantID, parts[4])
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "cutover":
+		input, err := switchInput()
+		if err == nil {
+			value, switchErr := h.Service.CutoverSessionMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+			if switchErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = switchErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "observe":
+		var input SessionMigrationObserveInput
+		err := decodeJSON(w, r, &input)
+		if err == nil {
+			value, observeErr := h.Service.BeginSessionMigrationObserve(r.Context(), principal, tenantID, parts[4], input)
+			if observeErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = observeErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "rollback":
+		input, err := switchInput()
+		if err == nil {
+			value, rollbackErr := h.Service.RollbackSessionMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+			if rollbackErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = rollbackErr
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "cleanup":
+		input, err := switchInput()
+		if err == nil {
+			value, cleanupErr := h.Service.CleanupSessionMigration(r.Context(), principal, tenantID, parts[4], input)
+			if cleanupErr == nil {
+				writeJSON(w, http.StatusOK, value)
+				return
+			}
+			err = cleanupErr
+		}
+		writeError(w, err)
 	default:
 		http.NotFound(w, r)
 	}
@@ -241,6 +332,12 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, config.ErrNotFound), errors.Is(err, tenant.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, config.ErrVersionConflict), errors.Is(err, tenant.ErrVersionConflict):
+		status = http.StatusConflict
+	case errors.Is(err, runtime.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, runtime.ErrTenantScope):
+		status = http.StatusForbidden
+	case errors.Is(err, runtime.ErrVersionConflict), errors.Is(err, runtime.ErrIdempotencyCollision):
 		status = http.StatusConflict
 	}
 	http.Error(w, http.StatusText(status), status)
