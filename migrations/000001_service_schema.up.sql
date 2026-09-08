@@ -4368,6 +4368,27 @@ CREATE TABLE public.session_migration_mutation (
     CONSTRAINT session_migration_mutation_version_check CHECK ((version >= 1))
 );
 
+-- Idempotency receipt for applying an opaque trpc-agent-go Session snapshot
+-- to a target PostgreSQL binding. This is intentionally separate from the
+-- source-side repair queue above: source and target can be different DBs.
+CREATE TABLE public.session_sdk_migration_apply (
+    tenant_id text NOT NULL,
+    migration_id text NOT NULL,
+    agent_app_id text NOT NULL,
+    session_id text NOT NULL,
+    mutation_id text NOT NULL,
+    epoch bigint NOT NULL,
+    source_version bigint NOT NULL,
+    snapshot_digest text NOT NULL,
+    target_version bigint NOT NULL,
+    applied_at timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, migration_id, agent_app_id, session_id, mutation_id),
+    CONSTRAINT session_sdk_migration_apply_epoch_check CHECK (epoch >= 1),
+    CONSTRAINT session_sdk_migration_apply_source_version_check CHECK (source_version >= 0),
+    CONSTRAINT session_sdk_migration_apply_target_version_check CHECK (target_version >= 0),
+    CONSTRAINT session_sdk_migration_apply_digest_check CHECK (snapshot_digest ~ '^[0-9a-f]{64}$')
+);
+
 
 --
 -- Name: session_summary; Type: TABLE; Schema: public; Owner: -
