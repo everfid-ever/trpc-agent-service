@@ -66,6 +66,16 @@ wait_ready "${port_b}"
 # slice provisions tenant A and tenant B, runs two Redis-backed Workers, and
 # rejects cross-tenant state while exercising real PostgreSQL/Redis adapters.
 compose_runtime run --rm runtime-test
-compose stop webui-node-a
+# Exercise an ungraceful real-process loss rather than a cooperative shutdown:
+# a surviving node must retain readiness after Docker sends SIGKILL to node A.
+node_a_id="$(compose ps -q webui-node-a)"
+[[ -n "${node_a_id}" ]] || { echo "webui-node-a container was not created" >&2; exit 1; }
+compose kill -s SIGKILL webui-node-a
+for _ in $(seq 1 15); do
+  [[ "$(docker inspect -f '{{.State.Running}}' "${node_a_id}")" == "false" ]] && break
+  sleep 1
+done
+[[ "$(docker inspect -f '{{.State.Running}}' "${node_a_id}")" == "false" ]] || { echo "webui-node-a survived SIGKILL" >&2; exit 1; }
+[[ "$(docker inspect -f '{{.State.ExitCode}}' "${node_a_id}")" == "137" ]] || { echo "webui-node-a exit code was not SIGKILL" >&2; exit 1; }
 wait_ready "${port_b}"
-echo "local multi-tenant, multi-node smoke passed: two tenant Worker slice passed; node-a stopped; node-b remained ready"
+echo "local multi-tenant, multi-node fault smoke passed: two tenant Worker slice passed; node-a SIGKILLed; node-b remained ready"

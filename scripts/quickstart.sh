@@ -47,12 +47,9 @@ run_demo() {
   echo "[4/6] Verifying the complete empty-database migration history"
   migration_versions="$(docker compose -p "$demo_project" -f "$ROOT/deploy/compose/docker-compose.backend-smoke.yml" exec -T postgres \
     psql -U trpc -d postgres -Atc 'SELECT version FROM public.schema_migrations ORDER BY version')"
-  # The demo starts from an empty database, so this exact ordered history is a
-  # compatibility gate for the embedded migration contract.
-  [[ "$migration_versions" == "000001
-000002
-000003
-000004" ]] || { echo "Unexpected schema migration history: ${migration_versions:-<empty>}" >&2; exit 1; }
+  # A first-delivery demo starts from an empty database and must apply exactly
+  # the consolidated schema baseline, not a stale or partially applied schema.
+  [[ "$migration_versions" == "000001" ]] || { echo "Unexpected schema migration history: ${migration_versions:-<empty>}" >&2; exit 1; }
   if docker container inspect "$demo_container" >/dev/null 2>&1; then
     demo_label="$(docker inspect -f '{{index .Config.Labels "trpc-agent-service.demo"}}' "$demo_container")"
     [[ "$demo_label" == "$demo_project" ]] || { echo "Refusing to replace unrelated container: $demo_container" >&2; exit 1; }
@@ -86,7 +83,7 @@ run_demo() {
 Demo acceptance complete
   HTTP: http://127.0.0.1:${demo_port}
   Health: /healthz and /readyz passed
-  Schema: empty database applied migrations 000001 through 000004
+  Schema: empty database applied the consolidated migration 000001
   Chat: /v1/chat returned the deterministic fake response
   Stream: /v1/chat emitted the deterministic fake delta sequence over SSE
   Coverage: docs/runbook/demo-fake-coverage.md

@@ -89,6 +89,7 @@ services:
     working_dir: /src
     volumes: [../..:/src:ro]
     environment:
+      TRPC_E2E_SUITE: ${TRPC_E2E_SUITE:-all}
       TRPC_MIGRATION_TEST: "1"
       TRPC_RUNTIME_TEST: "1"
       TRPC_POSTGRES_ADMIN_DSN: postgres://trpc:trpc_test_password@postgres:5432/postgres?sslmode=disable

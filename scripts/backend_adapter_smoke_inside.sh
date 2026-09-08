@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-for name in TRPC_MIGRATION_TEST TRPC_POSTGRES_ADMIN_DSN TRPC_REDIS_TEST_ADDR TRPC_QDRANT_TEST_ENDPOINT TRPC_MINIO_TEST_ENDPOINT TRPC_VAULT_TEST_ENDPOINT TRPC_VAULT_TEST_TOKEN; do
+suite="${TRPC_E2E_SUITE:-all}"
+case "${suite}" in
+  all|migration|runtime|storage) ;;
+  *) echo "TRPC_E2E_SUITE must be all, migration, runtime, or storage" >&2; exit 2 ;;
+esac
+
+for name in TRPC_MIGRATION_TEST TRPC_POSTGRES_ADMIN_DSN; do
   [[ -n "${!name:-}" ]] || { echo "${name} is required" >&2; exit 2; }
 done
 
@@ -21,49 +27,52 @@ download_modules() {
   return 1
 }
 
-# The Qdrant image has no shell HTTP client, so readiness is asserted here
-# rather than by a container healthcheck.
-for _ in $(seq 1 60); do
-  curl -fsS "${TRPC_QDRANT_TEST_ENDPOINT}/healthz" >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -fsS "${TRPC_QDRANT_TEST_ENDPOINT}/healthz" >/dev/null
-
-for _ in $(seq 1 60); do
-  curl -fsS "${TRPC_MINIO_TEST_ENDPOINT}/minio/health/live" >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -fsS "${TRPC_MINIO_TEST_ENDPOINT}/minio/health/live" >/dev/null
-
-# Seed the disposable Vault dev server with the synthetic secret that the
-# integration test reads back (KV v2 path secret/data/model).
-curl -fsS -X POST \
-  -H "X-Vault-Token: ${TRPC_VAULT_TEST_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"data":{"value":"integration-secret"}}' \
-  "${TRPC_VAULT_TEST_ENDPOINT}/v1/secret/data/model" >/dev/null
-
 download_modules
-go run ./cmd/postgres-migration-test
-# Redis is provisioned by this job as well; do not permit its opt-in contract
-# tests to turn into a green build merely because an address was not wired.
-bash scripts/test_no_skip.sh ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
-TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test
-bash scripts/test_no_skip.sh ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant ./trpcservice/storage/objectstore/s3
-# The operator role itself stays bounded and needs no production credentials in
-# this disposable environment. Its transition/journal suite is nevertheless a
-# required member of the same real-backend integration job, rather than a
-# developer-only test that CI can silently omit.
-go test -count=1 ./cmd/trpc-service ./trpcservice/migration/...
 
-# These are real, opt-in integration tests: the surrounding Compose job has
-# supplied PostgreSQL 16, Redis 7, Qdrant and Vault endpoints, so their usual
-# environment-based skips cannot hide an unavailable backend. They deliberately
-# use the same public tRPC-Agent-Go adapters that the Worker wires at runtime.
-go test -count=1 \
-  ./trpcservice/admin \
-  ./trpcservice/agent \
-  ./trpcservice/agent/condition \
-  ./trpcservice/skill \
-  ./trpcservice/storage/knowledge \
-  ./trpcservice/tool/codeexec
+run_migration() {
+  # The Compose image also serves runtime-e2e. Explicitly suppress its opt-in
+  # Redis slice here so migration-e2e remains a PostgreSQL-only dependency.
+  TRPC_RUNTIME_TEST=0 go run ./cmd/postgres-migration-test
+  # The operator role stays bounded and needs no production credentials in this
+  # disposable environment. Its transition/journal suite is nevertheless a
+  # required real-backend gate, never an optional developer-only check.
+  go test -count=1 ./cmd/trpc-service ./trpcservice/migration/...
+}
+
+run_runtime() {
+  [[ -n "${TRPC_REDIS_TEST_ADDR:-}" ]] || { echo "TRPC_REDIS_TEST_ADDR is required" >&2; exit 2; }
+  # Do not permit opt-in contracts to turn into green builds because a Redis
+  # address or the runtime slice was accidentally omitted.
+  bash scripts/test_no_skip.sh ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
+  TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test
+  go test -count=1 ./trpcservice/admin ./trpcservice/agent ./trpcservice/agent/condition
+}
+
+run_storage() {
+  for name in TRPC_QDRANT_TEST_ENDPOINT TRPC_MINIO_TEST_ENDPOINT TRPC_VAULT_TEST_ENDPOINT TRPC_VAULT_TEST_TOKEN; do
+    [[ -n "${!name:-}" ]] || { echo "${name} is required" >&2; exit 2; }
+  done
+  # Qdrant has no shell HTTP client, so readiness is asserted by the smoke
+  # runner. MinIO and Vault receive the same real protocol checks.
+  for _ in $(seq 1 60); do
+    curl -fsS "${TRPC_QDRANT_TEST_ENDPOINT}/healthz" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS "${TRPC_QDRANT_TEST_ENDPOINT}/healthz" >/dev/null
+  for _ in $(seq 1 60); do
+    curl -fsS "${TRPC_MINIO_TEST_ENDPOINT}/minio/health/live" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS "${TRPC_MINIO_TEST_ENDPOINT}/minio/health/live" >/dev/null
+  curl -fsS -X POST -H "X-Vault-Token: ${TRPC_VAULT_TEST_TOKEN}" -H "Content-Type: application/json" \
+    -d '{"data":{"value":"integration-secret"}}' "${TRPC_VAULT_TEST_ENDPOINT}/v1/secret/data/model" >/dev/null
+  bash scripts/test_no_skip.sh ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant ./trpcservice/storage/objectstore/s3
+  go test -count=1 ./trpcservice/skill ./trpcservice/storage/knowledge ./trpcservice/tool/codeexec
+}
+
+case "${suite}" in
+  migration) run_migration ;;
+  runtime) run_runtime ;;
+  storage) run_storage ;;
+  all) run_migration; run_runtime; run_storage ;;
+esac

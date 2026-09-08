@@ -130,7 +130,7 @@ bash scripts/local_dependency_recovery_smoke.sh
 ## 7. 最终验收清单
 
 - [ ] `ci_admission.sh` 和最小后端 smoke 通过。
-- [ ] 两租户、两 Worker、节点 A 停止后节点 B 存活的 `local_multinode_smoke.sh` 通过。
+- [ ] 两租户、两 Worker、节点 A 被 `SIGKILL`（exit 137）后节点 B 存活的 `local_multinode_smoke.sh` 通过。
 - [ ] 下列定向恢复契约通过：
 
   ```bash

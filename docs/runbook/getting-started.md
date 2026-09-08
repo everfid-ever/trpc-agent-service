@@ -332,7 +332,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 bash scripts/local_multinode_smoke.sh
 ```
 
-该 smoke 使用随机 Compose 项目和随机本机端口。它先在临时 PostgreSQL 16 数据库中创建两个 tenant、运行两个 Redis-backed Worker 并验证 tenant scope，再依次确认 node A、node B 的 `/readyz`，停止 node A，确认 node B 保持 ready。成功后自动删除本次容器和卷；失败日志路径会打印到终端。若要手动查看两个节点页面：
+该 smoke 使用随机 Compose 项目和随机本机端口。它先在临时 PostgreSQL 16 数据库中创建两个 tenant、运行两个 Redis-backed Worker 并验证 tenant scope，再依次确认 node A、node B 的 `/readyz`，向 node A 的真实容器发送 `SIGKILL` 并断言 exit code 为 137，随后确认 node B 保持 ready。成功后自动删除本次容器和卷；失败日志路径会打印到终端。若要手动查看两个节点页面：
 
 ```bash
 docker compose -f deploy/compose/docker-compose.local.yml \
