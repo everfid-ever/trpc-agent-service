@@ -53,7 +53,7 @@ jobs:
           cache: false
       - name: Enforce repository and changed-line coverage
         env:
-          TRPC_MIN_TOTAL_COVERAGE: '40.0'
+          TRPC_MIN_TOTAL_COVERAGE: '41.0'
           TRPC_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: bash scripts/coverage_gate.sh
 

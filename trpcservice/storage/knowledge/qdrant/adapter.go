@@ -24,10 +24,29 @@ import (
 )
 
 // TokenSource resolves a Qdrant API key at request time. Production callers
-// should implement it with a tenant-scoped secret provider; Adapter never
-// retains the secret after the request finishes.
+// should implement it with a tenant-scoped secret provider. The SDK runtime
+// resolves it on every operation and retains a client only while that exact
+// token remains current; rotation or Close retires the old client.
 type TokenSource interface {
 	Token(context.Context) (string, error)
+}
+
+// SDKSearchObservation exposes the unavoidable public-SDK retrieval shape:
+// Search returns the payload but not vectors, so each candidate needs Get to
+// verify the migration image digest. It deliberately contains no tenant,
+// knowledge or token data, keeping metrics low-cardinality and secret-free.
+type SDKSearchObservation struct {
+	Duration       time.Duration
+	CandidateCount int
+	GetCalls       int
+	Failed         bool
+}
+
+// SDKSearchObserver is optional instrumentation owned by the composition
+// root. The Qdrant adapter depends only on this small contract rather than a
+// concrete metrics implementation.
+type SDKSearchObserver interface {
+	ObserveSDKSearch(context.Context, SDKSearchObservation)
 }
 
 type Config struct {
@@ -53,6 +72,7 @@ type Config struct {
 	AllowInsecureHTTP bool
 	HTTPClient        *http.Client
 	TokenSource       TokenSource
+	SDKSearchObserver SDKSearchObserver
 }
 
 // Embedder supplies query vectors for migration sample probes. It is kept
@@ -71,6 +91,7 @@ type Adapter struct {
 	grpcPort          int
 	client            *http.Client
 	tokens            TokenSource
+	sdkSearchObserver SDKSearchObserver
 	embedder          Embedder
 }
 
@@ -104,7 +125,13 @@ func New(config Config, embedder Embedder) (*Adapter, error) {
 	return &Adapter{endpoint: endpoint, collection: config.Collection, vectorSize: config.VectorSize,
 		snapshotWatermark: config.SnapshotWatermark, vectorGeneration: config.VectorGeneration,
 		runtimeEngine: config.RuntimeEngine, grpcPort: config.GRPCPort,
-		client: config.HTTPClient, tokens: config.TokenSource, embedder: embedder}, nil
+		client: config.HTTPClient, tokens: config.TokenSource, sdkSearchObserver: config.SDKSearchObserver, embedder: embedder}, nil
+}
+
+func (a *Adapter) observeSDKSearch(ctx context.Context, observation SDKSearchObservation) {
+	if a != nil && a.sdkSearchObserver != nil {
+		a.sdkSearchObserver.ObserveSDKSearch(ctx, observation)
+	}
 }
 
 func (a *Adapter) LoadChunk(ctx context.Context, key knowledgedriver.ChunkKey) (knowledgedriver.ChunkImage, error) {
@@ -156,15 +183,10 @@ func (a *Adapter) ApplyChunk(ctx context.Context, in knowledgedriver.ApplyReques
 	} else if !errors.Is(err, runtime.ErrNotFound) {
 		return knowledgedriver.ApplyResult{}, err
 	}
-	payload := encodeImage(in.Image)
+	payload := encodeImage(in.Image, digest, a.snapshotWatermark)
 	payload["mutation_id"] = in.MutationID
 	payload["migration_id"] = in.MigrationID
 	payload["migration_epoch"] = in.Epoch
-	payload["image_digest"] = digest
-	payload["snapshot_watermark"] = a.snapshotWatermark
-	sdkScope := payload["metadata"].(map[string]any)[sdkScopeMetadataKey].(map[string]any)
-	sdkScope["image_digest"] = digest
-	sdkScope["snapshot_watermark"] = a.snapshotWatermark
 	vector := in.Image.Vector
 	if in.Image.Operation == knowledgedriver.OperationDelete {
 		vector = make([]float32, a.vectorSize)
@@ -502,7 +524,7 @@ func validKey(key knowledgedriver.ChunkKey) bool {
 
 const sdkScopeMetadataKey = "__trpc_agent_service_scope"
 
-func encodeImage(image knowledgedriver.ChunkImage) map[string]any {
+func encodeImage(image knowledgedriver.ChunkImage, imageDigest, snapshotWatermark string) map[string]any {
 	metadata := make(map[string]any, len(image.Metadata)+1)
 	for key, value := range image.Metadata {
 		metadata[key] = value
@@ -510,22 +532,27 @@ func encodeImage(image knowledgedriver.ChunkImage) map[string]any {
 	// The SDK Qdrant implementation scopes filters below "metadata.". Keep a
 	// namespaced mirror of immutable routing facts there while retaining the
 	// top-level migration envelope as the authority for read-back verification.
-	metadata[sdkScopeMetadataKey] = map[string]any{
-		"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID,
-		"knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID,
-		"revision": image.Revision, "operation": string(image.Operation),
-		"source_digest": image.SourceDigest, "content_digest": image.ContentDigest,
-		"metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID,
-		"embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration,
-	}
+	metadata[sdkScopeMetadataKey] = encodeSDKMirrorScope(image, imageDigest, snapshotWatermark)
 	name, _ := image.Metadata["title"]
-	return map[string]any{"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID, "knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID, "revision": image.Revision, "operation": string(image.Operation), "source_digest": image.SourceDigest, "content_digest": image.ContentDigest, "metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID, "embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration, "content": image.Content, "metadata": metadata,
+	return map[string]any{"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID, "knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID, "revision": image.Revision, "operation": string(image.Operation), "source_digest": image.SourceDigest, "content_digest": image.ContentDigest, "metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID, "embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration, "content": image.Content, "metadata": metadata, "image_digest": imageDigest, "snapshot_watermark": snapshotWatermark,
 		// These are the public trpc-agent-go Qdrant payload fields. They make a
 		// newly migrated collection directly consumable by the SDK implementation.
 		// Keep the point ID as the SDK document ID. Our migration key includes
 		// tenant and knowledge version, whereas the SDK's generic document ID
 		// does not; this avoids cross-scope UUID collisions in one collection.
 		"original_id": pointID(image.Key), "name": name}
+}
+
+func encodeSDKMirrorScope(image knowledgedriver.ChunkImage, imageDigest, snapshotWatermark string) map[string]any {
+	return map[string]any{
+		"tenant_id": image.Key.TenantID, "knowledge_id": image.Key.KnowledgeID,
+		"knowledge_version": image.Key.KnowledgeVersion, "chunk_id": image.Key.ChunkID,
+		"revision": image.Revision, "operation": string(image.Operation),
+		"source_digest": image.SourceDigest, "content_digest": image.ContentDigest,
+		"metadata_digest": image.MetadataDigest, "embedding_profile_id": image.EmbeddingProfileID,
+		"embedding_version": image.EmbeddingVersion, "vector_generation": image.VectorGeneration,
+		"image_digest": imageDigest, "snapshot_watermark": snapshotWatermark,
+	}
 }
 func decodeImage(payload map[string]any, vector []float32) (knowledgedriver.ChunkImage, error) {
 	tenant, ok := text(payload, "tenant_id")

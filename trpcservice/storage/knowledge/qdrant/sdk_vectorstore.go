@@ -2,9 +2,12 @@ package qdrant
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"math"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
@@ -50,6 +53,20 @@ type sdkReadOnlyVectorStore struct {
 	adapter  *Adapter
 	scope    RuntimeScope
 	newStore sdkStoreFactory
+
+	mu     sync.Mutex
+	active *leasedSDKStore
+	closed bool
+}
+
+// leasedSDKStore keeps an official SDK client alive while in-flight requests
+// use it. A token rotation retires the old lease rather than closing its gRPC
+// connection underneath a search that has already been admitted.
+type leasedSDKStore struct {
+	tokenFingerprint [sha256.Size]byte
+	store            vectorstore.VectorStore
+	uses             int
+	retired          bool
 }
 
 func newSDKReadOnlyVectorStore(adapter *Adapter, scope RuntimeScope, factory sdkStoreFactory) (*sdkReadOnlyVectorStore, error) {
@@ -127,7 +144,13 @@ func (s *sdkReadOnlyVectorStore) Search(ctx context.Context, query *vectorstore.
 	}
 	// The official implementation receives only its public filter contract.
 	// Immutable scope facts live under metadata because that is the SDK's
-	// documented Qdrant payload convention.
+	// documented Qdrant payload convention. Its Search result includes payload
+	// but omits vectors, while ImageDigest covers vectors; the public interface
+	// has no batch Get. Preserve the one Get per candidate fail-closed check and
+	// expose its cost through SDKSearchObserver/Benchmark rather than bypassing
+	// the official SDK with a private Qdrant client.
+	started := time.Now()
+	getCalls := 0
 	var candidates []sdkCandidate
 	err := s.withStore(ctx, func(store vectorstore.VectorStore) error {
 		result, err := s.searchSDK(ctx, store, query, limit)
@@ -140,6 +163,7 @@ func (s *sdkReadOnlyVectorStore) Search(ctx context.Context, query *vectorstore.
 				return runtime.ErrInvariantViolation
 			}
 			doc, vector, err := store.Get(ctx, scored.Document.ID)
+			getCalls++
 			if err != nil {
 				return err
 			}
@@ -151,6 +175,7 @@ func (s *sdkReadOnlyVectorStore) Search(ctx context.Context, query *vectorstore.
 		}
 		return nil
 	})
+	s.adapter.observeSDKSearch(ctx, SDKSearchObservation{Duration: time.Since(started), CandidateCount: len(candidates), GetCalls: getCalls, Failed: err != nil})
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +198,24 @@ func (s *sdkReadOnlyVectorStore) Search(ctx context.Context, query *vectorstore.
 	return out, nil
 }
 
-func (s *sdkReadOnlyVectorStore) Close() error { return nil }
+func (s *sdkReadOnlyVectorStore) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	s.closed = true
+	entry := s.active
+	s.active = nil
+	if entry != nil {
+		entry.retired = true
+	}
+	closeNow := entry != nil && entry.uses == 0
+	s.mu.Unlock()
+	if closeNow {
+		return entry.store.Close()
+	}
+	return nil
+}
 
 type sdkCandidate struct {
 	image knowledgedriver.ChunkImage
@@ -277,11 +319,11 @@ func (s *sdkReadOnlyVectorStore) imageFromSDKDocument(doc *document.Document, ve
 		if key == sdkScopeMetadataKey {
 			continue
 		}
-		text, ok := value.(string)
+		stringValue, ok := value.(string)
 		if !ok {
 			return knowledgedriver.ChunkImage{}, runtime.ErrInvariantViolation
 		}
-		metadata[key] = text
+		metadata[key] = stringValue
 	}
 	image := knowledgedriver.ChunkImage{Key: knowledgedriver.ChunkKey{TenantID: tenant, KnowledgeID: knowledgeID, KnowledgeVersion: version, ChunkID: chunkID}, Revision: revision, Operation: knowledgedriver.Operation(operation), SourceDigest: sourceDigest, ContentDigest: contentDigest, MetadataDigest: metadataDigest, EmbeddingProfileID: profile, EmbeddingVersion: embeddingVersion, VectorGeneration: generation, Content: doc.Content, Metadata: metadata, Vector: float32Vector(vector)}
 	if image.Operation == knowledgedriver.OperationDelete {
@@ -320,13 +362,73 @@ func (s *sdkReadOnlyVectorStore) withStore(ctx context.Context, use func(vectors
 		}
 		token = value
 	}
+	entry, err := s.acquireStore(ctx, token)
+	if err != nil {
+		return err
+	}
+	defer s.releaseStore(entry)
+	return use(entry.store)
+}
+
+func (s *sdkReadOnlyVectorStore) acquireStore(ctx context.Context, token string) (*leasedSDKStore, error) {
+	tokenFingerprint := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	if s.active != nil && s.active.tokenFingerprint == tokenFingerprint && !s.active.retired {
+		s.active.uses++
+		entry := s.active
+		s.mu.Unlock()
+		return entry, nil
+	}
+	s.mu.Unlock()
+
 	store, err := s.newStore(ctx, sdkStoreConfig{host: s.adapter.endpoint.Hostname(), port: s.adapter.grpcPort,
 		tls: s.adapter.endpoint.Scheme == "https", apiKey: token, collection: s.adapter.collection, dimension: s.adapter.vectorSize})
 	if err != nil {
-		return fmt.Errorf("initialize official Qdrant vector store: %w", err)
+		return nil, fmt.Errorf("initialize official Qdrant vector store: %w", err)
 	}
-	defer store.Close()
-	return use(store)
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = store.Close()
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	if s.active != nil && s.active.tokenFingerprint == tokenFingerprint && !s.active.retired {
+		s.active.uses++
+		entry := s.active
+		s.mu.Unlock()
+		_ = store.Close()
+		return entry, nil
+	}
+	old := s.active
+	if old != nil {
+		old.retired = true
+	}
+	entry := &leasedSDKStore{tokenFingerprint: tokenFingerprint, store: store, uses: 1}
+	s.active = entry
+	closeOld := old != nil && old.uses == 0
+	s.mu.Unlock()
+	if closeOld {
+		_ = old.store.Close()
+	}
+	return entry, nil
+}
+
+func (s *sdkReadOnlyVectorStore) releaseStore(entry *leasedSDKStore) {
+	if entry == nil {
+		return
+	}
+	s.mu.Lock()
+	entry.uses--
+	closeNow := entry.retired && entry.uses == 0
+	s.mu.Unlock()
+	if closeNow {
+		_ = entry.store.Close()
+	}
 }
 
 var _ vectorstore.VectorStore = (*sdkReadOnlyVectorStore)(nil)

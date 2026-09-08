@@ -5,7 +5,7 @@
 # do not have a trustworthy base revision.
 set -euo pipefail
 
-minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-40.0}"
+minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-41.0}"
 base_sha="${TRPC_DIFF_BASE_SHA:-}"
 coverage_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage.XXXXXX")"
 changed_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage-diff.XXXXXX")"
