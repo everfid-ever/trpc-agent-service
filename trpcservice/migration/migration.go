@@ -37,6 +37,71 @@ type Verification struct {
 	SourceWatermark, TargetWatermark, SampleDigest string
 }
 
+// SessionSwitchMetadata carries the operator attribution attached to a
+// session backend pointer change. It lives in migration rather than a storage
+// driver so control-plane consumers do not depend on data-plane packages.
+type SessionSwitchMetadata struct {
+	SwitchID, ActorID, ReasonCode, CorrelationID, TraceID, Traceparent string
+}
+
+// SessionCutoverRequest, SessionObserveRequest, SessionRollbackRequest and
+// SessionCleanupRequest are the migration control-plane contract for an
+// atomic Session backend switch. Session drivers may implement this contract,
+// but Admin and orchestration deliberately depend only on this package.
+type SessionCutoverRequest struct {
+	TenantID, MigrationID                  string
+	ExpectedTenantVersion, ExpectedVersion int64
+	Verification                           Verification
+	At                                     time.Time
+	Metadata                               SessionSwitchMetadata
+}
+
+type SessionObserveRequest struct {
+	TenantID, MigrationID                  string
+	ExpectedTenantVersion, ExpectedVersion int64
+	At, ObserveUntil                       time.Time
+}
+
+type SessionRollbackRequest struct {
+	TenantID, MigrationID                  string
+	ExpectedTenantVersion, ExpectedVersion int64
+	RollbackSyncWatermark                  string
+	At                                     time.Time
+	Metadata                               SessionSwitchMetadata
+}
+
+type SessionCleanupRequest struct {
+	TenantID, MigrationID                  string
+	ExpectedTenantVersion, ExpectedVersion int64
+	RollbackSyncWatermark                  string
+	At                                     time.Time
+}
+
+type SessionSwitchResult struct {
+	Migration           Migration
+	TenantVersion       int64
+	ActiveConfigVersion int64
+	RolledBack          bool
+}
+
+type SessionDrainStatus struct {
+	SourceInFlight, TargetInFlight         int64
+	ForwardOutstanding, ReverseOutstanding int64
+	ActiveConfigVersion                    int64
+	RolledBack                             bool
+}
+
+// SessionCutoverPublisher owns the atomic tenant configuration pointer
+// changes. BeginObserve and Cleanup use the same authority so dispatch cannot
+// race their lifecycle gates.
+type SessionCutoverPublisher interface {
+	Cutover(context.Context, SessionCutoverRequest) (SessionSwitchResult, error)
+	BeginObserve(context.Context, SessionObserveRequest) (SessionSwitchResult, error)
+	Rollback(context.Context, SessionRollbackRequest) (SessionSwitchResult, error)
+	Cleanup(context.Context, SessionCleanupRequest) (SessionSwitchResult, error)
+	DrainStatus(context.Context, string, string) (SessionDrainStatus, error)
+}
+
 type Migration struct {
 	TenantID, MigrationID, Domain string
 	Epoch                         int64

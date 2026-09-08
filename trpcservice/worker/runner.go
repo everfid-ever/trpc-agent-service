@@ -52,11 +52,11 @@ type ConfirmedToolResolver interface {
 }
 
 type RunnerExecutor struct {
-	Tasks             gateway.TaskStore
-	Profiles          profile.ExecutionProfileResolver
-	Bundles           profile.RuntimeBundleManager
-	Sessions          sessionstore.AtomicSessionStore
-	SessionServices   sessionstore.ServiceResolver
+	Tasks           gateway.TaskStore
+	Profiles        profile.ExecutionProfileResolver
+	Bundles         profile.RuntimeBundleManager
+	Sessions        sessionstore.AtomicSessionStore
+	SessionServices profile.SessionServiceResolver
 	// SDKSessions is retained only for in-memory and narrowly scoped callers.
 	// Production roles must set SessionServices so an immutable ConfigSnapshot
 	// selects the framework-owned session backend for every turn.

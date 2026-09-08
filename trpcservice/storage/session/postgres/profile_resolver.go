@@ -9,7 +9,6 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
-	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 	sessionpostgres "trpc.group/trpc-go/trpc-agent-go/session/postgres"
 )
@@ -162,4 +161,4 @@ func requiresCapability(required []string, capability string) bool {
 	return false
 }
 
-var _ sessionstore.ServiceResolver = (*ProfileServiceResolver)(nil)
+var _ profile.SessionServiceResolver = (*ProfileServiceResolver)(nil)

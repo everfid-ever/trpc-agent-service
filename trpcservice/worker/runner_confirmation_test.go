@@ -21,7 +21,6 @@ import (
 	messagingmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/inmemory"
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	sessionmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/inmemory"
-	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
 	checkpointmemory "trpc.group/trpc-go/trpc-agent-go/graph/checkpoint/inmemory"
 	"trpc.group/trpc-go/trpc-agent-go/model"

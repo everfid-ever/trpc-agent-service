@@ -25,9 +25,9 @@ import (
 // publish a tenant ConfigSnapshot or switch traffic by itself.
 type sessionMigrationConfig struct {
 	ControlDSN, TenantID, MigrationID, WorkerID string
-	Connections                                      map[string]string
-	BatchLimit, RepairLimit                          int
-	Lease, RetryDelay, Timeout                       time.Duration
+	Connections                                 map[string]string
+	BatchLimit, RepairLimit                     int
+	Lease, RetryDelay, Timeout                  time.Duration
 }
 
 func loadSessionMigrationConfig(getenv func(string) string) (sessionMigrationConfig, error) {
@@ -149,9 +149,9 @@ func runSessionMigrate(parent context.Context, getenv func(string) string, logge
 	driver := sessiondriver.Driver{
 		Authority: authority, Ledger: sessionmigrationpostgres.New(controlDB),
 		Source: source, Backfill: source,
-		Target: sessionmigrationpostgres.NewReplica(targetDB),
-		ReverseSource: sessionmigrationpostgres.NewSplitSource(controlDB, targetDB),
-		ReverseTarget: sessionmigrationpostgres.NewSDKReplica(sourceDB),
+		Target:          sessionmigrationpostgres.NewReplica(targetDB),
+		ReverseSource:   sessionmigrationpostgres.NewSplitSource(controlDB, targetDB),
+		ReverseTarget:   sessionmigrationpostgres.NewSDKReplica(sourceDB),
 		SourceInventory: source,
 		TargetInventory: sessionmigrationpostgres.NewSource(targetDB),
 	}

@@ -8,6 +8,7 @@ import (
 	sessionstore "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session"
 	sessionmemory "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/inmemory"
 	agentevent "trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 	agentsession "trpc.group/trpc-go/trpc-agent-go/session"
 	agentmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
@@ -33,7 +34,10 @@ func TestBufferedTurnPersistsSessionEffectsThroughOfficialService(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	event := &agentevent.Event{ID: "event-1", StateDelta: map[string][]byte{"answer": []byte(`"ready"`)}}
+	if err := turn.SessionService().AppendEvent(ctx, session, durableEvent("event-0", model.RoleUser, "input", nil)); err != nil {
+		t.Fatal(err)
+	}
+	event := durableEvent("event-1", model.RoleAssistant, "ready", map[string][]byte{"answer": []byte(`"ready"`)})
 	if err := turn.SessionService().AppendEvent(ctx, session, event); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +45,7 @@ func TestBufferedTurnPersistsSessionEffectsThroughOfficialService(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Events) != 1 || string(base.State["answer"]) != `"ready"` {
+	if len(base.Events) != 2 || string(base.State["answer"]) != `"ready"` {
 		t.Fatalf("SDK session effects not persisted: %#v", base)
 	}
 	_, err = turn.Commit(ctx, sessionstore.CommitTurnRequest{RequestID: "request", CommitID: "request:terminal:0", Stage: "terminal", InputSeq: 1, Fence: 1, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded})
@@ -71,14 +75,17 @@ func TestBufferedTurnRollbackOnlyDropsCoordinationMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := turn.SessionService().AppendEvent(ctx, session, &agentevent.Event{ID: "event-1"}); err != nil {
+	if err := turn.SessionService().AppendEvent(ctx, session, durableEvent("event-0", model.RoleUser, "input", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := turn.SessionService().AppendEvent(ctx, session, durableEvent("event-1", model.RoleAssistant, "ready", nil)); err != nil {
 		t.Fatal(err)
 	}
 	if err := turn.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
 	base, err := backing.GetSession(ctx, key)
-	if err != nil || len(base.Events) != 1 {
+	if err != nil || len(base.Events) != 2 {
 		t.Fatalf("SDK event unexpectedly rolled back: session=%#v err=%v", base, err)
 	}
 }
@@ -100,7 +107,10 @@ func TestDurableBufferedTurnRestoresCommittedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.SessionService().AppendEvent(ctx, session, &agentevent.Event{ID: "event-1", StateDelta: map[string][]byte{"answer": []byte(`"ready"`)}}); err != nil {
+	if err := first.SessionService().AppendEvent(ctx, session, durableEvent("event-0", model.RoleUser, "input", nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.SessionService().AppendEvent(ctx, session, durableEvent("event-1", model.RoleAssistant, "ready", map[string][]byte{"answer": []byte(`"ready"`)})); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := first.Commit(ctx, sessionstore.CommitTurnRequest{RequestID: "request-1", CommitID: "request-1:terminal:0", Stage: "terminal", InputSeq: 1, Fence: 1, ExpectedVersion: head.Version, Outcome: runtime.OutcomeSucceeded}); err != nil {
@@ -117,7 +127,15 @@ func TestDurableBufferedTurnRestoresCommittedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(restored.Events) != 1 || restored.Events[0].ID != "event-1" || string(restored.State["answer"]) != `"ready"` {
+	if len(restored.Events) != 2 || restored.Events[1].ID != "event-1" || string(restored.State["answer"]) != `"ready"` {
 		t.Fatalf("restored=%#v", restored)
 	}
+}
+
+// durableEvent mirrors the event shape the official trpc-agent-go Session
+// services persist: a completed response plus any StateDelta. Metadata-only
+// events intentionally update state without entering the transcript.
+func durableEvent(id string, role model.Role, content string, delta map[string][]byte) *agentevent.Event {
+	return &agentevent.Event{ID: id, Response: &model.Response{Choices: []model.Choice{{Message: model.Message{
+		Role: role, Content: content}}}}, StateDelta: delta}
 }

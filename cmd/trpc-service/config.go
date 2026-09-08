@@ -13,14 +13,14 @@ import (
 const workerHTTPShutdownBudget = 5 * time.Second
 
 type productionConfig struct {
-	ListenAddress               string
-	PostgresDSN                 string
+	ListenAddress              string
+	PostgresDSN                string
 	SessionPostgresConnections map[string]string
-	RedisAddress                string
-	RedisPassword               string
-	RedisDB                     int
-	SecretRoot                  string
-	SkillStagingRoot            string
+	RedisAddress               string
+	RedisPassword              string
+	RedisDB                    int
+	SecretRoot                 string
+	SkillStagingRoot           string
 
 	S3Region, S3Bucket, S3Endpoint string
 	S3PathStyle, S3AllowInsecure   bool

@@ -6,10 +6,11 @@ import (
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/config"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
-	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/sessiondriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 )
+
+const sessionMigrationDomain = "session"
 
 // SessionMigrationCreateInput deliberately derives the source from the active
 // ConfigSnapshot. The only operator choice is the immutable candidate config
@@ -35,8 +36,8 @@ type SessionMigrationObserveInput struct {
 }
 
 type SessionMigrationStatus struct {
-	Migration migration.Migration         `json:"migration"`
-	Drain     sessiondriver.DrainStatus   `json:"drain"`
+	Migration migration.Migration          `json:"migration"`
+	Drain     migration.SessionDrainStatus `json:"drain"`
 }
 
 func (s Service) CreateSessionMigration(ctx context.Context, principal Principal, pathTenant string, in SessionMigrationCreateInput, metadata tenant.ChangeMetadata) (migration.Migration, error) {
@@ -70,9 +71,9 @@ func (s Service) CreateSessionMigration(ctx context.Context, principal Principal
 		return migration.Migration{}, runtime.ErrCapabilityUnsupported
 	}
 	return s.Migrations.Create(ctx, migration.CreateRequest{TenantID: pathTenant, MigrationID: in.MigrationID,
-		Domain: sessiondriver.Domain, Epoch: target.ConfigVersion,
-		Source: migration.Binding{ConfigVersion: source.ConfigVersion, BackendProfileID: sourceBinding.BackendProfileID, BackendVersion: sourceBinding.BackendVersion},
-		Target: migration.Binding{ConfigVersion: target.ConfigVersion, BackendProfileID: targetBinding.BackendProfileID, BackendVersion: targetBinding.BackendVersion},
+		Domain: sessionMigrationDomain, Epoch: target.ConfigVersion,
+		Source:    migration.Binding{ConfigVersion: source.ConfigVersion, BackendProfileID: sourceBinding.BackendProfileID, BackendVersion: sourceBinding.BackendVersion},
+		Target:    migration.Binding{ConfigVersion: target.ConfigVersion, BackendProfileID: targetBinding.BackendProfileID, BackendVersion: targetBinding.BackendVersion},
 		CreatedAt: time.Now().UTC(), Audit: migration.CreateAudit{ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
 			CorrelationID: metadata.CorrelationID, TraceID: metadata.TraceID}})
 }
@@ -88,7 +89,7 @@ func (s Service) GetSessionMigration(ctx context.Context, principal Principal, p
 	if err != nil {
 		return migration.Migration{}, err
 	}
-	if value.Domain != sessiondriver.Domain {
+	if value.Domain != sessionMigrationDomain {
 		return migration.Migration{}, runtime.ErrCapabilityUnsupported
 	}
 	return value, nil
@@ -101,7 +102,7 @@ func (s Service) ListSessionMigrations(ctx context.Context, principal Principal,
 	if s.Migrations == nil {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
-	return s.Migrations.List(ctx, pathTenant, sessiondriver.Domain)
+	return s.Migrations.List(ctx, pathTenant, sessionMigrationDomain)
 }
 
 func (s Service) GetSessionMigrationStatus(ctx context.Context, principal Principal, pathTenant, migrationID string) (SessionMigrationStatus, error) {
@@ -119,49 +120,49 @@ func (s Service) GetSessionMigrationStatus(ctx context.Context, principal Princi
 	return SessionMigrationStatus{Migration: value, Drain: drain}, nil
 }
 
-func (s Service) CutoverSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (sessiondriver.SwitchResult, error) {
+func (s Service) CutoverSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (migration.SessionSwitchResult, error) {
 	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, metadata)
 	if err != nil {
-		return sessiondriver.SwitchResult{}, err
+		return migration.SessionSwitchResult{}, err
 	}
 	if current.Verification.SourceDigest == "" {
-		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+		return migration.SessionSwitchResult{}, runtime.ErrInvariantViolation
 	}
-	return s.SessionMigrationPublisher.Cutover(ctx, sessiondriver.CutoverRequest{TenantID: pathTenant, MigrationID: migrationID,
+	return s.SessionMigrationPublisher.Cutover(ctx, migration.SessionCutoverRequest{TenantID: pathTenant, MigrationID: migrationID,
 		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
 		Verification: current.Verification, At: time.Now().UTC(), Metadata: switchMetadata(in.SwitchID, metadata)})
 }
 
-func (s Service) BeginSessionMigrationObserve(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationObserveInput) (sessiondriver.SwitchResult, error) {
+func (s Service) BeginSessionMigrationObserve(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationObserveInput) (migration.SessionSwitchResult, error) {
 	if _, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, tenant.ChangeMetadata{}); err != nil {
-		return sessiondriver.SwitchResult{}, err
+		return migration.SessionSwitchResult{}, err
 	}
-	return s.SessionMigrationPublisher.BeginObserve(ctx, sessiondriver.ObserveRequest{TenantID: pathTenant, MigrationID: migrationID,
+	return s.SessionMigrationPublisher.BeginObserve(ctx, migration.SessionObserveRequest{TenantID: pathTenant, MigrationID: migrationID,
 		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion, At: time.Now().UTC(), ObserveUntil: in.ObserveUntil.UTC()})
 }
 
-func (s Service) RollbackSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (sessiondriver.SwitchResult, error) {
+func (s Service) RollbackSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput, metadata tenant.ChangeMetadata) (migration.SessionSwitchResult, error) {
 	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, metadata)
 	if err != nil {
-		return sessiondriver.SwitchResult{}, err
+		return migration.SessionSwitchResult{}, err
 	}
 	if current.Verification.TargetWatermark == "" {
-		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+		return migration.SessionSwitchResult{}, runtime.ErrInvariantViolation
 	}
-	return s.SessionMigrationPublisher.Rollback(ctx, sessiondriver.RollbackRequest{TenantID: pathTenant, MigrationID: migrationID,
+	return s.SessionMigrationPublisher.Rollback(ctx, migration.SessionRollbackRequest{TenantID: pathTenant, MigrationID: migrationID,
 		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
 		RollbackSyncWatermark: current.Verification.TargetWatermark, At: time.Now().UTC(), Metadata: switchMetadata(in.SwitchID, metadata)})
 }
 
-func (s Service) CleanupSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput) (sessiondriver.SwitchResult, error) {
+func (s Service) CleanupSessionMigration(ctx context.Context, principal Principal, pathTenant, migrationID string, in SessionMigrationSwitchInput) (migration.SessionSwitchResult, error) {
 	current, err := s.requireSessionSwitch(ctx, principal, pathTenant, migrationID, in.ExpectedMigrationVersion, tenant.ChangeMetadata{})
 	if err != nil {
-		return sessiondriver.SwitchResult{}, err
+		return migration.SessionSwitchResult{}, err
 	}
 	if current.Verification.TargetWatermark == "" {
-		return sessiondriver.SwitchResult{}, runtime.ErrInvariantViolation
+		return migration.SessionSwitchResult{}, runtime.ErrInvariantViolation
 	}
-	return s.SessionMigrationPublisher.Cleanup(ctx, sessiondriver.CleanupRequest{TenantID: pathTenant, MigrationID: migrationID,
+	return s.SessionMigrationPublisher.Cleanup(ctx, migration.SessionCleanupRequest{TenantID: pathTenant, MigrationID: migrationID,
 		ExpectedTenantVersion: in.ExpectedTenantVersion, ExpectedVersion: in.ExpectedMigrationVersion,
 		RollbackSyncWatermark: current.Verification.TargetWatermark, At: time.Now().UTC()})
 }
@@ -185,7 +186,7 @@ func (s Service) requireSessionSwitch(ctx context.Context, principal Principal, 
 func sessionBinding(value config.ConfigV1) (config.BackendBinding, bool) {
 	var binding config.BackendBinding
 	for _, candidate := range value.BackendBindings {
-		if candidate.Domain != sessiondriver.Domain {
+		if candidate.Domain != sessionMigrationDomain {
 			continue
 		}
 		if binding.Domain != "" || candidate.BackendProfileID == "" || candidate.BackendVersion < 1 || !hasCapability(candidate.Required, "atomic_turn_commit") {
@@ -205,7 +206,7 @@ func hasCapability(values []string, capability string) bool {
 	return false
 }
 
-func switchMetadata(switchID string, metadata tenant.ChangeMetadata) sessiondriver.SwitchMetadata {
-	return sessiondriver.SwitchMetadata{SwitchID: switchID, ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
+func switchMetadata(switchID string, metadata tenant.ChangeMetadata) migration.SessionSwitchMetadata {
+	return migration.SessionSwitchMetadata{SwitchID: switchID, ActorID: metadata.ActorID, ReasonCode: metadata.ReasonCode,
 		CorrelationID: metadata.CorrelationID, TraceID: metadata.TraceID}
 }
