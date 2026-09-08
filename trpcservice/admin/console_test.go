@@ -32,7 +32,7 @@ func TestConsoleServesLoginAndUsesSameOriginSessionForCatalog(t *testing.T) {
 	console := Console{API: api, Principals: principals}
 	page := httptest.NewRecorder()
 	console.ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin/", nil))
-	if page.Code != http.StatusOK || !bytes.Contains(page.Body.Bytes(), []byte("管理员登录")) || page.Header().Get("Content-Security-Policy") == "" {
+	if page.Code != http.StatusOK || !bytes.Contains(page.Body.Bytes(), []byte("管理员登录")) || !bytes.Contains(page.Body.Bytes(), []byte("Session 数据平面迁移")) || page.Header().Get("Content-Security-Policy") == "" {
 		t.Fatalf("page=%d headers=%v body=%q", page.Code, page.Header(), page.Body.String())
 	}
 	login := httptest.NewRequest(http.MethodPost, "/admin/session", bytes.NewBufferString(`{"token":"valid-token"}`))

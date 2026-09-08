@@ -120,6 +120,8 @@ POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/cleanup
 
 切换、观察、回滚与清理请求均携带 authority 的 migration version 与 tenant version；切换和回滚还需要稳定 `switch_id`，并沿用 `X-Reason-Code`、`X-Correlation-ID`、`X-Trace-ID`。切换/回滚由数据库函数在同一事务内更新 active ConfigSnapshot、写 switch journal、追加 audit/config-invalidation outbox；创建也与其 audit outbox 原子提交。rollback/cleanup 的同步 watermark 同样从 authority 中读取，不能由浏览器覆盖。
 
+同源 `/admin/` 控制台提供同一套迁移操作：输入 staged target ConfigVersion 创建、按 migration ID 查看 authority evidence/drain，再以浏览器确认执行 cutover、observe、rollback 或 cleanup。它仍使用短期 Admin Token 换取 HttpOnly Strict Cookie，所有变更由同源 CSRF 检查保护；页面不会读取或显示 Session PostgreSQL DSN。
+
 ## 2. 可选：配置一个审阅后的 MCP 工具
 
 MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。
