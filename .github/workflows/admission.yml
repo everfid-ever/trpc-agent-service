@@ -102,9 +102,19 @@ jobs:
         run: >-
           docker run --rm
           --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+          --volume "$PWD/deploy/prometheus-alerts.yml:/etc/prometheus/trpc-alerts.yml:ro"
           --entrypoint promtool
           prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
           check config /etc/prometheus/prometheus.yml
+      - name: Validate Prometheus durable-runtime alert rules
+        run: >-
+          docker run --rm
+          --volume "$PWD/deploy/prometheus-alerts.yml:/etc/prometheus/trpc-alerts.yml:ro"
+          --entrypoint promtool
+          prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+          check rules /etc/prometheus/trpc-alerts.yml
+      - name: Render Kubernetes gateway and worker base
+        run: kubectl kustomize deploy/kubernetes/base > /dev/null
       - name: Run object, vector and secret storage e2e
         run: bash scripts/backend_adapter_smoke.sh storage
 

@@ -1,6 +1,6 @@
 # 可靠性、发布与容量验收 Runbook
 
-本文把现有的 durable runtime 能力整理为可执行的本地 Docker 验收口径。全部验证在 Docker Desktop 的 PostgreSQL、Redis、Worker、OTel 与 IM profile 上完成；不要求 Kubernetes、云数据库、远端告警或生产运维资源。
+本文把现有的 durable runtime 能力整理为可执行的本地 Docker 验收口径。全部验证在 Docker Desktop 的 PostgreSQL、Redis、Worker、OTel 与 IM profile 上完成；不要求 Kubernetes、云数据库或生产运维资源。仓库同时提供仅含 `gateway`/`worker` role 的 Kubernetes base 和可由 `promtool` 校验的告警规则，二者均不携带生产凭据，也不构成远端发布或告警送达证据。
 
 ## 1. 验收范围与不可变规则
 
@@ -125,7 +125,10 @@ bash scripts/local_dependency_recovery_smoke.sh
 - 网络仅放行角色所需方向：Channel→官方 IM、Worker→Model/Tool/Storage、所有角色→PostgreSQL/Redis/OTel；默认拒绝其余流量；
 - 发布按第 4 节 canary 扩大。PDB 保证 gateway/worker 至少一个 ready 副本，Worker 不能因 HPA 缩容直接中断未 drain work。
 
-本节仅保留架构参考。当前仓库不提供 Kubernetes manifest、云数据库、告警路由或生产凭据，且这些内容不属于本项目的验收条件。
+仓库提供 [`deploy/kubernetes/base`](../../deploy/kubernetes/base/README.md) 作为 gateway/worker
+的 Kustomize 骨架，以及 [`deploy/prometheus-alerts.yml`](../../deploy/prometheus-alerts.yml)
+的六条 durable-runtime 告警规则。它们不包含云数据库、Alertmanager 路由、生产凭据或
+可直接 apply 的环境 overlay，因此不属于本项目的远端发布验收条件。
 
 ## 7. 最终验收清单
 
