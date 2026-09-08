@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -50,6 +51,7 @@ import (
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/clamav"
@@ -71,7 +73,9 @@ import (
 	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
 	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
+	serviceknowledge "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
 	knowledgepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/postgres"
+	serviceqdrant "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/qdrant"
 	messagingpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/messaging/postgres"
 	sessionpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/session/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
@@ -83,37 +87,46 @@ import (
 )
 
 const (
-	webUILocalRuntimeLockKey = "trpc-agent-service:webui-local-runtime"
-	webUILocalTenantID       = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalAppID          = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
-	webUILocalChildAppID     = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
-	webUILocalBindingID      = "local-webui"
-	webUILocalAccountID      = "local-webui"
-	webUILocalModelID        = "deepseek-local"
-	webUILocalModelVersion   = int64(2)
-	webUILocalModelName      = "deepseek-v4-flash-vision-exp"
-	webUILocalRouteKey       = "local-webui"
-	webUILocalToken          = "local-webui-token-change-me"
-	feishuLocalBindingID     = "local-feishu"
-	feishuLocalRouteKey      = "local-feishu"
-	wecomLocalBindingID      = "local-wecom"
-	wecomLocalRouteKey       = "local-wecom"
-	payloadKeyRef            = "secret://local/payload-key"
-	webUILocalInstruction    = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available. When an image content part is present, it was securely attached to this request: analyze its visible content directly and do not claim that the image or attachment was unavailable."
+	webUILocalRuntimeLockKey   = "trpc-agent-service:webui-local-runtime"
+	webUILocalTenantID         = "t_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalAppID            = "app_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+	webUILocalChildAppID       = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	webUILocalBindingID        = "local-webui"
+	webUILocalAccountID        = "local-webui"
+	webUILocalModelID          = "deepseek-local"
+	webUILocalModelVersion     = int64(2)
+	webUILocalModelName        = "deepseek-v4-flash-vision-exp"
+	webUILocalKnowledgeID      = "webui-local-knowledge"
+	webUILocalKnowledgeVersion = int64(1)
+	webUILocalEmbedderID       = "webui-local-fake-embedder"
+	webUILocalQdrantID         = "webui-local-qdrant"
+	webUILocalQdrantCollection = "webui_local_knowledge"
+	webUILocalVectorGeneration = "webui-local-v1"
+	webUILocalVectorSize       = 16
+	webUILocalSkillID          = "webui_local_guide"
+	webUILocalSkillVersion     = int64(1)
+	webUILocalRouteKey         = "local-webui"
+	webUILocalToken            = "local-webui-token-change-me"
+	feishuLocalBindingID       = "local-feishu"
+	feishuLocalRouteKey        = "local-feishu"
+	wecomLocalBindingID        = "local-wecom"
+	wecomLocalRouteKey         = "local-wecom"
+	payloadKeyRef              = "secret://local/payload-key"
+	webUILocalInstruction      = "You are a concise and helpful assistant. When the user asks to create, save, or record a note, call webui_create_note. Never claim that a note was created before the tool result is available. When an image content part is present, it was securely attached to this request: analyze its visible content directly and do not claim that the image or attachment was unavailable."
 )
 
 type webUILocalConfig struct {
-	PostgresDSN, RedisAddress, ListenAddress                   string
-	RedisEnvironment, SecretRoot, APIKeyFile, SkillStagingRoot string
-	RouteKey, Token, InstanceID, ClamAVAddress                 string
-	ExclusiveRuntime                                           bool
-	FeishuEnabled                                              bool
-	FeishuAppID, FeishuAppSecret                               string
-	FeishuVerificationToken, FeishuEncryptKey, FeishuBotOpenID string
-	WeComEnabled                                               bool
-	WeComCorpID, WeComAppSecret                                string
-	WeComCallbackToken, WeComEncodingAESKey                    string
-	WeComAgentID                                               int64
+	PostgresDSN, RedisAddress, ListenAddress                                   string
+	RedisEnvironment, SecretRoot, APIKeyFile, SkillStagingRoot, QdrantEndpoint string
+	RouteKey, Token, InstanceID, ClamAVAddress                                 string
+	ExclusiveRuntime                                                           bool
+	FeishuEnabled                                                              bool
+	FeishuAppID, FeishuAppSecret                                               string
+	FeishuVerificationToken, FeishuEncryptKey, FeishuBotOpenID                 string
+	WeComEnabled                                                               bool
+	WeComCorpID, WeComAppSecret                                                string
+	WeComCallbackToken, WeComEncodingAESKey                                    string
+	WeComAgentID                                                               int64
 }
 
 type webUILocalBootstrap struct {
@@ -497,6 +510,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 		RedisEnvironment:        valueOr(getenv("TRPC_REDIS_ENVIRONMENT"), "local-runtime"),
 		SecretRoot:              valueOr(getenv("TRPC_WEBUI_LOCAL_SECRET_ROOT"), "/tmp/trpc-webui-secrets"),
 		SkillStagingRoot:        valueOr(getenv("TRPC_WEBUI_LOCAL_SKILL_STAGING_ROOT"), "/tmp/trpc-webui-skills"),
+		QdrantEndpoint:          valueOr(getenv("TRPC_WEBUI_LOCAL_QDRANT_ENDPOINT"), "http://qdrant:6333"),
 		APIKeyFile:              valueOr(getenv("TRPC_WEBUI_DEEPSEEK_KEY_FILE"), "/run/secrets/deepseek_api_key"),
 		RouteKey:                valueOr(getenv("TRPC_WEBUI_LOCAL_ROUTE_KEY"), webUILocalRouteKey),
 		Token:                   valueOr(getenv("TRPC_WEBUI_LOCAL_TOKEN"), webUILocalToken),
@@ -517,7 +531,7 @@ func loadWebUILocalConfig(getenv func(string) string) (webUILocalConfig, error) 
 	}
 	if value.PostgresDSN == "" || value.RedisAddress == "" || strings.TrimSpace(value.Token) != value.Token || len(value.Token) < 16 ||
 		strings.TrimSpace(value.RouteKey) != value.RouteKey || value.RouteKey == "" || strings.TrimSpace(value.ClamAVAddress) != value.ClamAVAddress || value.ClamAVAddress == "" || !filepath.IsAbs(value.APIKeyFile) || !filepath.IsAbs(value.SecretRoot) ||
-		!filepath.IsAbs(value.SkillStagingRoot) || filepath.Clean(value.SkillStagingRoot) != value.SkillStagingRoot || value.SkillStagingRoot == value.SecretRoot {
+		!filepath.IsAbs(value.SkillStagingRoot) || filepath.Clean(value.SkillStagingRoot) != value.SkillStagingRoot || value.SkillStagingRoot == value.SecretRoot || value.QdrantEndpoint != "http://qdrant:6333" {
 		return webUILocalConfig{}, errors.New("required WebUI local configuration is missing or invalid")
 	}
 	if !validWebUILocalInstanceID(value.InstanceID) {
@@ -611,7 +625,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema(), provider.LocalQdrantVectorSchema())
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
@@ -688,7 +702,11 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 	if err = ensureWebUILocalModel(ctx, providers); err != nil {
 		return webUILocalBootstrap{}, err
 	}
-	root, snapshot, err = ensureWebUILocalToolControlPlane(ctx, tenants, apps, configs, governanceStore, root, snapshot)
+	skillRef, knowledgeRef, err := ensureWebUILocalKnowledgeFixture(ctx, db, providers, configValue)
+	if err != nil {
+		return webUILocalBootstrap{}, err
+	}
+	root, snapshot, err = ensureWebUILocalToolControlPlane(ctx, tenants, apps, configs, governanceStore, root, snapshot, webUILocalCapabilityRefs{skill: skillRef, knowledge: knowledgeRef})
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
@@ -749,6 +767,8 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 			ResourceID: webUILocalTenantID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/session", Version: 1}, deriveLocalSecret("session", configValue.Token)},
 		{secrets.Scope{TenantID: webUILocalTenantID, Subject: "worker-model", Purpose: secrets.PurposeModelCall,
 			ResourceID: webUILocalModelID, ResourceVersion: webUILocalModelVersion}, secrets.SecretRef{Ref: "secret://local/deepseek", Version: 1}, apiKey},
+		{secrets.Scope{TenantID: webUILocalTenantID, Subject: "worker-knowledge-qdrant", Purpose: secrets.PurposeBackendConnect,
+			ResourceID: webUILocalQdrantID, ResourceVersion: 1}, secrets.SecretRef{Ref: "secret://local/qdrant", Version: 1}, []byte("webui-local-qdrant-token")},
 	}
 	if configValue.FeishuEnabled {
 		secretValues = append(secretValues,
@@ -865,13 +885,170 @@ func ensureWebUILocalModel(ctx context.Context, providers *providerpostgres.Repo
 	return err
 }
 
+// ensureWebUILocalKnowledgeFixture publishes one real, small Knowledge
+// version and one Skill package through the same durable authorities used by a
+// Worker. The chat model remains the explicit local DeepSeek choice; only the
+// embedding is deterministic so retrieval adds no second cloud credential.
+func ensureWebUILocalKnowledgeFixture(ctx context.Context, db *sql.DB, providers *providerpostgres.Repository, value webUILocalConfig) (agentapp.SkillRef, agentapp.VersionedRef, error) {
+	if ctx == nil || db == nil || providers == nil || value.QdrantEndpoint != "http://qdrant:6333" {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, errors.New("invalid WebUI local Knowledge fixture")
+	}
+	packageRoot := filepath.Join(value.SkillStagingRoot, webUILocalTenantID, "webui-local-v1")
+	skillRoot := filepath.Join(packageRoot, webUILocalSkillID)
+	if err := os.MkdirAll(skillRoot, 0o700); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	skillContent := []byte("---\nname: webui_local_guide\ndescription: Local WebUI Knowledge demo guidance\n---\nUse knowledge search when the user asks about the local demo guide.\n")
+	skillFile := filepath.Join(skillRoot, "SKILL.md")
+	if existing, err := os.ReadFile(skillFile); err == nil && !bytes.Equal(existing, skillContent) {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, errors.New("WebUI local Skill fixture changed; recreate the Compose volume")
+	} else if errors.Is(err, os.ErrNotExist) {
+		if err = os.WriteFile(skillFile, skillContent, 0o600); err != nil {
+			return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+		}
+	} else if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	digest, err := serviceskill.DigestRoot(packageRoot)
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	skills := skillpostgres.New(db)
+	pkg, err := skills.Stage(ctx, serviceskill.Package{TenantID: webUILocalTenantID, SkillID: webUILocalSkillID, Version: webUILocalSkillVersion, ContentDigest: digest, RelativePath: "webui-local-v1"})
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = skills.Publish(ctx, pkg.TenantID, pkg.SkillID, pkg.Version); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+
+	if _, err = providers.PublishModel(ctx, provider.ModelProfileSnapshot{TenantID: webUILocalTenantID, ProfileID: webUILocalEmbedderID, ProfileKey: "webui-local-fake-embedder", DisplayName: "WebUI Local Fake Embedder", Status: "active", SchemaVersion: 1, Provider: "fake-embedding", Model: "fake-embedding-v1", Options: map[string]string{"dimensions": strconv.Itoa(webUILocalVectorSize)}, Version: 1}); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = providers.PublishBackend(ctx, provider.BackendProfileSnapshot{TenantID: webUILocalTenantID, ProfileID: webUILocalQdrantID, ProfileKey: "webui-local-qdrant", DisplayName: "WebUI Local Qdrant", Status: "active", SchemaVersion: 1, Provider: "qdrant-local", Configuration: map[string]string{"endpoint": value.QdrantEndpoint, "collection": webUILocalQdrantCollection, "vector_size": strconv.Itoa(webUILocalVectorSize), "snapshot_watermark": "webui-local-snapshot-v1", "vector_generation": webUILocalVectorGeneration}, CredentialRef: secrets.SecretRef{Ref: "secret://local/qdrant", Version: 1}, Capabilities: provider.CapabilitySet{"tenant_filter": true, "idempotent_upsert": true, "migration_dual_write": true}, Version: 1}); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+
+	manifests := knowledgepostgres.New(db)
+	if manifest, getErr := manifests.GetManifest(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion); getErr == nil {
+		if manifest.State != serviceknowledge.ManifestPublished {
+			return agentapp.SkillRef{}, agentapp.VersionedRef{}, errors.New("WebUI local Knowledge fixture is not published")
+		}
+		return agentapp.SkillRef{ID: pkg.SkillID, Version: pkg.Version, ContentDigest: pkg.ContentDigest}, agentapp.VersionedRef{ID: webUILocalKnowledgeID, Version: webUILocalKnowledgeVersion}, nil
+	} else if !errors.Is(getErr, runtime.ErrNotFound) {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, getErr
+	}
+	if err = ensureWebUILocalQdrantCollection(ctx, value.QdrantEndpoint, webUILocalQdrantCollection); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	text := "The local WebUI Knowledge demo is published through an immutable manifest and retrieved from tenant-scoped Qdrant."
+	sourceDigest := localFixtureDigest(text)
+	embedder := serviceknowledge.DeterministicEmbedder{Dimensions: webUILocalVectorSize}
+	vector64, err := embedder.GetEmbedding(ctx, text)
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	vector := make([]float32, len(vector64))
+	for i := range vector {
+		vector[i] = float32(vector64[i])
+	}
+	now := time.Now().UTC()
+	if _, err = manifests.BeginManifest(ctx, serviceknowledge.BeginManifestInput{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, Version: webUILocalKnowledgeVersion, SourceURI: "fixture://webui-local-guide", SourceDigest: sourceDigest, ChunkingPipelineVersion: "webui-local-v1", EmbedderProfileID: webUILocalEmbedderID, EmbedderVersion: 1, VectorCollectionGeneration: webUILocalVectorGeneration, MetadataSchema: []string{"title"}, ContentWatermark: "webui-local-snapshot-v1", CreatedAt: now}); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	chunk := serviceknowledge.ChunkRecord{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, KnowledgeVersion: webUILocalKnowledgeVersion, ChunkID: "guide", SourceDigest: sourceDigest, ContentDigest: localFixtureDigest(text), MetadataDigest: localFixtureDigest("title=WebUI Local Guide"), EmbeddingProfileID: webUILocalEmbedderID, EmbeddingVersion: 1, VectorGeneration: webUILocalVectorGeneration, Content: text, Metadata: map[string]string{"title": "WebUI Local Guide"}, Vector: vector, CreatedAt: now}
+	if _, err = manifests.StageChunk(ctx, chunk); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = manifests.BeginIndexing(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion, 1, now.Add(time.Second)); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	adapter, err := serviceqdrant.New(serviceqdrant.Config{Endpoint: value.QdrantEndpoint, Collection: webUILocalQdrantCollection, VectorSize: webUILocalVectorSize, SnapshotWatermark: "webui-local-snapshot-v1", VectorGeneration: webUILocalVectorGeneration, AllowInsecureHTTP: true}, nil)
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	imageDigest, err := chunk.MutationDigest()
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = adapter.ApplyChunk(ctx, knowledgedriver.ApplyRequest{TenantID: webUILocalTenantID, MigrationID: "webui-local-fixture", MutationID: "guide-v1", Epoch: 1, Image: chunk.ChunkImage(), ImageDigest: imageDigest}); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if err = manifests.MarkChunkIndexed(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion, "guide", now.Add(2*time.Second)); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	verification, err := serviceknowledge.VerificationDigest([]serviceknowledge.ChunkRecord{chunk})
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = manifests.BeginVerifying(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion, verification, now.Add(3*time.Second)); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = manifests.RecordProbe(ctx, serviceknowledge.ProbeRecord{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, KnowledgeVersion: webUILocalKnowledgeVersion, ProbeID: "guide", Query: "local WebUI Knowledge demo", ExpectedChunks: []string{"guide"}, MinRecallPPM: 1_000_000, CreatedAt: now.Add(4 * time.Second)}); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if err = manifests.MarkProbeVerified(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion, "guide"); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	if _, err = manifests.PublishVersion(ctx, webUILocalTenantID, webUILocalKnowledgeID, webUILocalKnowledgeVersion, now.Add(5*time.Second)); err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	return agentapp.SkillRef{ID: pkg.SkillID, Version: pkg.Version, ContentDigest: pkg.ContentDigest}, agentapp.VersionedRef{ID: webUILocalKnowledgeID, Version: webUILocalKnowledgeVersion}, nil
+}
+
+func ensureWebUILocalQdrantCollection(ctx context.Context, endpoint, collection string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint+"/collections/"+collection, bytes.NewBufferString(fmt.Sprintf(`{"vectors":{"size":%d,"distance":"Dot"}}`, webUILocalVectorSize)))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return errors.New("WebUI local Qdrant collection unavailable")
+	}
+	return nil
+}
+
+func localFixtureDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func webUILocalKnowledgeBindingReady(values []configdomain.BackendBinding) bool {
+	for _, value := range values {
+		if value.Domain == "knowledge" && value.BackendProfileID == webUILocalQdrantID && value.BackendVersion == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func upsertWebUILocalKnowledgeBinding(values []configdomain.BackendBinding) []configdomain.BackendBinding {
+	result := make([]configdomain.BackendBinding, 0, len(values)+1)
+	for _, value := range values {
+		if value.Domain != "knowledge" {
+			result = append(result, value)
+		}
+	}
+	return append(result, configdomain.BackendBinding{Domain: "knowledge", BackendProfileID: webUILocalQdrantID, BackendVersion: 1, Required: []string{"tenant_filter"}})
+}
+
 type webUILocalPolicyStore interface {
 	GetPolicy(context.Context, string, int64) (governance.PolicySnapshot, error)
 	PublishPolicy(context.Context, governance.PolicySnapshot) error
 }
 
+type webUILocalCapabilityRefs struct {
+	skill     agentapp.SkillRef
+	knowledge agentapp.VersionedRef
+}
+
 func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Repository, apps agentapp.Repository,
-	configs configdomain.Repository, policies webUILocalPolicyStore, root tenant.Tenant, snapshot configdomain.Snapshot,
+	configs configdomain.Repository, policies webUILocalPolicyStore, root tenant.Tenant, snapshot configdomain.Snapshot, wanted ...webUILocalCapabilityRefs,
 ) (tenant.Tenant, configdomain.Snapshot, error) {
 	if ctx == nil || tenants == nil || apps == nil || configs == nil || policies == nil || root.TenantID != webUILocalTenantID ||
 		snapshot.TenantID != webUILocalTenantID || snapshot.Payload.PolicyVersion < 1 {
@@ -891,7 +1068,11 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 	}
 	appMetadata := agentapp.ChangeMetadata{ActorType: "system", ActorID: "webui-local", Reason: "local_graph_upgrade",
 		CorrelationID: "webui-local-graph", TraceID: "webui-local-graph"}
-	childRevision, err := ensureWebUILocalGraphChild(ctx, apps, appMetadata)
+	refs := webUILocalCapabilityRefs{}
+	if len(wanted) > 0 {
+		refs = wanted[0]
+	}
+	childRevision, err := ensureWebUILocalGraphChild(ctx, apps, appMetadata, refs)
 	if err != nil {
 		return tenant.Tenant{}, configdomain.Snapshot{}, err
 	}
@@ -914,7 +1095,7 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 			return tenant.Tenant{}, configdomain.Snapshot{}, publishErr
 		}
 	}
-	if webUILocalPolicyReady(policy.Policy) {
+	if webUILocalPolicyReady(policy.Policy) && (len(wanted) == 0 || webUILocalKnowledgeBindingReady(snapshot.Payload.BackendBindings)) {
 		return root, snapshot, nil
 	}
 	if policy.Version == int64(^uint64(0)>>1) {
@@ -934,6 +1115,9 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 	}
 	payload := snapshot.Payload
 	payload.PolicyVersion = policy.Version
+	if len(wanted) > 0 {
+		payload.BackendBindings = upsertWebUILocalKnowledgeBinding(payload.BackendBindings)
+	}
 	metadata := tenant.ChangeMetadata{ActorType: "system", ActorID: "webui-local", ReasonCode: "local_tool_upgrade",
 		CorrelationID: "webui-local-tool", TraceID: "webui-local-tool"}
 	published, err := configs.Publish(ctx, configdomain.PublishInput{TenantID: webUILocalTenantID,
@@ -1045,7 +1229,7 @@ func ensureWebUILocalWeComBinding(ctx context.Context, configs configdomain.Repo
 	return published.Tenant, published.Snapshot, nil
 }
 
-func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, metadata agentapp.ChangeMetadata) (agentapp.Revision, error) {
+func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, metadata agentapp.ChangeMetadata, wanted webUILocalCapabilityRefs) (agentapp.Revision, error) {
 	app, err := apps.Get(ctx, webUILocalTenantID, webUILocalChildAppID)
 	if errors.Is(err, agentapp.ErrNotFound) {
 		app, err = apps.Create(ctx, agentapp.CreateInput{App: agentapp.AgentApp{TenantID: webUILocalTenantID,
@@ -1059,7 +1243,7 @@ func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, m
 		if currentErr != nil {
 			return agentapp.Revision{}, currentErr
 		}
-		if webUILocalLLMRevisionReady(current) {
+		if webUILocalLLMRevisionReady(current, wanted) {
 			return current, nil
 		}
 	}
@@ -1067,7 +1251,8 @@ func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, m
 		AgentAppID: webUILocalChildAppID, ExpectedAppVersion: app.Version,
 		Revision: agentapp.Revision{AgentKind: agentapp.AgentKindLLM, Instruction: webUILocalInstruction,
 			ModelProfileID: webUILocalModelID, ModelProfileVersion: webUILocalModelVersion,
-			ToolRefs: []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}}}, ChangeMetadata: metadata})
+			ToolRefs:  []agentapp.VersionedRef{{ID: localnote.ID, Version: localnote.Version, Required: true}},
+			SkillRefs: optionalWebUILocalSkillRefs(wanted), KnowledgeRefs: optionalWebUILocalKnowledgeRefs(wanted)}, ChangeMetadata: metadata})
 	if err != nil {
 		return agentapp.Revision{}, err
 	}
@@ -1080,17 +1265,36 @@ func ensureWebUILocalGraphChild(ctx context.Context, apps agentapp.Repository, m
 	return published.Revision, nil
 }
 
-func webUILocalLLMRevisionReady(value agentapp.Revision) bool {
+func webUILocalLLMRevisionReady(value agentapp.Revision, wanted ...webUILocalCapabilityRefs) bool {
 	if value.AgentKind != agentapp.AgentKindLLM || value.Instruction != webUILocalInstruction ||
 		value.ModelProfileID != webUILocalModelID || value.ModelProfileVersion != webUILocalModelVersion {
 		return false
 	}
 	for _, ref := range value.ToolRefs {
 		if ref.ID == localnote.ID {
-			return ref.Version == localnote.Version && ref.Required
+			if ref.Version != localnote.Version || !ref.Required {
+				return false
+			}
+			if len(wanted) == 0 || (wanted[0].skill.ID == "" && wanted[0].knowledge.ID == "") {
+				return true
+			}
+			return len(value.SkillRefs) == 1 && value.SkillRefs[0] == wanted[0].skill && len(value.KnowledgeRefs) == 1 && value.KnowledgeRefs[0].ID == wanted[0].knowledge.ID && value.KnowledgeRefs[0].Version == wanted[0].knowledge.Version
 		}
 	}
 	return false
+}
+
+func optionalWebUILocalSkillRefs(value webUILocalCapabilityRefs) []agentapp.SkillRef {
+	if value.skill.ID == "" {
+		return nil
+	}
+	return []agentapp.SkillRef{value.skill}
+}
+func optionalWebUILocalKnowledgeRefs(value webUILocalCapabilityRefs) []agentapp.VersionedRef {
+	if value.knowledge.ID == "" {
+		return nil
+	}
+	return []agentapp.VersionedRef{value.knowledge}
 }
 
 func webUILocalGraphRevisionReady(value, child agentapp.Revision) bool {

@@ -68,7 +68,7 @@ func (r BackendAdapterResolver) ResolveKnowledgeBackend(ctx context.Context, ten
 	if backend.TenantID != tenantID || backend.ProfileID != binding.BackendProfileID || backend.Version != binding.BackendVersion {
 		return nil, runtime.ErrTenantScope
 	}
-	if backend.Status != "active" || backend.Provider != "qdrant" || backend.SchemaVersion != 1 || !backend.Capabilities["tenant_filter"] ||
+	if backend.Status != "active" || (backend.Provider != "qdrant" && backend.Provider != "qdrant-local") || backend.SchemaVersion != 1 || !backend.Capabilities["tenant_filter"] ||
 		backend.CredentialRef.Ref == "" || backend.CredentialRef.Version < 1 {
 		return nil, runtime.ErrCapabilityUnsupported
 	}
@@ -91,6 +91,7 @@ func (r BackendAdapterResolver) ResolveKnowledgeBackend(ctx context.Context, ten
 		Purpose: secrets.PurposeBackendConnect, ResourceID: backend.ProfileID, ResourceVersion: backend.Version}, ref: backend.CredentialRef}
 	return serviceqdrant.New(serviceqdrant.Config{Endpoint: endpoint, Collection: collection, VectorSize: vectorSize,
 		SnapshotWatermark: watermark, VectorGeneration: generation,
+		AllowInsecureHTTP: backend.Provider == "qdrant-local",
 		HTTPClient: &http.Client{Timeout: time.Duration(timeoutMS) * time.Millisecond}, TokenSource: tokens}, nil)
 }
 

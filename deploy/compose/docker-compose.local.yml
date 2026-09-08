@@ -46,6 +46,12 @@ services:
       timeout: 3s
       retries: 20
 
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
+    volumes:
+      - local-qdrant:/qdrant/storage
+
   clamav:
     # `1.4_base` is amd64-only. Pin the full official multi-arch image so the
     # local media verification stack also works on Apple Silicon Docker Desktop.
@@ -59,7 +65,7 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2025-02-28T09-55-16Z
-    profiles: ["gateway-worker"]
+    profiles: ["gateway-worker", "codeexec"]
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${TRPC_LOCAL_MINIO_ROOT_USER:-minioadmin}
@@ -72,7 +78,7 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
-    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local"]
+    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local", "codeexec"]
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
@@ -80,7 +86,7 @@ services:
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.108.0
-    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local"]
+    profiles: ["gateway-worker", "audit", "webui", "webui-multinode", "feishu-local", "wecom-local", "codeexec"]
     command: ["--config=/etc/otelcol-contrib/config.yml"]
     volumes:
       - ./otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
@@ -108,6 +114,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     command: ["bash", "scripts/runtime_slice_test.sh"]
 
   # Docker creates named-volume roots as root-owned. The application image is
@@ -121,6 +129,14 @@ services:
     command: ["sh", "-ec", "chown 65532:65532 /var/lib/trpc-webui-local/skills && chmod 0700 /var/lib/trpc-webui-local/skills"]
     volumes:
       - webui-local-skills:/var/lib/trpc-webui-local/skills
+
+  codeexec-workspaces-init:
+    image: busybox:1.36.1
+    profiles: ["codeexec"]
+    user: "0:0"
+    command: ["sh", "-ec", "chown 65532:65532 /var/lib/trpc/codeexecutor && chmod 0700 /var/lib/trpc/codeexecutor"]
+    volumes:
+      - codeexec-workspaces:/var/lib/trpc/codeexecutor
 
   webui-local:
     build:
@@ -155,6 +171,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
       clamav:
         condition: service_healthy
       otel-collector:
@@ -199,6 +217,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
       clamav:
         condition: service_healthy
       otel-collector:
@@ -243,6 +263,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      qdrant:
+        condition: service_started
       clamav:
         condition: service_healthy
       otel-collector:
@@ -435,6 +457,46 @@ services:
       otel-collector:
         condition: service_started
 
+  # Opt-in Worker image for reviewed CodeExec ToolRefs. It is intentionally a
+  # separate profile: do not run the generic distroless worker with a shell.
+  # Operators supply the exact TRPC_CODE_EXECUTORS digest declaration through
+  # .env.local and enable this profile only after selecting this worker pool.
+  worker-codeexec:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile
+      target: codeexec
+    profiles: ["codeexec"]
+    command: ["worker"]
+    env_file:
+      - path: .env.local
+        required: false
+    environment:
+      TRPC_POSTGRES_DSN: postgres://${TRPC_LOCAL_POSTGRES_USER:-postgres}:${TRPC_LOCAL_POSTGRES_PASSWORD:-postgres}@postgres:5432/${TRPC_LOCAL_POSTGRES_DB:-trpc_agent_service_test}?sslmode=disable
+      TRPC_REDIS_ADDRESS: redis:6379
+      TRPC_S3_ENDPOINT: http://minio:9000
+      TRPC_S3_PATH_STYLE: "true"
+      TRPC_SECRET_ROOT: /run/secrets/trpc
+      TRPC_LISTEN_ADDRESS: ":8080"
+      TRPC_CODE_EXECUTOR_WORKSPACE_ROOT: /var/lib/trpc/codeexecutor
+      TRPC_OTEL_ENDPOINT: http://otel-collector:4318
+      TRPC_OTEL_ALLOW_INSECURE: "true"
+      TRPC_SERVICE_VERSION: ${TRPC_LOCAL_SERVICE_VERSION:-development}
+    volumes:
+      - ./secrets:/run/secrets/trpc:ro
+      - codeexec-workspaces:/var/lib/trpc/codeexecutor
+    depends_on:
+      codeexec-workspaces-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+
   audit-relay:
     build:
       context: ../..
@@ -480,8 +542,10 @@ volumes:
   local-postgres:
   local-compliance-postgres:
   local-redis:
+  local-qdrant:
   local-minio:
   webui-local-skills:
+  codeexec-workspaces:
 
 secrets:
   deepseek_api_key:

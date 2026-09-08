@@ -103,6 +103,21 @@ func FakeModelSchema() Schema {
 	}
 }
 
+// FakeEmbeddingSchema is a credential-free, deterministic embedding surface
+// for local Knowledge fixtures. It is deliberately a distinct provider from
+// the fake chat model: an embedding profile can never be selected as an Agent
+// model, and its fixed vector size remains part of the immutable profile.
+func FakeEmbeddingSchema() Schema {
+	return Schema{
+		Kind: KindModel, Name: "fake-embedding", SchemaVersion: 1,
+		AllowedModels:     []string{"fake-embedding-v1"},
+		SecretRequirement: "forbidden",
+		OptionRules: map[string]OptionRule{
+			"dimensions": {Type: OptionInteger, Required: true, Min: 1, Max: 65536},
+		},
+	}
+}
+
 // OpenAIEmbeddingSchema is the reviewed profile shape used by the framework
 // Knowledge embedder. It is deliberately separate from chat-model schemas:
 // an embedding profile cannot be selected as an Agent model and its immutable
@@ -140,6 +155,16 @@ func QdrantVectorSchema() Schema {
 			"tenant_filter":        true,
 		},
 	}
+}
+
+// LocalQdrantVectorSchema is deliberately narrower than the production
+// Qdrant schema: it admits only the Compose-network endpoint used by the
+// credential-free WebUI fixture. Keeping it a separate provider makes an HTTP
+// endpoint impossible to publish accidentally in a production qdrant profile.
+func LocalQdrantVectorSchema() Schema {
+	schema := QdrantVectorSchema()
+	schema.Name = "qdrant-local"
+	return schema
 }
 
 // PostgresBackendSchema describes the original shared PostgreSQL persistence
@@ -277,6 +302,10 @@ func (c *Catalog) NormalizeModel(input ModelProfileSnapshot) (ModelProfileSnapsh
 			return ModelProfileSnapshot{}, err
 		}
 	}
+	if schema.Name == "fake-embedding" && schema.SchemaVersion == 1 &&
+		(input.Model != "fake-embedding-v1" || input.Endpoint != "") {
+		return ModelProfileSnapshot{}, runtime.ErrCapabilityUnsupported
+	}
 	if err := validateSecret(input.SecretRef, schema.SecretRequirement); err != nil {
 		return ModelProfileSnapshot{}, err
 	}
@@ -336,6 +365,11 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 			return BackendProfileSnapshot{}, err
 		}
 	}
+	if schema.Name == "qdrant-local" && schema.SchemaVersion == 1 {
+		if err := validateLocalQdrantConfiguration(configuration); err != nil {
+			return BackendProfileSnapshot{}, err
+		}
+	}
 	if schema.Name == "postgres" && schema.SchemaVersion == 2 {
 		if err := validatePostgresConfiguration(configuration); err != nil {
 			return BackendProfileSnapshot{}, err
@@ -374,6 +408,19 @@ func validateQdrantConfiguration(configuration map[string]string) error {
 		if !(value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '_' || value == '-') {
 			return runtime.ErrCapabilityUnsupported
 		}
+	}
+	return nil
+}
+
+func validateLocalQdrantConfiguration(configuration map[string]string) error {
+	if err := validateQdrantConfiguration(map[string]string{
+		"endpoint": "https://qdrant.local.invalid", "collection": configuration["collection"],
+	}); err != nil {
+		return err
+	}
+	endpoint, err := url.Parse(configuration["endpoint"])
+	if err != nil || endpoint.Scheme != "http" || endpoint.Host != "qdrant:6333" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Path != "" {
+		return runtime.ErrCapabilityUnsupported
 	}
 	return nil
 }

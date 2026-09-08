@@ -62,7 +62,7 @@ func runDemoServer(parent context.Context, getenv func(string) string, logger *r
 	if err := runner.Ready(parent); err != nil {
 		return fmt.Errorf("schema is not ready: %w", err)
 	}
-	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2())
+	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}

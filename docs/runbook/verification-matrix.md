@@ -20,7 +20,8 @@
 | CodeExec 控制面 | 包含在 `bash scripts/backend_adapter_smoke.sh` | Docker Desktop 或 CI Docker daemon | ToolRef digest 固化、workspace root 为 `0700`、symlink root 被拒绝；实际启用另需 sandbox-capable worker 镜像 | 本地/CI |
 | MCP 适配器 | `go test ./trpcservice/tool/mcp ./trpcservice/tool ./trpcservice/worker` | Go 1.24.x | scoped secret、声明/binding digest、私网 DNS 拒绝、Worker 构建上下文与确认续跑的 binding 固定全部通过 | 本地/CI |
 | PostgreSQL/Redis runtime slice | `docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis` 后执行 `--profile runtime-test run --rm runtime-test` | Docker Desktop | migration 与真实 PostgreSQL/Redis slice 通过 | 本地 |
-| WebUI + 模型 | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；confirmation 只执行一次 | 本地 + 真实模型 |
+| WebUI + 模型/Knowledge | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；启动时 Qdrant fixture、fake embedding profile、published Skill 与 Knowledge manifest 已就绪 | 本地 + 真实模型 |
+| CodeExec Worker | `docker compose -f deploy/compose/docker-compose.local.yml --profile codeexec up worker-codeexec` | Docker Desktop、`.env.local` 中经 digest 审核的 `TRPC_CODE_EXECUTORS` | 独立 `codeexec` image target、bubblewrap/Bash/Python、私有 workspace volume；工具仍需 published ToolRef 与治理许可 | 本地 |
 | 多租户、多节点 | `bash scripts/local_multinode_smoke.sh` | Docker Desktop、DeepSeek Key | 两租户、两 Worker 通过；停止 node A 后 node B 保持 ready | 本地 + 真实模型 |
 | 依赖短断恢复 | `bash scripts/local_dependency_recovery_smoke.sh` | Docker Desktop、DeepSeek Key | PostgreSQL/Redis 中断期间节点 unready，恢复后无需重启重新 ready | 本地 + 真实模型 |
 | Feishu 文本/群聊 | 依据 [getting-started.md](getting-started.md) 第 3 节启动 `feishu-local` 并配置 tunnel | DeepSeek Key、`feishu.env`、Feishu 应用、临时 HTTPS URL | callback 验签成功；私聊收到回复；群聊仅 @ 机器人时处理 | 真实外部 |

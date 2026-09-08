@@ -132,7 +132,7 @@ func writeDemoIDs(output io.Writer, ids demoIDs, configVersion int64) {
 }
 
 func bootstrapDemo(ctx context.Context, db *sql.DB, ids demoIDs) error {
-	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2())
+	catalog, err := provider.NewCatalog(provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2())
 	if err != nil {
 		return err
 	}

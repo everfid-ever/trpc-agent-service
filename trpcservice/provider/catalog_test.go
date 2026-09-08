@@ -119,6 +119,22 @@ func TestOpenAIEmbeddingSchemaPinsDimensionsAndOfficialEndpoint(t *testing.T) {
 	}
 }
 
+func TestFakeEmbeddingSchemaIsCredentialFreeAndDimensionPinned(t *testing.T) {
+	catalog, err := NewCatalog(FakeEmbeddingSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := catalog.NormalizeModel(ModelProfileSnapshot{TenantID: "tenant-a", ProfileID: "fake-embed", ProfileKey: "fake-embed",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "fake-embedding", Model: "fake-embedding-v1", Options: map[string]string{"dimensions": "16"}})
+	if err != nil || value.SecretRef != (secrets.SecretRef{}) || value.Options["dimensions"] != "16" {
+		t.Fatalf("profile=%#v err=%v", value, err)
+	}
+	value.Endpoint = "https://embedding.example.test"
+	if _, err := catalog.NormalizeModel(value); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("endpoint=%v", err)
+	}
+}
+
 func TestQdrantVectorSchemaKeepsCredentialsOutOfProfiles(t *testing.T) {
 	catalog, err := NewCatalog(QdrantVectorSchema())
 	if err != nil {
