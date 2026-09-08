@@ -85,6 +85,29 @@ func (s *Store) Get(ctx context.Context, tenantID, migrationID string) (migratio
 	return scanMigration(s.db.QueryRowContext(ctx, selectMigration+` WHERE tenant_id=$1 AND migration_id=$2`, tenantID, migrationID))
 }
 
+func (s *Store) List(ctx context.Context, tenantID, domain string) ([]migration.Migration, error) {
+	if s == nil || s.db == nil {
+		return nil, runtime.ErrBackendUnavailable
+	}
+	if tenantID == "" || domain == "" {
+		return nil, runtime.ErrTenantScope
+	}
+	rows, err := s.db.QueryContext(ctx, selectMigration+` WHERE tenant_id=$1 AND domain=$2 ORDER BY created_at DESC,migration_id DESC`, tenantID, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]migration.Migration, 0)
+	for rows.Next() {
+		value, scanErr := scanMigration(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) Transition(ctx context.Context, in migration.TransitionRequest) (migration.Migration, error) {
 	if s == nil || s.db == nil {
 		return migration.Migration{}, runtime.ErrBackendUnavailable

@@ -2,6 +2,7 @@ package inmemory
 
 import (
 	"context"
+	"sort"
 	"sync"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration"
@@ -60,6 +61,30 @@ func (s *Store) Get(ctx context.Context, tenantID, migrationID string) (migratio
 		return migration.Migration{}, runtime.ErrNotFound
 	}
 	return cloneMigration(value), nil
+}
+
+func (s *Store) List(ctx context.Context, tenantID, domain string) ([]migration.Migration, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if tenantID == "" || domain == "" {
+		return nil, runtime.ErrTenantScope
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]migration.Migration, 0)
+	for _, value := range s.migrations {
+		if value.TenantID == tenantID && value.Domain == domain {
+			result = append(result, cloneMigration(value))
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CreatedAt.Equal(result[j].CreatedAt) {
+			return result[i].MigrationID > result[j].MigrationID
+		}
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	return result, nil
 }
 
 func (s *Store) Transition(ctx context.Context, in migration.TransitionRequest) (migration.Migration, error) {

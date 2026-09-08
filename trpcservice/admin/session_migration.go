@@ -94,6 +94,16 @@ func (s Service) GetSessionMigration(ctx context.Context, principal Principal, p
 	return value, nil
 }
 
+func (s Service) ListSessionMigrations(ctx context.Context, principal Principal, pathTenant string) ([]migration.Migration, error) {
+	if err := authorize(principal, pathTenant); err != nil {
+		return nil, err
+	}
+	if s.Migrations == nil {
+		return nil, runtime.ErrCapabilityUnsupported
+	}
+	return s.Migrations.List(ctx, pathTenant, sessiondriver.Domain)
+}
+
 func (s Service) GetSessionMigrationStatus(ctx context.Context, principal Principal, pathTenant, migrationID string) (SessionMigrationStatus, error) {
 	value, err := s.GetSessionMigration(ctx, principal, pathTenant, migrationID)
 	if err != nil {

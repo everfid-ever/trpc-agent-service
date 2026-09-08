@@ -111,6 +111,7 @@ go run ./cmd/trpc-service session-migrate
 POST /v1/tenants/{tenant_id}/session-migrations
   {"migration_id":"session-move-2026-01","target_config_version":42}
 
+GET  /v1/tenants/{tenant_id}/session-migrations
 GET  /v1/tenants/{tenant_id}/session-migrations/{migration_id}/status
 POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/cutover
 POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/observe

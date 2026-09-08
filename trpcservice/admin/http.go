@@ -150,6 +150,13 @@ func (h Handler) serveSessionMigration(w http.ResponseWriter, r *http.Request, p
 		return input, nil
 	}
 	switch {
+	case r.Method == http.MethodGet && len(parts) == 4:
+		value, err := h.Service.ListSessionMigrations(r.Context(), principal, tenantID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, value)
 	case r.Method == http.MethodPost && len(parts) == 4:
 		var input SessionMigrationCreateInput
 		if err := decodeJSON(w, r, &input); err != nil {

@@ -121,6 +121,7 @@ type BatchResult struct {
 type Repository interface {
 	Create(context.Context, CreateRequest) (Migration, error)
 	Get(context.Context, string, string) (Migration, error)
+	List(context.Context, string, string) ([]Migration, error)
 	Transition(context.Context, TransitionRequest) (Migration, error)
 	CommitBatch(context.Context, BatchRequest) (BatchResult, error)
 	RecordVerification(context.Context, VerificationRequest) (Migration, error)
