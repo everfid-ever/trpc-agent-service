@@ -219,6 +219,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		},
 		BuildMem0: servicememory.NewMem0Service,
 		Decorator: memoryMigrationPlanner,
+		Telemetry: telemetryProvider,
 	}
 	// Session/Event/State are framework-owned capabilities. The immutable
 	// session binding selects a credential-free connection_id; this resolver

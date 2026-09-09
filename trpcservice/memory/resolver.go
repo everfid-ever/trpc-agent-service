@@ -13,6 +13,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/provider"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	agentmemory "trpc.group/trpc-go/trpc-agent-go/memory"
 	agentmemoryinmemory "trpc.group/trpc-go/trpc-agent-go/memory/inmemory"
 	agentmemorymem0 "trpc.group/trpc-go/trpc-agent-go/memory/mem0"
@@ -57,6 +58,7 @@ type Resolver struct {
 	BuildRedis          RedisBuilder
 	BuildMem0           Mem0Builder
 	Decorator           ServiceDecorator
+	Telemetry           telemetry.Provider
 }
 
 // ServiceDecorator is a narrow Worker-composition extension point. It keeps
@@ -152,6 +154,9 @@ func (r Resolver) Resolve(ctx context.Context, snapshot profile.ExecutionProfile
 		return nil, runtime.ErrInvariantViolation
 	}
 	scoped := agentmemory.Service(scopedService{app: snapshot.AppName, inner: service})
+	if telemetry.Enabled(r.Telemetry) {
+		scoped = telemetryService{inner: scoped, provider: r.Telemetry}
+	}
 	if r.Decorator == nil {
 		return scoped, nil
 	}

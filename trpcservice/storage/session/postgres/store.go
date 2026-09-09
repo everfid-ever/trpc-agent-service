@@ -32,7 +32,7 @@ func NewWithTelemetry(db DB, provider telemetry.Provider) *Store {
 }
 
 func (s *Store) OpenForRun(ctx context.Context, in sessionstore.OpenForRunRequest) (head sessionstore.SessionHead, resultErr error) {
-	done := s.measure(ctx, telemetry.OperationSessionOpen)
+	ctx, done := s.measure(ctx, telemetry.OperationSessionOpen)
 	defer func() { done(resultErr) }()
 	if in.TenantID == "" || in.AgentAppID == "" || in.SessionID == "" {
 		return sessionstore.SessionHead{}, runtime.ErrTenantScope
@@ -80,7 +80,7 @@ type outboxJSON struct {
 }
 
 func (s *Store) CommitTurn(ctx context.Context, in sessionstore.CommitTurnRequest) (result sessionstore.CommitTurnResult, resultErr error) {
-	done := s.measure(ctx, telemetry.OperationSessionCommit)
+	ctx, done := s.measure(ctx, telemetry.OperationSessionCommit)
 	defer func() { done(resultErr) }()
 	if err := sessionstore.ValidateCommit(in); err != nil {
 		return sessionstore.CommitTurnResult{}, err
@@ -143,7 +143,7 @@ FROM commit_turn($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14::j
 }
 
 func (s *Store) GetTerminalByInputSeq(ctx context.Context, key sessionstore.TerminalKey) (result sessionstore.CommitTurnResult, resultErr error) {
-	done := s.measure(ctx, telemetry.OperationSessionTerminal)
+	ctx, done := s.measure(ctx, telemetry.OperationSessionTerminal)
 	defer func() { done(resultErr) }()
 	err := s.db.QueryRowContext(ctx, `SELECT commit_id,outcome,input_seq,session_version,COALESCE(result_ref,''),COALESCE(reply_cursor,'')
 FROM session_commit WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3 AND input_seq=$4
@@ -157,7 +157,7 @@ AND outcome IN ('succeeded','denied','failed','cancelled','confirmation_denied',
 }
 
 func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) (fence uint64, resultErr error) {
-	done := s.measure(ctx, telemetry.OperationSessionReadFence)
+	ctx, done := s.measure(ctx, telemetry.OperationSessionReadFence)
 	defer func() { done(resultErr) }()
 	err := s.db.QueryRowContext(ctx, `SELECT last_fence FROM session_head WHERE tenant_id=$1 AND agent_app_id=$2 AND session_id=$3`, key.TenantID, key.AgentAppID, key.SessionID).Scan(&fence)
 	if err != nil {
@@ -167,7 +167,7 @@ func (s *Store) ReadLastFence(ctx context.Context, key sessionstore.SessionKey) 
 }
 
 func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (snapshot sessionstore.SessionSnapshot, resultErr error) {
-	done := s.measure(ctx, telemetry.OperationSessionLoad)
+	ctx, done := s.measure(ctx, telemetry.OperationSessionLoad)
 	defer func() { done(resultErr) }()
 	snapshot.Head.SessionKey = key
 	var state []byte
@@ -194,15 +194,17 @@ func (s *Store) LoadSession(ctx context.Context, key sessionstore.SessionKey) (s
 	return snapshot, rows.Err()
 }
 
-func (s *Store) measure(ctx context.Context, operation telemetry.Operation) func(error) {
+func (s *Store) measure(ctx context.Context, operation telemetry.Operation) (context.Context, func(error)) {
 	started := time.Now()
-	return func(err error) {
+	ctx, finish := telemetry.StartOperation(ctx, s.telemetry, "", operation)
+	return ctx, func(err error) {
 		outcome := telemetry.OutcomeSuccess
 		if err != nil {
 			outcome = telemetry.OutcomeError
 		}
 		s.telemetry.Histogram(telemetry.MetricSessionBackendDuration).Record(ctx, time.Since(started).Seconds(),
 			telemetry.DestinationAttribute(telemetry.DestinationPostgreSQL), telemetry.OperationAttribute(operation), telemetry.OutcomeAttribute(outcome))
+		finish(err)
 	}
 }
 

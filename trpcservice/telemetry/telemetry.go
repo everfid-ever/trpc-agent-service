@@ -28,6 +28,13 @@ const (
 	OperationSessionTerminal   Operation = "session.get_terminal"
 	OperationSessionReadFence  Operation = "session.read_fence"
 	OperationSessionLoad       Operation = "session.load"
+	OperationMemoryRead        Operation = "memory.read"
+	OperationMemorySearch      Operation = "memory.search"
+	OperationMemoryAdd         Operation = "memory.add"
+	OperationMemoryUpdate      Operation = "memory.update"
+	OperationMemoryDelete      Operation = "memory.delete"
+	OperationMemoryClear       Operation = "memory.clear"
+	OperationMemoryIngest      Operation = "memory.ingest"
 )
 
 type MetricDescriptor string
@@ -199,7 +206,9 @@ func ValidOperation(value Operation) bool {
 	case OperationGatewaySubmit, OperationRelayDispatch, OperationRelayReply, OperationRelayWakeup,
 		OperationRelayControl, OperationAuditExport, OperationWorkerExecute, OperationChannelDeliver,
 		OperationChannelIngress, OperationChannelPreprocess, OperationModelGenerate, OperationToolExecute,
-		OperationSessionOpen, OperationSessionCommit, OperationSessionTerminal, OperationSessionReadFence, OperationSessionLoad:
+		OperationSessionOpen, OperationSessionCommit, OperationSessionTerminal, OperationSessionReadFence, OperationSessionLoad,
+		OperationMemoryRead, OperationMemorySearch, OperationMemoryAdd, OperationMemoryUpdate, OperationMemoryDelete,
+		OperationMemoryClear, OperationMemoryIngest:
 		return true
 	default:
 		return false
