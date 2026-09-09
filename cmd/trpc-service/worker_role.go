@@ -304,7 +304,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	credentialInvalidator := modelclient.CredentialInvalidator{Pool: credentialPool, Bundles: bundles, Subject: "worker-model"}
 
 	tasks := gatewaypostgres.NewTaskStore(db)
-	runGovernance := governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore}
+	runGovernance := governance.Service{Repository: governanceStore, Ledger: governanceStore, Decisions: governanceStore, Telemetry: telemetryProvider}
 	var dlpScanner *httpdlp.Scanner
 	if configValue.DLPEndpoint != "" {
 		authorizer, authErr := newDLPAuthorizer(secretProvider, configValue.DLPBackendVersion, secrets.SecretRef{Ref: configValue.DLPSecretRef, Version: configValue.DLPSecretVersion})

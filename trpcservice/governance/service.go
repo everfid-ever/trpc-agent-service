@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type DecisionRecorder interface {
@@ -51,6 +52,7 @@ type Service struct {
 	Decisions   DecisionRecorder
 	InputGuard  ContentGuard
 	OutputGuard ContentGuard
+	Telemetry   telemetry.Provider
 	Now         func() time.Time
 }
 
@@ -73,7 +75,7 @@ func (s Service) Begin(ctx context.Context, envelope runtime.ExecutionEnvelope, 
 	}
 	permit := RunPermit{Policy: policy, Model: model, Decision: decision}
 	if decision.Action != ActionAllow {
-		if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+		if err := s.recordDecision(ctx, decision); err != nil {
 			return RunPermit{}, err
 		}
 		return permit, nil
@@ -82,7 +84,7 @@ func (s Service) Begin(ctx context.Context, envelope runtime.ExecutionEnvelope, 
 		pricing, getErr := s.Repository.GetPricing(ctx, envelope.TenantID, policy.Policy.PricingVersion)
 		if getErr != nil || !pricingUsable(pricing, s.now()) {
 			decision.Action, decision.ReasonCode = ActionDeny, ReasonPricingUnavailable
-			_ = s.Decisions.RecordDecision(ctx, decision)
+			_ = s.recordDecision(ctx, decision)
 			permit.Decision = decision
 			return permit, nil
 		}
@@ -94,7 +96,7 @@ func (s Service) Begin(ctx context.Context, envelope runtime.ExecutionEnvelope, 
 	if err != nil {
 		if errors.Is(err, runtime.ErrCapabilityUnsupported) || errors.Is(err, runtime.ErrVersionConflict) {
 			decision.Action, decision.ReasonCode = ActionDeny, ReasonBudgetExceeded
-			_ = s.Decisions.RecordDecision(ctx, decision)
+			_ = s.recordDecision(ctx, decision)
 			permit.Decision = decision
 			return permit, nil
 		}
@@ -105,7 +107,7 @@ func (s Service) Begin(ctx context.Context, envelope runtime.ExecutionEnvelope, 
 		decision = Decision{DecisionID: StableDecisionID(envelope.TenantID, envelope.RequestID, "recovery", policy.Version), TenantID: envelope.TenantID,
 			RequestID: envelope.RequestID, Stage: "recovery", Action: ActionDeny, ReasonCode: ReasonReservationClosed, PolicyVersion: policy.Version, ReservationID: reservation.ReservationID}
 	}
-	if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+	if err := s.recordDecision(ctx, decision); err != nil {
 		return RunPermit{}, err
 	}
 	permit.Decision, permit.Reservation = decision, reservation
@@ -116,7 +118,7 @@ func (s Service) Record(ctx context.Context, decision Decision) error {
 	if s.Decisions == nil {
 		return runtime.ErrCapabilityUnsupported
 	}
-	return s.Decisions.RecordDecision(ctx, decision)
+	return s.recordDecision(ctx, decision)
 }
 
 func (s Service) ValidateModelCandidates(ctx context.Context, permit RunPermit, candidates []VersionedRef) (Decision, error) {
@@ -129,7 +131,7 @@ func (s Service) ValidateModelCandidates(ctx context.Context, permit RunPermit, 
 	for _, candidate := range candidates {
 		if !ModelAllowed(permit.Policy, candidate) {
 			decision.Action, decision.ReasonCode = ActionDeny, ReasonModelDenied
-			if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+			if err := s.recordDecision(ctx, decision); err != nil {
 				return Decision{}, err
 			}
 			return decision, nil
@@ -141,7 +143,7 @@ func (s Service) ValidateModelCandidates(ctx context.Context, permit RunPermit, 
 	pricing, err := s.Repository.GetPricing(ctx, permit.Policy.TenantID, permit.Policy.Policy.PricingVersion)
 	if err != nil || !pricingUsable(pricing, s.now()) {
 		decision.Action, decision.ReasonCode = ActionDeny, ReasonPricingUnavailable
-		if recordErr := s.Decisions.RecordDecision(ctx, decision); recordErr != nil {
+		if recordErr := s.recordDecision(ctx, decision); recordErr != nil {
 			return Decision{}, recordErr
 		}
 		return decision, nil
@@ -149,7 +151,7 @@ func (s Service) ValidateModelCandidates(ctx context.Context, permit RunPermit, 
 	for _, candidate := range candidates {
 		if _, err := PriceUsage(pricing, candidate, Usage{}, s.now()); err != nil {
 			decision.Action, decision.ReasonCode = ActionDeny, ReasonPricingUnavailable
-			if recordErr := s.Decisions.RecordDecision(ctx, decision); recordErr != nil {
+			if recordErr := s.recordDecision(ctx, decision); recordErr != nil {
 				return Decision{}, recordErr
 			}
 			return decision, nil
@@ -176,6 +178,7 @@ func (s Service) FinishModels(ctx context.Context, permit RunPermit, usages []Mo
 		aggregate.CachedInputTokens += value.Usage.CachedInputTokens
 	}
 	if len(usages) == 0 || ((permit.Policy.Policy.Budget.MaxInputTokens > 0 || permit.Policy.Policy.Budget.MaxOutputTokens > 0 || permit.Policy.Policy.Budget.MaxCostMicrosPerRun > 0) && aggregate.InputTokens+aggregate.OutputTokens == 0) {
+		s.recordUsageMissing(ctx)
 		return Decision{}, runtime.ErrCapabilityUnsupported
 	}
 	actualCost := int64(0)
@@ -206,10 +209,26 @@ func (s Service) FinishModels(ctx context.Context, permit RunPermit, usages []Mo
 	if inspectErr != nil || verdict != DLPVerdictClean {
 		decision.Action, decision.ReasonCode = ActionDeny, ReasonOutputRejected
 	}
-	if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+	if err := s.recordDecision(ctx, decision); err != nil {
 		return Decision{}, err
 	}
 	return decision, nil
+}
+
+func (s Service) recordDecision(ctx context.Context, decision Decision) error {
+	if err := s.Decisions.RecordDecision(ctx, decision); err != nil {
+		return err
+	}
+	if decision.Action == ActionDeny && decision.ReasonCode == ReasonBudgetExceeded {
+		telemetry.OrNoop(s.Telemetry).Counter(telemetry.MetricGovernanceBudgetDenied).Add(ctx, 1,
+			telemetry.ComponentAttribute(telemetry.ComponentWorker))
+	}
+	return nil
+}
+
+func (s Service) recordUsageMissing(ctx context.Context) {
+	telemetry.OrNoop(s.Telemetry).Counter(telemetry.MetricGovernanceUsageMissing).Add(ctx, 1,
+		telemetry.ComponentAttribute(telemetry.ComponentWorker))
 }
 
 func (s Service) Refund(ctx context.Context, permit RunPermit, reason string) error {

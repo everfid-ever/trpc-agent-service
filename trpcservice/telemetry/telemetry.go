@@ -50,6 +50,8 @@ const (
 	MetricOperationTotal         MetricDescriptor = "trpc_operation_total"
 	MetricOperationDuration      MetricDescriptor = "trpc_operation_duration_seconds"
 	MetricSessionBackendDuration MetricDescriptor = "trpc_session_backend_duration_seconds"
+	MetricGovernanceBudgetDenied MetricDescriptor = "trpc_governance_budget_denied_total"
+	MetricGovernanceUsageMissing MetricDescriptor = "trpc_governance_usage_missing_total"
 )
 
 type Component string
@@ -227,7 +229,8 @@ func ValidComponent(value Component) bool {
 
 func ValidMetricDescriptor(value MetricDescriptor) bool {
 	switch value {
-	case MetricAuditExportTotal, MetricAuditExportDuration, MetricAuditOutboxLag, MetricOperationTotal, MetricOperationDuration, MetricSessionBackendDuration:
+	case MetricAuditExportTotal, MetricAuditExportDuration, MetricAuditOutboxLag, MetricOperationTotal, MetricOperationDuration, MetricSessionBackendDuration,
+		MetricGovernanceBudgetDenied, MetricGovernanceUsageMissing:
 		return true
 	default:
 		return false
