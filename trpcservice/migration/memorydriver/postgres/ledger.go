@@ -58,7 +58,25 @@ func (l *Ledger) Claim(ctx context.Context, in memorydriver.ClaimRequest) ([]mem
 	if in.TenantID == "" || in.MigrationID == "" || in.WorkerID == "" || in.Limit < 1 || in.Now.IsZero() || in.Lease <= 0 {
 		return nil, runtime.ErrInvariantViolation
 	}
-	rows, err := l.db.QueryContext(ctx, `WITH candidates AS (SELECT tenant_id,migration_id,app_name,user_id,mutation_id FROM public.memory_migration_mutation WHERE tenant_id=$1 AND migration_id=$2 AND state<>'applied' AND not_before<=$3 AND (state='pending' OR lease_until<=$3) ORDER BY created_at,app_name,user_id,mutation_id FOR UPDATE SKIP LOCKED LIMIT $4) UPDATE public.memory_migration_mutation m SET state='applying',attempt=m.attempt+1,lease_owner=$5,lease_until=$3+($6 * interval '1 microsecond'),updated_at=$3,version=m.version+1 FROM candidates c WHERE (m.tenant_id,m.migration_id,m.app_name,m.user_id,m.mutation_id)=(c.tenant_id,c.migration_id,c.app_name,c.user_id,c.mutation_id) RETURNING `+columns, in.TenantID, in.MigrationID, in.Now.UTC(), in.Limit, in.WorkerID, in.Lease.Microseconds())
+	// The UPDATE has both m and candidates in scope.  Keep every candidate
+	// reference explicit and qualify RETURNING with m: otherwise PostgreSQL 16
+	// rejects columns such as tenant_id as ambiguous.
+	rows, err := l.db.QueryContext(ctx, `WITH candidates AS (
+	SELECT m.tenant_id,m.migration_id,m.app_name,m.user_id,m.mutation_id
+	FROM public.memory_migration_mutation m
+	WHERE m.tenant_id=$1 AND m.migration_id=$2 AND m.state<>'applied'
+	  AND m.not_before<=$3 AND (m.state='pending' OR m.lease_until<=$3)
+	ORDER BY m.created_at,m.app_name,m.user_id,m.mutation_id
+	FOR UPDATE SKIP LOCKED
+	LIMIT $4
+)
+UPDATE public.memory_migration_mutation m
+SET state='applying',attempt=m.attempt+1,lease_owner=$5,
+    lease_until=$3+($6 * interval '1 microsecond'),updated_at=$3,version=m.version+1
+FROM candidates c
+WHERE (m.tenant_id,m.migration_id,m.app_name,m.user_id,m.mutation_id)=
+      (c.tenant_id,c.migration_id,c.app_name,c.user_id,c.mutation_id)
+RETURNING `+qualifiedColumns("m"), in.TenantID, in.MigrationID, in.Now.UTC(), in.Limit, in.WorkerID, in.Lease.Microseconds())
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -105,6 +123,14 @@ func (l *Ledger) Outstanding(ctx context.Context, tenantID, migrationID string) 
 
 const columns = `tenant_id,migration_id,mutation_id,epoch,direction,app_name,user_id,source_digest,state,attempt,lease_owner,lease_until,not_before,last_error_class,target_digest,created_at,applied_at,version`
 const selectSQL = `SELECT ` + columns + ` FROM public.memory_migration_mutation`
+
+func qualifiedColumns(alias string) string {
+	parts := strings.Split(columns, ",")
+	for index := range parts {
+		parts[index] = alias + "." + parts[index]
+	}
+	return strings.Join(parts, ",")
+}
 
 type scanner interface{ Scan(...any) error }
 

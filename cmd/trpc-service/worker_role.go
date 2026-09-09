@@ -140,21 +140,58 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 			_ = client.Close()
 		}
 	}()
+	memoryMigrationRedisClients := map[string]redisclient.UniversalClient{"default": redis}
+	memoryMigrationExtraRedisClients := make([]redisclient.UniversalClient, 0, len(configValue.MemoryRedisConnections)-1)
+	for connectionID, redisURL := range configValue.MemoryRedisConnections {
+		if connectionID == "default" {
+			continue
+		}
+		options, parseErr := redisclient.ParseURL(redisURL)
+		if parseErr != nil {
+			for _, client := range memoryMigrationExtraRedisClients {
+				_ = client.Close()
+			}
+			return errors.New("memory migration redis client initialization failed")
+		}
+		client := redisclient.NewClient(options)
+		memoryMigrationRedisClients[connectionID] = client
+		memoryMigrationExtraRedisClients = append(memoryMigrationExtraRedisClients, client)
+	}
+	defer func() {
+		for _, client := range memoryMigrationExtraRedisClients {
+			_ = client.Close()
+		}
+	}()
 	memoryMigrationPlanner := servicememory.MigrationPlanner{
 		Authority: migrationpostgres.New(db), Configs: configRepo, Profiles: providerRepo, Ledger: memorymigrationpostgres.New(db),
 		BuildTarget: func(_ context.Context, backend provider.BackendProfileSnapshot) (memorydriver.UserApplier, error) {
-			if backend.Provider != "postgres" || (backend.SchemaVersion != 1 && backend.SchemaVersion != 2) {
+			switch backend.Provider {
+			case "postgres":
+				if backend.SchemaVersion != 1 && backend.SchemaVersion != 2 {
+					return nil, runtime.ErrCapabilityUnsupported
+				}
+				connectionID := "default"
+				if backend.SchemaVersion == 2 {
+					connectionID = backend.Configuration["connection_id"]
+				}
+				client := memoryMigrationDBs[connectionID]
+				if client == nil {
+					return nil, runtime.ErrBackendUnavailable
+				}
+				return memorydriver.PostgresTarget{DB: client}, nil
+			case "redis-memory":
+				if backend.SchemaVersion != 1 {
+					return nil, runtime.ErrCapabilityUnsupported
+				}
+				connectionID := backend.Configuration["connection_id"]
+				client := memoryMigrationRedisClients[connectionID]
+				if connectionID == "" || client == nil {
+					return nil, runtime.ErrBackendUnavailable
+				}
+				return memorydriver.RedisTarget{Client: client, KeyPrefix: "trpc-memory"}, nil
+			default:
 				return nil, runtime.ErrCapabilityUnsupported
 			}
-			connectionID := "default"
-			if backend.SchemaVersion == 2 {
-				connectionID = backend.Configuration["connection_id"]
-			}
-			client := memoryMigrationDBs[connectionID]
-			if client == nil {
-				return nil, runtime.ErrBackendUnavailable
-			}
-			return memorydriver.PostgresTarget{DB: client}, nil
 		},
 	}
 	credentialPool := generation.New(secretProvider)

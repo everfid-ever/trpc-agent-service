@@ -49,24 +49,36 @@ func (s dualWriteService) SearchMemories(ctx context.Context, key agentmemory.Us
 	return s.primary.SearchMemories(ctx, key, query, opts...)
 }
 func (s dualWriteService) AddMemory(ctx context.Context, key agentmemory.UserKey, value string, topics []string, opts ...agentmemory.AddOption) error {
+	if err := s.validateWriteContext(ctx, key); err != nil {
+		return err
+	}
 	if err := s.primary.AddMemory(ctx, key, value, topics, opts...); err != nil {
 		return err
 	}
 	return s.sync(ctx, key, "add")
 }
 func (s dualWriteService) UpdateMemory(ctx context.Context, key agentmemory.Key, value string, topics []string, opts ...agentmemory.UpdateOption) error {
+	if err := s.validateWriteContext(ctx, agentmemory.UserKey{AppName: key.AppName, UserID: key.UserID}); err != nil {
+		return err
+	}
 	if err := s.primary.UpdateMemory(ctx, key, value, topics, opts...); err != nil {
 		return err
 	}
 	return s.sync(ctx, agentmemory.UserKey{AppName: key.AppName, UserID: key.UserID}, "update")
 }
 func (s dualWriteService) DeleteMemory(ctx context.Context, key agentmemory.Key) error {
+	if err := s.validateWriteContext(ctx, agentmemory.UserKey{AppName: key.AppName, UserID: key.UserID}); err != nil {
+		return err
+	}
 	if err := s.primary.DeleteMemory(ctx, key); err != nil {
 		return err
 	}
 	return s.sync(ctx, agentmemory.UserKey{AppName: key.AppName, UserID: key.UserID}, "delete")
 }
 func (s dualWriteService) ClearMemories(ctx context.Context, key agentmemory.UserKey) error {
+	if err := s.validateWriteContext(ctx, key); err != nil {
+		return err
+	}
 	if err := s.primary.ClearMemories(ctx, key); err != nil {
 		return err
 	}
@@ -82,15 +94,14 @@ func (s dualWriteService) EnqueueAutoMemoryJob(ctx context.Context, value *sessi
 func (s dualWriteService) Close() error { return s.primary.Close() }
 
 func (s dualWriteService) sync(ctx context.Context, key agentmemory.UserKey, operation string) error {
-	if key.AppName == "" || key.UserID == "" || !strings.HasPrefix(key.AppName, s.plan.TenantID+"/") {
-		return runtime.ErrTenantScope
+	execution, err := s.writeExecution(ctx, key)
+	if err != nil {
+		return err
 	}
-	execution, ok := runtime.ExecutionContextFrom(ctx)
-	if !ok || execution.TenantID != s.plan.TenantID || execution.RequestID == "" {
-		// A successful primary write without a stable id cannot be repaired
-		// safely. Return an explicit error so callers never get a false green.
-		return runtime.ErrInvariantViolation
-	}
+	// 10,000 is an explicit migration-window safety ceiling: the target needs
+	// an exact user image to make clear/delete repairable. Tenants with users
+	// beyond this limit must raise the limit through a paginated image adapter
+	// before enabling an online migration.
 	entries, err := s.primary.ReadMemories(ctx, key, 10_000)
 	if err != nil {
 		return err
@@ -120,6 +131,22 @@ func (s dualWriteService) sync(ctx context.Context, key agentmemory.UserKey, ope
 		return fmt.Errorf("record memory migration repair: %w", recordErr)
 	}
 	return nil
+}
+
+func (s dualWriteService) validateWriteContext(ctx context.Context, key agentmemory.UserKey) error {
+	_, err := s.writeExecution(ctx, key)
+	return err
+}
+
+func (s dualWriteService) writeExecution(ctx context.Context, key agentmemory.UserKey) (runtime.ExecutionContext, error) {
+	if key.AppName == "" || key.UserID == "" || !strings.HasPrefix(key.AppName, s.plan.TenantID+"/") {
+		return runtime.ExecutionContext{}, runtime.ErrTenantScope
+	}
+	execution, ok := runtime.ExecutionContextFrom(ctx)
+	if !ok || execution.TenantID != s.plan.TenantID || execution.RequestID == "" {
+		return runtime.ExecutionContext{}, runtime.ErrInvariantViolation
+	}
+	return execution, nil
 }
 
 func stableMutationID(requestID, operation string, key agentmemory.UserKey, digest string) string {

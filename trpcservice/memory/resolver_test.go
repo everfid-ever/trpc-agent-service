@@ -253,6 +253,10 @@ func TestDualWriteServiceRecordsRepairWhenTargetFails(t *testing.T) {
 	if err := service.AddMemory(context.Background(), key, "needs identity", nil); !errors.Is(err, runtime.ErrInvariantViolation) {
 		t.Fatalf("missing request id error=%v", err)
 	}
+	entries, err := primary.ReadMemories(context.Background(), key, 0)
+	if err != nil || len(entries) != 1 || entries[0].Memory.Memory != "likes tea" {
+		t.Fatalf("untracked write reached primary: entries=%#v err=%v", entries, err)
+	}
 }
 
 func TestDualWriteServiceMakesTargetImageMatchClear(t *testing.T) {

@@ -33,6 +33,16 @@ type RedisSource struct {
 	KeyPrefix string
 }
 
+// RedisTarget is the reverse-direction counterpart to PostgresTarget.  It
+// writes the exact upstream redis-memory hash encoding, so a cutover rollback
+// can keep dual-write intact without making Worker depend on Redis internals.
+// Every user's records live in one Redis hash, making the replacement atomic
+// at EXEC time (and, with the upstream hash tag, in one cluster slot).
+type RedisTarget struct {
+	Client    redis.UniversalClient
+	KeyPrefix string
+}
+
 func (s RedisSource) ExportTenant(ctx context.Context, tenantID string) ([]Image, string, error) {
 	if s.Client == nil || tenantID == "" || strings.ContainsAny(tenantID, "\x00\r\n") {
 		return nil, "", runtime.ErrInvariantViolation
@@ -48,10 +58,20 @@ func (s RedisSource) ExportTenant(ctx context.Context, tenantID string) ([]Image
 		if err != nil {
 			return nil, "", fmt.Errorf("scan redis memory: %w", err)
 		}
-		for _, key := range keys {
-			values, readErr := s.Client.HGetAll(ctx, key).Result()
-			if readErr != nil {
-				return nil, "", fmt.Errorf("read redis memory hash: %w", readErr)
+		commands := make([]*redis.MapStringStringCmd, 0, len(keys))
+		_, readErr := s.Client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for _, key := range keys {
+				commands = append(commands, pipe.HGetAll(ctx, key))
+			}
+			return nil
+		})
+		if readErr != nil {
+			return nil, "", fmt.Errorf("read redis memory hashes: %w", readErr)
+		}
+		for _, command := range commands {
+			values, commandErr := command.Result()
+			if commandErr != nil {
+				return nil, "", fmt.Errorf("read redis memory hash: %w", commandErr)
 			}
 			for _, encoded := range values {
 				var entry agentmemory.Entry
@@ -87,6 +107,56 @@ func (s RedisSource) ExportTenant(ctx context.Context, tenantID string) ([]Image
 	sort.Slice(images, func(i, j int) bool { return coordinate(images[i]) < coordinate(images[j]) })
 	digest, err := Digest(images)
 	return images, digest, err
+}
+
+// ApplyUser replaces precisely one user's Redis hash with the source image.
+// It validates all coordinates before issuing MULTI/EXEC; no value from a
+// different tenant/app/user can be written into the shared Redis namespace.
+func (t RedisTarget) ApplyUser(ctx context.Context, key UserKey, images []Image) (string, error) {
+	if t.Client == nil {
+		return "", runtime.ErrBackendUnavailable
+	}
+	if key.TenantID == "" || key.AppName == "" || key.UserID == "" || !strings.HasPrefix(key.AppName, key.TenantID+"/") {
+		return "", runtime.ErrTenantScope
+	}
+	values := make(map[string]string, len(images))
+	for _, image := range images {
+		entry := image.Entry
+		if entry.AppName != key.AppName || entry.UserID != key.UserID || validateEntry(key.TenantID, entry) != nil {
+			return "", runtime.ErrTenantScope
+		}
+		encoded, err := json.Marshal(entry)
+		if err != nil {
+			return "", err
+		}
+		if prior, exists := values[entry.ID]; exists && prior != string(encoded) {
+			return "", runtime.ErrIdempotencyCollision
+		}
+		values[entry.ID] = string(encoded)
+	}
+	redisKey := redisMemoryKey(t.KeyPrefix, key.AppName, key.UserID)
+	_, err := t.Client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx, redisKey)
+		if len(values) != 0 {
+			pipe.HSet(ctx, redisKey, values)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("replace redis memory user image: %w", err)
+	}
+	return Digest(images)
+}
+
+func redisMemoryKey(prefix, appName, userID string) string {
+	base := fmt.Sprintf("mem:{%s:%s}", appName, userID)
+	if prefix == "" {
+		return base
+	}
+	if strings.HasSuffix(prefix, ":") {
+		return prefix + base
+	}
+	return prefix + ":" + base
 }
 
 // LoadUser is the repair source for a single tenant/app/user coordinate.

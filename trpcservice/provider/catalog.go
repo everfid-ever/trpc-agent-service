@@ -429,12 +429,12 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 		}
 	}
 	if schema.Name == "redis-memory" && schema.SchemaVersion == 1 {
-		if err := validateRedisMemoryConfiguration(configuration); err != nil {
+		if err := validateRedisConfiguration(configuration); err != nil {
 			return BackendProfileSnapshot{}, err
 		}
 	}
 	if schema.Name == "mem0-memory" && schema.SchemaVersion == 1 {
-		if err := validateRedisMemoryConfiguration(configuration); err != nil {
+		if err := validateRedisConfiguration(configuration); err != nil {
 			return BackendProfileSnapshot{}, err
 		}
 	}
@@ -492,7 +492,7 @@ func validatePostgresConfiguration(configuration map[string]string) error {
 	return validateConnectionID(configuration["connection_id"])
 }
 
-func validateRedisMemoryConfiguration(configuration map[string]string) error {
+func validateRedisConfiguration(configuration map[string]string) error {
 	return validateConnectionID(configuration["connection_id"])
 }
 

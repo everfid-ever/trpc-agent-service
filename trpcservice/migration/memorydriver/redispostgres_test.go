@@ -52,3 +52,43 @@ func TestRedisSourceSkipsOtherTenantEntries(t *testing.T) {
 		t.Fatalf("images=%#v err=%v", images, err)
 	}
 }
+
+func TestRedisTargetApplyUserReplacesOnlyOneUserImage(t *testing.T) {
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	defer client.Close()
+	ctx := context.Background()
+	now := time.Unix(3, 0).UTC()
+	key := UserKey{TenantID: "tenant-a", AppName: "tenant-a/app", UserID: "u"}
+	otherKey := redisMemoryKey("trpc-memory", "tenant-a/app", "other")
+	if err := client.HSet(ctx, otherKey, "other", `{"untouched":true}`).Err(); err != nil {
+		t.Fatal(err)
+	}
+	image := Image{Entry: agentmemory.Entry{ID: "one", AppName: key.AppName, UserID: key.UserID, Memory: &agentmemory.Memory{Memory: "one"}, CreatedAt: now, UpdatedAt: now}}
+	target := RedisTarget{Client: client, KeyPrefix: "trpc-memory"}
+	digest, err := target.ApplyUser(ctx, key, []Image{image})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := Digest([]Image{image})
+	if digest != want {
+		t.Fatalf("digest=%q want=%q", digest, want)
+	}
+	values, err := client.HGetAll(ctx, redisMemoryKey("trpc-memory", key.AppName, key.UserID)).Result()
+	if err != nil || len(values) != 1 {
+		t.Fatalf("user values=%#v err=%v", values, err)
+	}
+	if count, err := client.HLen(ctx, otherKey).Result(); err != nil || count != 1 {
+		t.Fatalf("other user modified: count=%d err=%v", count, err)
+	}
+	if _, err := target.ApplyUser(ctx, key, nil); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := client.Exists(ctx, redisMemoryKey("trpc-memory", key.AppName, key.UserID)).Result(); err != nil || exists != 0 {
+		t.Fatalf("user key exists=%d err=%v", exists, err)
+	}
+}
