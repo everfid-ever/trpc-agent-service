@@ -16,10 +16,21 @@ type Manager struct {
 	leases map[coordination.SessionKey]coordination.Lease
 	fences map[coordination.SessionKey]uint64
 	nextID uint64
+	now    func() time.Time
 }
 
 func New() *Manager {
-	return &Manager{leases: make(map[coordination.SessionKey]coordination.Lease), fences: make(map[coordination.SessionKey]uint64)}
+	return NewWithClock(time.Now)
+}
+
+// NewWithClock is for deterministic local composition tests. Production
+// deployments use the Redis coordinator, while this adapter deliberately
+// keeps its lease clock injectable rather than relying on test sleeps.
+func NewWithClock(now func() time.Time) *Manager {
+	if now == nil {
+		now = time.Now
+	}
+	return &Manager{leases: make(map[coordination.SessionKey]coordination.Lease), fences: make(map[coordination.SessionKey]uint64), now: now}
 }
 func (m *Manager) Acquire(ctx context.Context, key coordination.SessionKey, workerID string, ttl time.Duration) (coordination.Lease, error) {
 	if err := ctx.Err(); err != nil {
@@ -27,7 +38,7 @@ func (m *Manager) Acquire(ctx context.Context, key coordination.SessionKey, work
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now()
+	now := m.now()
 	if current, ok := m.leases[key]; ok && current.ExpiresAt.After(now) {
 		return coordination.Lease{}, runtime.ErrVersionConflict
 	}
@@ -44,10 +55,10 @@ func (m *Manager) Renew(ctx context.Context, lease coordination.Lease, ttl time.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	current, ok := m.leases[lease.Session]
-	if !ok || current.WorkerID != lease.WorkerID || current.LeaseID != lease.LeaseID || current.Fence != lease.Fence || current.ExpiresAt.Before(time.Now()) {
+	if !ok || current.WorkerID != lease.WorkerID || current.LeaseID != lease.LeaseID || current.Fence != lease.Fence || current.ExpiresAt.Before(m.now()) {
 		return coordination.Lease{}, runtime.ErrLeaseLost
 	}
-	current.ExpiresAt = time.Now().Add(ttl)
+	current.ExpiresAt = m.now().Add(ttl)
 	m.leases[lease.Session] = current
 	return current, nil
 }
