@@ -81,3 +81,33 @@ func TestMigrationPlannerWrapsActiveSourceBundle(t *testing.T) {
 		t.Fatalf("target calls=%d, want dual-write", target.calls)
 	}
 }
+
+// A target-config bundle stays available during cutover. Its reverse
+// dual-write target is the source Redis backend, so this locks the deployment
+// contract that originally made this path fail with ErrCapabilityUnsupported.
+func TestMigrationPlannerWrapsCutoverTargetBundleWithRedisReverseTarget(t *testing.T) {
+	target := &plannerTarget{}
+	var built provider.BackendProfileSnapshot
+	planner := MigrationPlanner{
+		Authority: plannerAuthority{values: []migration.Migration{{TenantID: "tenant-a", MigrationID: "move", Domain: memorydriver.Domain, Epoch: 2,
+			Source: migration.Binding{ConfigVersion: 1, BackendProfileID: "redis", BackendVersion: 1}, Target: migration.Binding{ConfigVersion: 2, BackendProfileID: "postgres", BackendVersion: 1}, State: migration.StateCutover}}},
+		Configs:  plannerConfigs{values: map[int64]config.Snapshot{1: {TenantID: "tenant-a", ConfigVersion: 1, Payload: config.ConfigV1{BackendBindings: []config.BackendBinding{{Domain: "memory", BackendProfileID: "redis", BackendVersion: 1}}}}}},
+		Profiles: plannerProfiles{value: provider.BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "redis", Version: 1, Status: "active", Provider: "redis-memory", Capabilities: provider.CapabilitySet{"strong_ryw": true}}},
+		Ledger:   plannerLedger{}, BuildTarget: func(_ context.Context, backend provider.BackendProfileSnapshot) (memorydriver.UserApplier, error) {
+			built = backend
+			return target, nil
+		},
+	}
+	snapshot := profile.ExecutionProfileSnapshot{Key: profile.ExecutionProfileKey{TenantID: "tenant-a", ConfigVersion: 2}, AppName: "tenant-a/app"}
+	service, err := planner.Decorate(context.Background(), snapshot, memoryinmemory.NewMemoryService())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := runtime.WithExecutionContext(context.Background(), runtime.ExecutionContext{TenantID: "tenant-a", RequestID: "request"})
+	if err := service.AddMemory(ctx, agentmemory.UserKey{AppName: snapshot.AppName, UserID: "user"}, "value", nil); err != nil {
+		t.Fatal(err)
+	}
+	if built.Provider != "redis-memory" || target.calls != 1 {
+		t.Fatalf("built=%#v target calls=%d, want redis reverse dual-write", built, target.calls)
+	}
+}
