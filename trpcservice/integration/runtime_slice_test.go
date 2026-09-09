@@ -62,6 +62,12 @@ const (
 	tenantA = "t_01ARZ3NDEKTSV4RRFFQ69G5FAX"
 	tenantB = "t_01ARZ3NDEKTSV4RRFFQ69G5FAY"
 	appID   = "app_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	// This slice intentionally kills an in-flight Worker, then waits for a
+	// Redis pending-entry reclaim, PostgreSQL fence handoff and parked-input
+	// wakeup. Keep it bounded, but leave enough room for an unloaded CI runner
+	// to schedule all three recovery loops; 8 seconds was intermittently too
+	// short despite healthy backend containers.
+	runtimeSliceTerminalTimeout = 20 * time.Second
 )
 
 func TestHTTPPostgreSQLRedisTwoWorkerSlice(t *testing.T) {
@@ -976,18 +982,24 @@ func requestGatewayCancel(t *testing.T, handler http.Handler, requestID string, 
 
 func waitForTerminal(t *testing.T, tasks *gatewaypostgres.TaskStore, tenantID, requestID string) gateway.ExecutionStatus {
 	t.Helper()
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(runtimeSliceTerminalTimeout)
+	var last gateway.ExecutionStatus
+	var lastErr error
 	for time.Now().Before(deadline) {
 		status, err := tasks.GetExecution(context.Background(), gateway.ExecutionKey{TenantID: tenantID, RequestID: requestID})
 		if err == nil && status.Outcome == runtime.OutcomeSucceeded {
 			return status
 		}
+		if err == nil && status.Outcome.Terminal() {
+			t.Fatalf("request %s reached unexpected terminal outcome: %#v", requestID, status)
+		}
 		if err != nil && !errors.Is(err, runtime.ErrNotFound) {
 			t.Fatal(err)
 		}
+		last, lastErr = status, err
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("request %s did not become terminal", requestID)
+	t.Fatalf("request %s did not become terminal within %s; last status=%#v err=%v", requestID, runtimeSliceTerminalTimeout, last, lastErr)
 	return gateway.ExecutionStatus{}
 }
 

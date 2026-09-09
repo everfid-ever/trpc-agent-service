@@ -122,6 +122,26 @@ POST /v1/tenants/{tenant_id}/session-migrations/{migration_id}/cleanup
 
 同源 `/admin/` 控制台提供同一套迁移操作：输入 staged target ConfigVersion 创建、按 migration ID 查看 authority evidence/drain，再以浏览器确认执行 cutover、observe、rollback 或 cleanup。它仍使用短期 Admin Token 换取 HttpOnly Strict Cookie，所有变更由同源 CSRF 检查保护；页面不会读取或显示 Session PostgreSQL DSN。
 
+### 1.3 Memory Redis → PostgreSQL 迁移（Compose 验收）
+
+`memory-migrate` 是与 Worker 分离、须显式确认的一次性 Compose operator。当前可执行的数据面仅为官方 `redis-memory` schema v1 到 `postgres` schema v1/v2，且两端都必须声明 `strong_ryw`、使用部署注册表中无额外 credential 的 `connection_id`。Mem0、InMemory 及其他向量/Memory provider 可以被租户选作运行时后端，但**不在本仓库的在线迁移能力面内**。
+
+Admin API 只允许从当前 active ConfigSnapshot 推导 source，并指向已 staged 的 target ConfigVersion 创建 Memory migration；可查询、暂停、恢复或在 dual-write 前 abort。当前没有 Memory cutover/observe/rollback HTTP 入口，`memory-migrate` 也会在 `verify` 写入 evidence 后停止。因此这是一条可重复的 Compose 数据面验收流程，不是生产切流工具。
+
+```bash
+export TRPC_MEMORY_MIGRATION_TENANT_ID='t_example'
+export TRPC_MEMORY_MIGRATION_ID='memory-redis-to-postgres-2026-01'
+export TRPC_MEMORY_MIGRATION_WORKER_ID='operator-01'
+export TRPC_MEMORY_MIGRATION_CONFIRM=true
+
+# 与 Worker 相同的部署注册表；Profile 中只保存 connection_id。
+export TRPC_MEMORY_REDIS_CONNECTIONS='{"memory-source":"redis://redis:6379/0"}'
+export TRPC_MEMORY_POSTGRES_CONNECTIONS='{"memory-target":"postgres://postgres:postgres@postgres:5432/trpc_agent_service_test?sslmode=disable"}'
+go run ./cmd/trpc-service memory-migrate
+```
+
+每次调用至多推进一个 authority phase 或一个 backfill/repair batch：`planned → snapshot → dual_write → backfill → verify`。进入 `dual_write` 后，Worker 对该 tenant 的每次可追踪 Memory 写都会按精确 ConfigVersion 读取整用户镜像并复制到目标；目标短暂失败会留下 durable mutation ledger，由 operator 的 claim/repair 重试。`verify` 要求 repair backlog 清零、count/digest 一致，因而不会把单边失败报告为成功。共享 Redis export 会跳过其他 tenant 的 entry；反向 Redis 镜像 writer 已具备，以便未来受控 cutover/observe 实施 rollback sync，但当前 Compose 交付不激活该阶段。
+
 ## 2. 可选：配置一个审阅后的 MCP 工具
 
 MCP 不属于 demo，也不会由模型提供 URL 或工具名。只允许一个 tenant 下的一个已审阅 HTTPS SSE/streamable 端点映射为一个固定 ToolRef；stdio、私网/回环地址、重定向、动态 ToolSet、`mcpbroker` 和通用 `mcp_call` 均被拒绝。
