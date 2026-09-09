@@ -5,8 +5,11 @@ import (
 	"errors"
 	"testing"
 
+	oteltrace "go.opentelemetry.io/otel/trace"
+
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 )
 
 type replyQueueStub struct {
@@ -35,6 +38,38 @@ func (s *eventDelivererStub) Deliver(context.Context, channel.ReplyEvent) error 
 	s.calls++
 	return s.err
 }
+
+type traceCapturingDeliverer struct{ traceParent string }
+
+func (s *traceCapturingDeliverer) Deliver(ctx context.Context, _ channel.ReplyEvent) error {
+	s.traceParent = telemetry.EffectiveTraceParent(ctx, "")
+	return nil
+}
+
+type traceCapturingProvider struct {
+	operation telemetry.Operation
+	parent    oteltrace.SpanContext
+}
+
+func (p *traceCapturingProvider) StartSpan(ctx context.Context, operation telemetry.Operation, _ ...telemetry.Attribute) (context.Context, telemetry.Span) {
+	p.operation = operation
+	p.parent = oteltrace.SpanContextFromContext(ctx)
+	return ctx, traceCapturingSpan{}
+}
+func (*traceCapturingProvider) Counter(telemetry.MetricDescriptor) telemetry.Counter {
+	return telemetry.Noop().Counter(telemetry.MetricOperationTotal)
+}
+func (*traceCapturingProvider) Histogram(telemetry.MetricDescriptor) telemetry.Histogram {
+	return telemetry.Noop().Histogram(telemetry.MetricOperationDuration)
+}
+func (*traceCapturingProvider) Logger(telemetry.Component) telemetry.Logger {
+	return telemetry.Noop().Logger(telemetry.ComponentChannelDelivery)
+}
+func (*traceCapturingProvider) Shutdown(context.Context) error { return nil }
+
+type traceCapturingSpan struct{}
+
+func (traceCapturingSpan) End(error) {}
 
 func TestConsumerACKsOnlyAfterDurableDeliverySuccess(t *testing.T) {
 	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
@@ -82,5 +117,31 @@ func TestConsumerRejectsCrossBindingDelivery(t *testing.T) {
 	count, err := consumer.ReclaimOnce(context.Background())
 	if count != 0 || !errors.Is(err, runtime.ErrTenantScope) || len(queue.acked) != 0 {
 		t.Fatalf("count=%d acked=%d err=%v", count, len(queue.acked), err)
+	}
+}
+
+func TestConsumerRestoresDurableTraceParentBeforeIMDelivery(t *testing.T) {
+	const traceParent = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
+	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
+	delivery := channel.ReplyDelivery{ID: "1-0", Destination: destination, Event: channel.ReplyEvent{
+		SchemaVersion: 1, TenantID: "tenant", RequestID: "request", ChannelBindingID: "binding", DeliveryKey: "reply", ContentRef: "result://request", TraceParent: traceParent,
+	}}
+	queue := &replyQueueStub{reclaimed: []channel.ReplyDelivery{delivery}}
+	deliverer := &traceCapturingDeliverer{}
+	provider := &traceCapturingProvider{}
+	consumer := Consumer{Queue: queue, Deliverer: deliverer, Destination: destination, ConsumerID: "adapter-1", Telemetry: provider}
+
+	count, err := consumer.ReclaimOnce(context.Background())
+	if err != nil || count != 1 || len(queue.acked) != 1 {
+		t.Fatalf("count=%d acked=%d err=%v", count, len(queue.acked), err)
+	}
+	if provider.operation != telemetry.OperationChannelDeliver {
+		t.Fatalf("operation=%q", provider.operation)
+	}
+	if got := provider.parent.TraceID().String(); got != "0123456789abcdef0123456789abcdef" || !provider.parent.IsRemote() {
+		t.Fatalf("restored parent=%s remote=%t", got, provider.parent.IsRemote())
+	}
+	if deliverer.traceParent != traceParent {
+		t.Fatalf("adapter traceparent=%q want=%q", deliverer.traceParent, traceParent)
 	}
 }
