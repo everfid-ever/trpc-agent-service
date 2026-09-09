@@ -40,6 +40,11 @@ cleanup() {
   local status=$?
   if [[ ${status} -ne 0 ]]; then
     compose logs --no-color >"${diagnostics}/compose.log" || true
+    # CI workspaces disappear with the runner. Emit the two services that
+    # establish the composition before linking the retained full log, so a
+    # bootstrap/configuration failure is diagnosable from the job itself.
+    echo "webui-bootstrap and Qdrant diagnostics:" >&2
+    compose logs --no-color webui-bootstrap qdrant >&2 || true
     echo "local multi-node smoke failed; diagnostics retained at ${diagnostics}/compose.log" >&2
   fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true

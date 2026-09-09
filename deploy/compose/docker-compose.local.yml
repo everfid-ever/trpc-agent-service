@@ -51,6 +51,14 @@ services:
     profiles: ["webui", "webui-multinode", "feishu-local", "wecom-local"]
     volumes:
       - local-qdrant:/qdrant/storage
+    # The local bootstrap creates a collection before either WebUI node can
+    # start. A started container is not enough: wait until Qdrant accepts an
+    # HTTP request so the bootstrap cannot race its storage initialization.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/6333; printf \"GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\" >&3; IFS= read -r line <&3; [[ \"$$line\" == *\" 200 \"* ]]'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   clamav:
     # `1.4_base` is amd64-only. Pin the full official multi-arch image so the
@@ -272,9 +280,9 @@ services:
 
   # The multi-node profile uses the same durable PostgreSQL/Redis authorities
   # as webui-local, but starts two independently identified composition nodes.
-  # Bootstrap runs once so the nodes contend only on runtime work, never on
-  # fixture creation. Each node writes its own scoped secret projection inside
-  # its disposable container filesystem.
+  # Bootstrap runs once, after Qdrant is actually queryable, so the nodes
+  # contend only on runtime work, never on fixture creation. Each node writes
+  # its own scoped secret projection inside its disposable container filesystem.
   webui-bootstrap:
     build:
       context: ../..
@@ -300,6 +308,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
         condition: service_healthy
 
   webui-node-a:
