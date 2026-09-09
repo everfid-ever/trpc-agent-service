@@ -109,7 +109,6 @@ go run ./cmd/local-webui-load \
 ```bash
 bash scripts/ci/admission.sh
 bash scripts/e2e/backend-adapter.sh
-bash scripts/e2e/multinode-fault.sh
 bash scripts/e2e/dependency-recovery.sh
 ```
 
@@ -134,7 +133,6 @@ bash scripts/e2e/dependency-recovery.sh
 ## 7. 最终验收清单
 
 - [ ] `bash scripts/ci/admission.sh` 和 `bash scripts/e2e/backend-adapter.sh` 通过。
-- [ ] `bash scripts/e2e/multinode-fault.sh` 证明两租户、两 Worker 下，节点 A 被 `SIGKILL`（exit 137）后节点 B 仍存活。
 - [ ] 下列定向恢复契约通过：
 
   ```bash

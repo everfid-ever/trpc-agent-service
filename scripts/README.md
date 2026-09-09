@@ -6,7 +6,7 @@
 | 目录 | 调用者 | 内容 |
 | --- | --- | --- |
 | `ci/` | GitHub Actions、开发者 | admission、格式、依赖边界、文档链接、覆盖率 gate |
-| `e2e/` | GitHub Actions、开发者 | 按域后端 e2e、IM 契约、多节点故障、依赖恢复 |
+| `e2e/` | GitHub Actions、开发者 | 按域后端 e2e、IM 契约与依赖恢复 |
 | `compose/` | `start.sh`、Compose 容器、开发者 | quickstart 与本地 PostgreSQL/Redis migration/runtime slice |
 | `lib/` | 其他脚本 | 零-skip 等无独立业务语义的 helper |
 | `internal/` | Compose 容器定义 | backend adapter e2e 的容器内执行器；不得作为用户入口 |

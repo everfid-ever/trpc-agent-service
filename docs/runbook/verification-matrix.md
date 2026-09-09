@@ -19,7 +19,6 @@
 | Runtime e2e | `bash scripts/e2e/backend-adapter.sh runtime` | Docker Desktop 或 CI Docker daemon | PostgreSQL/Redis worker slice、lease、relay、recovery 零-skip contract | 本地/CI | CI | 不需要 |
 | Storage e2e | `bash scripts/e2e/backend-adapter.sh storage` | Docker Desktop 或 CI Docker daemon | MinIO、Qdrant、Vault 的真实协议 adapter 均零-skip；临时资源自动清理 | 本地/CI | CI | 不需要 |
 | IM e2e | `bash scripts/e2e/im.sh` | Go 1.25.x | Feishu/WeCom 签名 callback、1000 并发重复投递与 durable ingress 契约 | 本地/CI | CI | 真实渠道另需人工 |
-| Fault e2e | `bash scripts/e2e/multinode-fault.sh` | Docker Desktop；CI 使用非凭据 placeholder 且不发起模型调用 | 两租户 Worker slice 后，对 node A 发送 SIGKILL 并断言 exit 137；node B 持续 ready | 本地/CI | CI | 不需要（本场景不调用模型） |
 | Prometheus 配置 | `docker run --rm --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro" --entrypoint promtool prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml` | Docker daemon | `promtool` 成功解析 scrape 配置 | 本地/CI | CI | 不需要 |
 | Session 迁移控制面 | 包含在 `bash scripts/e2e/backend-adapter.sh migration` | Docker Desktop 或 CI Docker daemon | current source 与 immutable candidate 的绑定推导；verification/watermark 仅从迁移 authority 读取；cutover/observe/rollback CAS 请求通过 | 本地/CI | CI | 不需要 |
 | Knowledge 迁移 operator role / SDK Qdrant runtime | `go test ./cmd/trpc-service ./trpcservice/migration/... ./trpcservice/storage/knowledge/qdrant`（亦包含于 migration/storage e2e） | Go 1.25.x、后端集成 job 另需 Docker | role 拒绝非法环境；step、journal recovery、官方 Qdrant gRPC scope filter 与 envelope 复核通过 | 本地/CI | CI | 不需要 |
@@ -32,7 +31,6 @@
 | WebUI + 模型/Knowledge | `./start.sh`，打开 `http://localhost:58081/webui/` | Docker Desktop、DeepSeek Key | `/readyz` 为 200；一次文本对话得到回复；Qdrant fixture、fake embedding、Skill 与 Knowledge manifest 就绪 | 本地 + 真实模型 | 否 | 需人工 |
 | 渠道真机联调 | [channel-live-validation.md](channel-live-validation.md) | 对应渠道的真实凭据与回调/接收模式 | request ID、回复消息 ID 与 terminal audit ID 的真实往返 | 人工发布门禁 | 否 | 需人工 |
 | CodeExec Worker | `docker compose -f deploy/compose/docker-compose.local.yml --profile codeexec up worker-codeexec` | Docker Desktop、`.env.local` 中经 digest 审核的 `TRPC_CODE_EXECUTORS` | 专用 image、bubblewrap、私有 workspace；ToolRef 与治理许可齐备 | 本地 | 本地 | 需人工 |
-| 多租户、多节点 | `bash scripts/e2e/multinode-fault.sh` | Docker Desktop；真实模型演练另需 DeepSeek Key | 两租户、两 Worker；node A 被 SIGKILL 后 node B 保持 ready | 本地/CI | CI | 真实模型调用另需人工 |
 | 依赖短断恢复 | `bash scripts/e2e/dependency-recovery.sh` | Docker Desktop、DeepSeek Key | PostgreSQL/Redis 中断期间节点 unready，恢复后无需重启重新 ready | 本地 + 真实模型 | 本地 | 需人工 |
 | Feishu 文本/群聊 | 依据 [getting-started.md](getting-started.md) 第 3 节启动 `feishu-local` 并配置 tunnel | DeepSeek Key、`feishu.env`、Feishu 应用、临时 HTTPS URL | callback 验签成功；私聊收到回复；群聊仅 @ 机器人时处理 | 真实外部 | 否 | 需人工 |
 | Feishu 图片 | 在同一 Feishu p2p 会话发送一张新的 JPEG/PNG/GIF/WebP（≤10 MiB） | 同上、ClamAV healthy、视觉模型 | 回复基于图片内容；日志显示媒体下载、扫描和 prepared input | 真实外部 | 否 | 需人工 |

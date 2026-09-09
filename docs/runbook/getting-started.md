@@ -48,14 +48,13 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
 
    预期最后一条命令输出 `000001`。然后打开 <http://localhost:58081/webui/>，按第 3 节完成一次文本和 durable confirmation 验收。
 
-5. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据；其中多节点与依赖恢复需要第 3 步的 DeepSeek Key：
+5. 按需执行本地自动化验证。它们使用独立的临时容器/卷或当前本地 Compose，不要求任何 IM 凭据；依赖恢复演练需要第 3 步的 DeepSeek Key：
 
    ```bash
    # 无凭据的最终验收：空库单一基线、fake chat 与 SSE
    bash scripts/ci/admission.sh --demo
    bash scripts/ci/admission.sh
    bash scripts/e2e/backend-adapter.sh
-   bash scripts/e2e/multinode-fault.sh
    bash scripts/e2e/dependency-recovery.sh
    ```
 
@@ -71,7 +70,7 @@ docker compose -f deploy/compose/docker-compose.local.yml --profile webui down -
 
 - Docker Desktop（包含 `docker compose` v2）；
 - 无凭据 Demo 还需要 `curl`；
-- 真实 WebUI、IM、多节点与依赖恢复验证才需要一个可用的 DeepSeek API Key；
+- 真实 WebUI、IM 与依赖恢复验证才需要一个可用的 DeepSeek API Key；
 - 本机端口 `55432`、`56379`、`58081`、`56686`、`59464` 未被占用。
 
 ### 1.1 可选：声明多个 Session PostgreSQL 数据平面
@@ -324,15 +323,11 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile wecom-local up -d --force-recreate wecom-local
 ```
 
-## 6. 多节点 Docker 验收
+## 6. 多节点 Compose 参考
 
-多租户/节点化代码不会因本地验收而被简化。`webui-multinode` profile 先建立同一套本地 tenant、ConfigSnapshot、Graph 与 scoped secret fixture，再启动两个独立容器；两个容器共享 PostgreSQL 和 Redis、分别使用唯一 Worker/relay/delivery consumer ID。
+`webui-multinode` profile 可用于本地观察两个独立 WebUI composition node；它们共享 PostgreSQL 和 Redis，并使用唯一 Worker、relay、delivery 和 wakeup consumer ID。该 profile 支撑依赖短断恢复演练，但不再作为 SIGKILL 接管的自动验收。
 
-```bash
-bash scripts/e2e/multinode-fault.sh
-```
-
-该 smoke 使用随机 Compose 项目和随机本机端口。它先在临时 PostgreSQL 16 数据库中创建两个 tenant、运行两个 Redis-backed Worker 并验证 tenant scope，再依次确认 node A、node B 的 `/readyz`，向 node A 的真实容器发送 `SIGKILL` 并断言 exit code 为 137，随后确认 node B 保持 ready。成功后自动删除本次容器和卷；失败日志路径会打印到终端。若要手动查看两个节点页面：
+若要手动查看两个节点页面：
 
 ```bash
 docker compose -f deploy/compose/docker-compose.local.yml \

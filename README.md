@@ -7,7 +7,7 @@
 ## 已实现能力
 
 - 多租户配置、密钥作用域、会话、Inbox/Outbox、审计与合规账本均持久化于 PostgreSQL；Redis 提供共享调度、租约和跨节点协调。
-- Gateway、Worker、relay、delivery 与 wakeup consumer 可部署为独立节点；本地 smoke 覆盖两个租户、两个 Worker 及单节点故障后的持续服务。
+- Gateway、Worker、relay、delivery 与 wakeup consumer 可部署为独立节点；PostgreSQL/Redis runtime slice 覆盖两个租户、两个 Worker 与共享后端的隔离契约。
 - WebUI、飞书、企业微信回调均经过验签、去重、身份映射、耐久化 ingress、预处理、异步 Runner 和官方回复 API。
 - 文本、图片和文件附件走受限大小的预处理与租户隔离 artifact 流；本地 ClamAV 扫描后，以 DeepSeek 多模态模型处理可访问的媒体内容。
 - 模型、工具、知识、治理策略和通道绑定均按租户/版本解析；危险操作支持 durable confirmation。
@@ -75,7 +75,6 @@ cp deploy/compose/.env.local.example deploy/compose/.env.local
 | WebUI + DeepSeek 多模态对话 | secrets/deepseek-api-key | ./start.sh |
 | 飞书单聊、群聊、图片 | DeepSeek Key、secrets/feishu.env、临时公网 HTTPS tunnel | docker compose -f deploy/compose/docker-compose.local.yml --profile feishu-local up -d --build |
 | 企业微信回调与回复 | DeepSeek Key、secrets/wecom.env、临时公网 HTTPS tunnel | docker compose -f deploy/compose/docker-compose.local.yml --profile wecom-local up -d --build |
-| 两租户、两节点连续性 | DeepSeek Key | bash scripts/e2e/multinode-fault.sh |
 | PostgreSQL/Redis 短断恢复 | DeepSeek Key | bash scripts/e2e/dependency-recovery.sh |
 | PostgreSQL、Redis、Qdrant、Vault adapter | Docker Desktop | bash scripts/e2e/backend-adapter.sh |
 
@@ -97,9 +96,6 @@ bash scripts/ci/admission.sh --race
 
 # 独立后端 adapter smoke（会自动清理自己的容器与卷）
 bash scripts/e2e/backend-adapter.sh
-
-# 两租户、两个 WebUI/Worker 节点和节点故障连续性
-bash scripts/e2e/multinode-fault.sh
 
 # PostgreSQL / Redis 短断后无需重启的恢复能力
 bash scripts/e2e/dependency-recovery.sh

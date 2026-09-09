@@ -5,7 +5,7 @@
 完整启动、验证与清理步骤见 [`docs/runbook/getting-started.md`](../../docs/runbook/getting-started.md)。
 
 - `webui` profile：PostgreSQL、Redis、Jaeger、OTel Collector 和 `webui-local`；需要本机 Docker secret 中的 DeepSeek Key。它还创建隔离的 `webui-local-skills` volume，供已发布 Skill 的受保护 staging 使用。
-- `webui-multinode` profile：先等待 Qdrant 的 HTTP health，再运行一次性 `webui-local-bootstrap`，随后启动两个独立的 WebUI composition node；它们共享 PostgreSQL/Redis 及同一个只用于 Skill staging 的 volume，使用不同 Worker、relay、delivery 和 wakeup consumer ID。运行 `bash scripts/e2e/multinode-fault.sh` 会先执行真实 PostgreSQL/Redis 的两租户、两 Worker 集成 slice，再验证一个 WebUI 节点停止后另一个节点仍然 ready。
+- `webui-multinode` profile：先等待 Qdrant 的 HTTP health，再运行一次性 `webui-local-bootstrap`，随后启动两个独立的 WebUI composition node；它们共享 PostgreSQL/Redis 及同一个只用于 Skill staging 的 volume，使用不同 Worker、relay、delivery 和 wakeup consumer ID。该 profile 供本地依赖短断恢复演练使用，不构成单节点故障接管的自动验收声明。
 - `feishu-local` profile：开发者显式提供本地忽略的 `secrets/feishu.env` 与 DeepSeek Key 后，启动真实飞书 callback、验签、durable ingress、Worker 和 Reply API 投递。它只用于本机 Docker 验收；外部事件订阅还需要把宿主机的 `58086` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/feishu?route_key=local-feishu`。
 - `wecom-local` profile：同 feishu-local 的组合方式，改用本地忽略的 `secrets/wecom.env`（Corp ID、Agent ID、回调 Token/EncodingAESKey、应用 Secret），启动真实企业微信回调验签、durable ingress、Worker 和官方 Reply API 投递。外部回调需要把宿主机的 `58087` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/wecom?route_key=local-wecom`。
 - `runtime-test` profile：本地 PostgreSQL/Redis migration 与恢复契约。

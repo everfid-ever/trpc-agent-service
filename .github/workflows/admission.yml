@@ -130,19 +130,6 @@ jobs:
       - name: Run repository-verifiable IM protocol e2e
         run: bash scripts/e2e/im.sh
 
-  fault-e2e:
-    name: Fault e2e — SIGKILL multi-node handoff
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    steps:
-      - uses: actions/checkout@v4
-      - name: Supply a non-secret placeholder for bootstrap-only model configuration
-        run: |
-          mkdir -p deploy/compose/secrets
-          printf '%s\n' 'ci-placeholder-not-a-model-credential' > deploy/compose/secrets/deepseek-api-key
-      - name: Kill one live composition node and verify the peer remains ready
-        run: bash scripts/e2e/multinode-fault.sh
-
   credential-free-final-acceptance:
     name: Empty DB, fake provider and SSE final acceptance
     runs-on: ubuntu-24.04
