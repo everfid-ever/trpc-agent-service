@@ -25,7 +25,17 @@ func (c *Catalog) Stage(ctx context.Context, in skill.Package) (skill.Package, e
 		return skill.Package{}, err
 	}
 	var out skill.Package
-	err = c.db.QueryRowContext(ctx, `INSERT INTO skill_catalog(tenant_id,skill_id,skill_version,content_digest,relative_path,state) VALUES($1,$2,$3,$4,$5,'staged') ON CONFLICT(tenant_id,skill_id,skill_version) DO UPDATE SET skill_id=EXCLUDED.skill_id RETURNING tenant_id,skill_id,skill_version,content_digest,relative_path`, value.TenantID, value.SkillID, value.Version, value.ContentDigest, value.RelativePath).Scan(&out.TenantID, &out.SkillID, &out.Version, &out.ContentDigest, &out.RelativePath)
+	err = c.db.QueryRowContext(ctx, `INSERT INTO skill_catalog(tenant_id,skill_id,skill_version,content_digest,relative_path,state)
+VALUES($1,$2,$3,$4,$5,'staged') ON CONFLICT(tenant_id,skill_id,skill_version) DO NOTHING
+RETURNING tenant_id,skill_id,skill_version,content_digest,relative_path`, value.TenantID, value.SkillID, value.Version, value.ContentDigest, value.RelativePath).Scan(&out.TenantID, &out.SkillID, &out.Version, &out.ContentDigest, &out.RelativePath)
+	if errors.Is(err, sql.ErrNoRows) {
+		// A Skill package is immutable. Retrying Stage must therefore read the
+		// existing package rather than issue a no-op UPDATE: the schema trigger
+		// correctly reserves UPDATE for a record-version advancing transition.
+		err = c.db.QueryRowContext(ctx, `SELECT tenant_id,skill_id,skill_version,content_digest,relative_path
+FROM skill_catalog WHERE tenant_id=$1 AND skill_id=$2 AND skill_version=$3`, value.TenantID, value.SkillID, value.Version).
+			Scan(&out.TenantID, &out.SkillID, &out.Version, &out.ContentDigest, &out.RelativePath)
+	}
 	if err != nil {
 		return skill.Package{}, translate(err)
 	}

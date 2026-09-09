@@ -32,6 +32,9 @@ func TestSkillCatalogPostgreSQL16(t *testing.T) {
 	if _, err := catalog.Stage(context.Background(), value); err != nil {
 		t.Fatal(err)
 	}
+	if got, err := catalog.Stage(context.Background(), value); err != nil || got != value {
+		t.Fatalf("idempotent staged retry got=%#v err=%v", got, err)
+	}
 	if _, err := catalog.Resolve(context.Background(), value.TenantID, value.SkillID, value.Version); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("staged resolve err=%v", err)
 	}
@@ -40,5 +43,8 @@ func TestSkillCatalogPostgreSQL16(t *testing.T) {
 	}
 	if got, err := catalog.Resolve(context.Background(), value.TenantID, value.SkillID, value.Version); err != nil || got != value {
 		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	if got, err := catalog.Stage(context.Background(), value); err != nil || got != value {
+		t.Fatalf("idempotent published retry got=%#v err=%v", got, err)
 	}
 }
