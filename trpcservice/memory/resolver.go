@@ -155,16 +155,10 @@ func (r Resolver) Resolve(ctx context.Context, snapshot profile.ExecutionProfile
 	if r.Decorator == nil {
 		return scoped, nil
 	}
-	decorated, decorateErr := r.Decorator.Decorate(ctx, snapshot, scoped)
-	if decorateErr != nil {
-		_ = scoped.Close()
-		return nil, decorateErr
-	}
-	if decorated == nil {
-		_ = scoped.Close()
-		return nil, runtime.ErrInvariantViolation
-	}
-	return decorated, nil
+	// A Bundle can outlive a migration control event for a short period. Keep
+	// the primary service immutable but consult the decorator at each write,
+	// so a cached Bundle cannot silently bypass newly enabled dual-write.
+	return migrationAwareService{snapshot: snapshot, primary: scoped, decorator: r.Decorator}, nil
 }
 
 func bindingCapabilitiesSatisfied(required []string, available provider.CapabilitySet) bool {
@@ -283,6 +277,55 @@ func (s scopedService) memoryKeyAllowed(key agentmemory.Key) bool {
 }
 
 var _ agentmemory.Service = scopedService{}
+
+// migrationAwareService provides a per-write authority projection while
+// preserving an inexpensive, immutable primary service for reads. It does not
+// close services returned by Decorate because decorators are wrappers around
+// the same primary resource, not independently owned clients.
+type migrationAwareService struct {
+	snapshot  profile.ExecutionProfileSnapshot
+	primary   agentmemory.Service
+	decorator ServiceDecorator
+}
+
+func (s migrationAwareService) ReadMemories(ctx context.Context, key agentmemory.UserKey, limit int) ([]*agentmemory.Entry, error) {
+	return s.primary.ReadMemories(ctx, key, limit)
+}
+func (s migrationAwareService) SearchMemories(ctx context.Context, key agentmemory.UserKey, query string, opts ...agentmemory.SearchOption) ([]*agentmemory.Entry, error) {
+	return s.primary.SearchMemories(ctx, key, query, opts...)
+}
+func (s migrationAwareService) AddMemory(ctx context.Context, key agentmemory.UserKey, value string, topics []string, opts ...agentmemory.AddOption) error {
+	return s.write(ctx, func(service agentmemory.Service) error { return service.AddMemory(ctx, key, value, topics, opts...) })
+}
+func (s migrationAwareService) UpdateMemory(ctx context.Context, key agentmemory.Key, value string, topics []string, opts ...agentmemory.UpdateOption) error {
+	return s.write(ctx, func(service agentmemory.Service) error { return service.UpdateMemory(ctx, key, value, topics, opts...) })
+}
+func (s migrationAwareService) DeleteMemory(ctx context.Context, key agentmemory.Key) error {
+	return s.write(ctx, func(service agentmemory.Service) error { return service.DeleteMemory(ctx, key) })
+}
+func (s migrationAwareService) ClearMemories(ctx context.Context, key agentmemory.UserKey) error {
+	return s.write(ctx, func(service agentmemory.Service) error { return service.ClearMemories(ctx, key) })
+}
+func (s migrationAwareService) Tools() []tool.Tool { return s.primary.Tools() }
+func (s migrationAwareService) EnqueueAutoMemoryJob(ctx context.Context, value *session.Session) error {
+	return s.write(ctx, func(service agentmemory.Service) error { return service.EnqueueAutoMemoryJob(ctx, value) })
+}
+func (s migrationAwareService) Close() error { return s.primary.Close() }
+func (s migrationAwareService) write(ctx context.Context, operation func(agentmemory.Service) error) error {
+	if s.primary == nil || s.decorator == nil || operation == nil {
+		return runtime.ErrInvariantViolation
+	}
+	service, err := s.decorator.Decorate(ctx, s.snapshot, s.primary)
+	if err != nil {
+		return err
+	}
+	if service == nil {
+		return runtime.ErrInvariantViolation
+	}
+	return operation(service)
+}
+
+var _ agentmemory.Service = migrationAwareService{}
 
 // newMem0Service adapts the upstream ingest-first Mem0 integration to the
 // runner's memory.Service contract.  Mem0 deliberately exposes read-only

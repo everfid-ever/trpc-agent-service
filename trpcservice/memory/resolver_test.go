@@ -45,6 +45,20 @@ type targetApplier struct {
 	images []memorydriver.Image
 }
 
+type switchingDecorator struct {
+	active bool
+	target *targetApplier
+	ledger *migrationLedger
+}
+
+func (d *switchingDecorator) Decorate(_ context.Context, snapshot profile.ExecutionProfileSnapshot, primary agentmemory.Service) (agentmemory.Service, error) {
+	if !d.active {
+		return primary, nil
+	}
+	return servicememory.NewDualWriteService(primary, servicememory.DualWritePlan{TenantID: snapshot.Key.TenantID, MigrationID: "move", Epoch: 2,
+		ConfigVersion: snapshot.Key.ConfigVersion, Direction: memorydriver.DirectionForward, Ledger: d.ledger, Target: d.target})
+}
+
 func (t *targetApplier) ApplyUser(_ context.Context, _ memorydriver.UserKey, images []memorydriver.Image) (string, error) {
 	t.calls++
 	t.images = images
@@ -271,6 +285,35 @@ func TestDualWriteServiceRejectsUntrackableAutoMemory(t *testing.T) {
 	}
 	if err := service.EnqueueAutoMemoryJob(context.Background(), &session.Session{AppName: "tenant-a/app"}); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
 		t.Fatalf("auto memory error=%v", err)
+	}
+}
+
+func TestResolverReprojectsMigrationDecoratorForCachedServiceWrites(t *testing.T) {
+	snapshot := memorySnapshot()
+	backend := provider.BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "memory", Version: 7, Status: "active", Provider: "postgres", SchemaVersion: 1,
+		Capabilities: provider.CapabilitySet{"strong_ryw": true}}
+	target, ledger := &targetApplier{}, &migrationLedger{}
+	decorator := &switchingDecorator{target: target, ledger: ledger}
+	resolver := servicememory.Resolver{Profiles: backendReader{value: backend}, PostgresConnections: map[string]string{"default": "postgres://memory"}, Decorator: decorator,
+		BuildPostgres: func(string) (agentmemory.Service, error) { return memoryinmemory.NewMemoryService(), nil }}
+	service, err := resolver.Resolve(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := agentmemory.UserKey{AppName: snapshot.AppName, UserID: "u"}
+	if err := service.AddMemory(context.Background(), key, "before migration", nil); err != nil {
+		t.Fatal(err)
+	}
+	if target.calls != 0 {
+		t.Fatalf("target calls before migration=%d", target.calls)
+	}
+	decorator.active = true // models a control transition while the Bundle is cached.
+	ctx := runtime.WithExecutionContext(context.Background(), runtime.ExecutionContext{TenantID: "tenant-a", RequestID: "after-transition"})
+	if err := service.AddMemory(ctx, key, "after migration", nil); err != nil {
+		t.Fatal(err)
+	}
+	if target.calls != 1 {
+		t.Fatalf("target calls after migration=%d, want 1", target.calls)
 	}
 }
 
