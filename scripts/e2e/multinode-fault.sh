@@ -40,11 +40,13 @@ cleanup() {
   local status=$?
   if [[ ${status} -ne 0 ]]; then
     compose logs --no-color >"${diagnostics}/compose.log" || true
-    # CI workspaces disappear with the runner. Emit the two services that
-    # establish the composition before linking the retained full log, so a
-    # bootstrap/configuration failure is diagnosable from the job itself.
-    echo "webui-bootstrap and Qdrant diagnostics:" >&2
-    compose logs --no-color webui-bootstrap qdrant >&2 || true
+    # CI workspaces disappear with the runner. Print the status and every
+    # service on the readiness path before linking the retained full log.
+    # Bootstrap is intentionally short-lived; its successful exit alone does
+    # not establish that either long-running composition node became ready.
+    echo "webui multi-node diagnostics:" >&2
+    compose ps --all >&2 || true
+    compose logs --no-color webui-bootstrap webui-node-a webui-node-b qdrant >&2 || true
     echo "local multi-node smoke failed; diagnostics retained at ${diagnostics}/compose.log" >&2
   fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
@@ -56,7 +58,7 @@ trap cleanup EXIT
 wait_ready() {
   local port="$1"
   for _ in $(seq 1 90); do
-    if curl --fail --silent "http://127.0.0.1:${port}/readyz" >/dev/null; then
+    if curl --fail --silent --max-time 2 "http://127.0.0.1:${port}/readyz" >/dev/null; then
       return 0
     fi
     sleep 1
