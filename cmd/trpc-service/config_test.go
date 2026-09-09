@@ -315,6 +315,70 @@ func TestLoadWorkerConfig(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerConfigSeparatesMemoryConnectionRegistries(t *testing.T) {
+	values := cloneEnvironment(workerEnvironment())
+	values["TRPC_SESSION_POSTGRES_CONNECTIONS"] = `{"session":"postgres://session:secret@session/service"}`
+	values["TRPC_MEMORY_POSTGRES_CONNECTIONS"] = `{"memory":"postgres://memory:secret@memory/service"}`
+	values["TRPC_ARTIFACT_POSTGRES_CONNECTIONS"] = `{"artifact":"postgres://artifact:secret@artifact/service"}`
+	values["TRPC_MEMORY_REDIS_CONNECTIONS"] = `{"cache":"rediss://memory:secret@redis.example.test:6380/4"}`
+	config, err := loadWorkerConfig(mapEnvironment(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MemoryPostgresConnections["memory"] != "postgres://memory:secret@memory/service" ||
+		config.ArtifactPostgresConnections["artifact"] != "postgres://artifact:secret@artifact/service" || config.SessionPostgresConnections["memory"] != "" ||
+		config.MemoryRedisConnections["cache"] != "rediss://memory:secret@redis.example.test:6380/4" ||
+		config.MemoryRedisConnections["default"] == "" {
+		t.Fatalf("memory connection registries = %#v / %#v", config.MemoryPostgresConnections, config.MemoryRedisConnections)
+	}
+	for _, raw := range []string{"[]", `{"default":"redis://redis:6379/0"}`, `{"bad id":"redis://redis:6379/0"}`, `{"cache":"https://redis.example.test"}`} {
+		values := cloneEnvironment(workerEnvironment())
+		values["TRPC_MEMORY_REDIS_CONNECTIONS"] = raw
+		if _, err := loadWorkerConfig(mapEnvironment(values)); err == nil {
+			t.Fatalf("accepted invalid memory Redis registry %q", raw)
+		}
+	}
+}
+
+func TestLoadWorkerConfigDoesNotImplicitlyShareNamedSessionConnections(t *testing.T) {
+	values := cloneEnvironment(workerEnvironment())
+	values["TRPC_SESSION_POSTGRES_CONNECTIONS"] = `{"session":"postgres://session:secret@session/service"}`
+	config, err := loadWorkerConfig(mapEnvironment(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.MemoryPostgresConnections["session"] != "" || config.ArtifactPostgresConnections["session"] != "" ||
+		config.MemoryPostgresConnections["default"] == "" || config.ArtifactPostgresConnections["default"] == "" {
+		t.Fatalf("implicit cross-domain connection grant: memory=%#v artifact=%#v", config.MemoryPostgresConnections, config.ArtifactPostgresConnections)
+	}
+}
+
+func TestParseMemoryMem0Connections(t *testing.T) {
+	connections, err := parseMemoryMem0Connections(`{"cloud":{"host":"https://mem0.example.test"},"oss":{"host":"http://mem0:8888","self_hosted_oss":true}}`)
+	if err != nil || len(connections) != 2 || connections["oss"].Host != "http://mem0:8888" || !connections["oss"].SelfHostedOSS {
+		t.Fatalf("connections/error = %#v / %v", connections, err)
+	}
+	for _, raw := range []string{`{"bad":{"host":"http://mem0"}}`, `{"oss":{"host":"https://mem0/path","self_hosted_oss":true}}`, `[]`} {
+		if _, err := parseMemoryMem0Connections(raw); err == nil {
+			t.Fatalf("parseMemoryMem0Connections(%s) unexpectedly succeeded", raw)
+		}
+	}
+}
+
+func TestLoadWorkerConfigRestrictsInMemoryToSingleShard(t *testing.T) {
+	environment := workerEnvironment()
+	environment["TRPC_MEMORY_ALLOW_INMEMORY"] = "true"
+	if _, err := loadWorkerConfig(mapEnvironment(environment)); err == nil {
+		t.Fatal("multi-shard in-memory memory accepted")
+	}
+	environment["TRPC_WORKER_SHARD_COUNT"] = "1"
+	environment["TRPC_WORKER_SHARDS"] = "0"
+	config, err := loadWorkerConfig(mapEnvironment(environment))
+	if err != nil || !config.MemoryAllowInMemory {
+		t.Fatalf("single shard in-memory config/error = %#v / %v", config.MemoryAllowInMemory, err)
+	}
+}
+
 func TestLoadWorkerConfigParsesMCPEndpoints(t *testing.T) {
 	values := cloneEnvironment(workerEnvironment())
 	values["TRPC_MCP_ENDPOINTS"] = `[{"tenant_id":"t_demo","tool_id":"weather_lookup","version":2,"transport":"streamable","server_url":"https://mcp.test/tools","declaration_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","timeout":"10s","secret_ref":"secret://mcp/weather","secret_version":4,"secret_header":"Authorization","secret_prefix":"Bearer "}]`

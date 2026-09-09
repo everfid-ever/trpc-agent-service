@@ -287,6 +287,7 @@ func ensureDemoConfig(ctx context.Context, configs *configpostgres.Repository, r
 	payload := configdomain.ConfigV1{SchemaVersion: configdomain.CurrentSchemaVersion, DefaultAgentAppID: ids.AgentAppID, PolicyVersion: ids.PolicyVersion,
 		BackendBindings: []configdomain.BackendBinding{
 			{Domain: "memory", BackendProfileID: ids.BackendProfileID, BackendVersion: ids.BackendProfileVersion, Required: []string{"strong_ryw"}},
+			{Domain: "artifact", BackendProfileID: ids.BackendProfileID, BackendVersion: ids.BackendProfileVersion, Required: []string{"strong_ryw"}},
 			{Domain: "session", BackendProfileID: ids.BackendProfileID, BackendVersion: ids.BackendProfileVersion, Required: []string{"atomic_turn_commit"}},
 			{Domain: "summary", BackendProfileID: ids.BackendProfileID, BackendVersion: ids.BackendProfileVersion, Required: []string{"summary_cas"}},
 		}}

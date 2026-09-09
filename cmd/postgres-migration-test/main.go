@@ -189,7 +189,7 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	// serially; the default package parallelism otherwise creates test-order
 	// races that look like random foreign-key/version conflicts.
 	output, err := goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
-		"-p=1", "./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres", "./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres", "./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres")
+		"-p=1", "./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres", "./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres", "./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/migration/memorydriver/postgres", "./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres")
 	if err != nil {
 		return fmt.Errorf("PostgreSQL repository contracts: %w\n%s", err, output)
 	}
@@ -198,7 +198,7 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 		// Select the disposable two-worker contract explicitly, so CI can make
 		// every test it claims to exercise a no-skip requirement.
 		output, err = goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
-			"-run", "^TestHTTPPostgreSQLRedisTwoWorkerSlice$", "./trpcservice/integration")
+			"-run", "^Test(HTTPPostgreSQLRedisTwoWorkerSlice|ComposeTenantMemoryBackendRouting|ComposeRedisMemoryBackfillToPostgres|ComposeRedisMemoryDualWriteToPostgres)$", "./trpcservice/integration")
 		if err != nil {
 			return fmt.Errorf("runtime slice: %w\n%s", err, output)
 		}

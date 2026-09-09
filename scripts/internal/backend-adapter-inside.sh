@@ -2,8 +2,8 @@
 set -euo pipefail
 suite="${TRPC_E2E_SUITE:-all}"
 case "${suite}" in
-  all|migration|runtime|storage) ;;
-  *) echo "TRPC_E2E_SUITE must be all, migration, runtime, or storage" >&2; exit 2 ;;
+  all|migration|runtime|storage|artifact) ;;
+  *) echo "TRPC_E2E_SUITE must be all, migration, runtime, storage, or artifact" >&2; exit 2 ;;
 esac
 
 for name in TRPC_MIGRATION_TEST TRPC_POSTGRES_ADMIN_DSN; do
@@ -70,9 +70,20 @@ run_storage() {
   go test -count=1 ./trpcservice/skill ./trpcservice/storage/knowledge ./trpcservice/tool/codeexec
 }
 
+run_artifact() {
+  for name in TRPC_S3_ENDPOINT TRPC_S3_BUCKET TRPC_S3_ACCESS_KEY TRPC_S3_SECRET_KEY; do
+    [[ -n "${!name:-}" ]] || { echo "${name} is required" >&2; exit 2; }
+  done
+  # Artifact metadata is schema-owned by this repository, so migrate the
+  # disposable PostgreSQL database before composing it with real MinIO.
+  TRPC_RUNTIME_TEST=0 go run ./cmd/postgres-migration-test
+  TRPC_ARTIFACT_E2E=1 go test -count=1 -run '^TestComposeArtifactObjectStoreTenantIsolation$' ./trpcservice/integration
+}
+
 case "${suite}" in
   migration) run_migration ;;
   runtime) run_runtime ;;
   storage) run_storage ;;
-  all) run_migration; run_runtime; run_storage ;;
+  artifact) run_artifact ;;
+  all) run_migration; run_runtime; run_storage; run_artifact ;;
 esac

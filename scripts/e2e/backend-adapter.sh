@@ -2,8 +2,8 @@
 set -euo pipefail
 suite="${1:-all}"
 case "${suite}" in
-  all|migration|runtime|storage) ;;
-  *) echo "usage: $0 [all|migration|runtime|storage]" >&2; exit 2 ;;
+  all|migration|runtime|storage|artifact) ;;
+  *) echo "usage: $0 [all|migration|runtime|storage|artifact]" >&2; exit 2 ;;
 esac
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="${repo_root}/deploy/compose/docker-compose.backend-smoke.yml"
@@ -51,6 +51,11 @@ case "${suite}" in
   storage)
     compose up --detach qdrant minio vault
     wait_healthy vault
+    compose run --rm --no-deps smoke
+    ;;
+  artifact)
+    compose up --detach postgres minio
+    wait_healthy postgres
     compose run --rm --no-deps smoke
     ;;
   all)

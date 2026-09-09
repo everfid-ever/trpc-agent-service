@@ -2271,6 +2271,42 @@ $$;
 
 
 --
+-- Name: record_memory_migration_mutation(text, text, text, bigint, text, text, text, bigint, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.record_memory_migration_mutation(p_tenant_id text, p_migration_id text, p_mutation_id text, p_epoch bigint, p_app_name text, p_user_id text, p_source_digest text, p_config_version bigint, p_created_at timestamp with time zone) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'public'
+    AS $$
+DECLARE v_migration public.backend_migration%ROWTYPE; v_existing public.memory_migration_mutation%ROWTYPE; v_direction text;
+BEGIN
+  SELECT * INTO v_migration FROM public.backend_migration
+    WHERE tenant_id=p_tenant_id AND migration_id=p_migration_id FOR SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'migration does not exist' USING ERRCODE='P0002'; END IF;
+  IF v_migration.domain<>'memory' OR v_migration.epoch<>p_epoch OR
+     (v_migration.state IN ('planned','snapshot','dual_write','backfill','verify') AND p_config_version<>v_migration.source_config_version) OR
+     (v_migration.state IN ('cutover','observe') AND p_config_version NOT IN (v_migration.source_config_version,v_migration.target_config_version)) OR
+     v_migration.state NOT IN ('planned','snapshot','dual_write','backfill','verify','cutover','observe') OR
+     p_app_name NOT LIKE p_tenant_id || '/%' OR p_created_at IS NULL OR p_created_at<v_migration.created_at THEN
+    RAISE EXCEPTION 'memory migration authority conflict' USING ERRCODE='23514';
+  END IF;
+  v_direction := CASE WHEN p_config_version=v_migration.target_config_version THEN 'reverse' ELSE 'forward' END;
+  INSERT INTO public.memory_migration_mutation(tenant_id,migration_id,mutation_id,epoch,direction,app_name,user_id,source_digest,
+    not_before,created_at,updated_at)
+  VALUES(p_tenant_id,p_migration_id,p_mutation_id,p_epoch,v_direction,p_app_name,p_user_id,p_source_digest,
+    p_created_at,p_created_at,p_created_at)
+  ON CONFLICT (tenant_id,migration_id,mutation_id) DO NOTHING;
+  SELECT * INTO v_existing FROM public.memory_migration_mutation
+    WHERE tenant_id=p_tenant_id AND migration_id=p_migration_id AND mutation_id=p_mutation_id;
+  IF (v_existing.epoch,v_existing.direction,v_existing.app_name,v_existing.user_id,v_existing.source_digest,v_existing.created_at)
+     IS DISTINCT FROM (p_epoch,v_direction,p_app_name,p_user_id,p_source_digest,p_created_at) THEN
+    RAISE EXCEPTION 'memory mutation id collision' USING ERRCODE='23505';
+  END IF;
+END;
+$$;
+
+
+--
 -- Name: record_knowledge_probe(text, text, bigint, text, text, jsonb, bigint, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3984,6 +4020,48 @@ CREATE TABLE public.knowledge_migration_mutation (
     CONSTRAINT knowledge_migration_mutation_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'applying'::text, 'applied'::text]))),
     CONSTRAINT knowledge_migration_mutation_target_digest_check CHECK (((target_digest = ''::text) OR (target_digest ~ '^[0-9a-f]{64}$'::text))),
     CONSTRAINT knowledge_migration_mutation_version_check CHECK ((version >= 1))
+);
+
+-- Durable repair queue for a full (app_name,user_id) Memory image. Memory
+-- backends do not expose a per-write revision, so a mutation carries the
+-- source image digest; replaying the same mutation is idempotent while a
+-- changed digest is a collision. The queue is intentionally separate from
+-- session/knowledge ledgers: Memory migration must not couple to their data
+-- models or locks.
+CREATE TABLE public.memory_migration_mutation (
+    tenant_id text NOT NULL,
+    migration_id text NOT NULL,
+    mutation_id text NOT NULL,
+    epoch bigint NOT NULL,
+    app_name text NOT NULL,
+    user_id text NOT NULL,
+    source_digest text NOT NULL,
+    state text DEFAULT 'pending'::text NOT NULL,
+    attempt integer DEFAULT 0 NOT NULL,
+    lease_owner text DEFAULT ''::text NOT NULL,
+    lease_until timestamp with time zone,
+    not_before timestamp with time zone NOT NULL,
+    last_error_class text DEFAULT ''::text NOT NULL,
+    target_digest text DEFAULT ''::text NOT NULL,
+    applied_at timestamp with time zone,
+    created_at timestamp with time zone NOT NULL,
+    updated_at timestamp with time zone NOT NULL,
+    version bigint DEFAULT 1 NOT NULL,
+    direction text DEFAULT 'forward'::text NOT NULL,
+    PRIMARY KEY (tenant_id,migration_id,app_name,user_id,mutation_id),
+    UNIQUE (tenant_id,migration_id,mutation_id),
+    CONSTRAINT memory_migration_mutation_attempt_check CHECK (attempt >= 0),
+    CONSTRAINT memory_migration_mutation_updated_check CHECK (updated_at >= created_at),
+    CONSTRAINT memory_migration_mutation_direction_check CHECK (direction = ANY (ARRAY['forward'::text, 'reverse'::text])),
+    CONSTRAINT memory_migration_mutation_epoch_check CHECK (epoch >= 1),
+    CONSTRAINT memory_migration_mutation_app_check CHECK (length(btrim(app_name)) >= 1 AND length(app_name) <= 255),
+    CONSTRAINT memory_migration_mutation_user_check CHECK (length(btrim(user_id)) >= 1 AND length(user_id) <= 255),
+    CONSTRAINT memory_migration_mutation_error_check CHECK (length(last_error_class) <= 64),
+    CONSTRAINT memory_migration_mutation_source_digest_check CHECK (source_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT memory_migration_mutation_target_digest_check CHECK (target_digest = '' OR target_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT memory_migration_mutation_id_check CHECK (length(btrim(mutation_id)) >= 1 AND length(mutation_id) <= 128),
+    CONSTRAINT memory_migration_mutation_state_check CHECK (state = ANY (ARRAY['pending'::text, 'applying'::text, 'applied'::text])),
+    CONSTRAINT memory_migration_mutation_version_check CHECK (version >= 1)
 );
 
 

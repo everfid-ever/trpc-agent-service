@@ -208,6 +208,55 @@ func PostgresBackendSchemaV2() Schema {
 	}
 }
 
+// RedisMemoryBackendSchema is deliberately scoped to long-term Memory. Redis
+// is not admitted as a Session backend because it cannot satisfy this
+// service's fenced CommitTurn transaction contract. connection_id selects a
+// deployment-owned Redis URL; neither URLs nor credentials are tenant data.
+func RedisMemoryBackendSchema() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "redis-memory", SchemaVersion: 1,
+		OptionRules: map[string]OptionRule{
+			"connection_id": {Type: OptionString, Required: true},
+		},
+		SecretRequirement: "forbidden",
+		Capabilities: CapabilitySet{
+			"strong_ryw": true,
+		},
+	}
+}
+
+// InMemoryBackendSchema is intentionally development-only.  It is useful for
+// isolated demos and tests, but has no cross-process visibility and therefore
+// must never be admitted by a horizontally scaled worker deployment.
+func InMemoryBackendSchema() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "inmemory-memory", SchemaVersion: 1,
+		SecretRequirement: "forbidden",
+		Capabilities: CapabilitySet{
+			"strong_ryw":       true,
+			"single_node_only": true,
+		},
+	}
+}
+
+// Mem0MemoryBackendSchema selects a deployment-owned Mem0 endpoint.  A cloud
+// profile has an optional SecretRef at schema level because self-hosted OSS
+// has no API key; Resolver applies the stricter mode-specific rule.
+func Mem0MemoryBackendSchema() Schema {
+	return Schema{
+		Kind: KindBackend, Name: "mem0-memory", SchemaVersion: 1,
+		OptionRules: map[string]OptionRule{
+			"connection_id": {Type: OptionString, Required: true},
+		},
+		SecretRequirement: "optional",
+		Capabilities: CapabilitySet{
+			"eventual_visibility": true,
+			"external_ingest":     true,
+			"read_only_tools":     true,
+		},
+	}
+}
+
 func NewCatalog(schemas ...Schema) (*Catalog, error) {
 	catalog := &Catalog{schemas: make(map[schemaKey]Schema, len(schemas))}
 	for _, schema := range schemas {
@@ -379,6 +428,16 @@ func (c *Catalog) NormalizeBackend(input BackendProfileSnapshot) (BackendProfile
 			return BackendProfileSnapshot{}, err
 		}
 	}
+	if schema.Name == "redis-memory" && schema.SchemaVersion == 1 {
+		if err := validateRedisMemoryConfiguration(configuration); err != nil {
+			return BackendProfileSnapshot{}, err
+		}
+	}
+	if schema.Name == "mem0-memory" && schema.SchemaVersion == 1 {
+		if err := validateRedisMemoryConfiguration(configuration); err != nil {
+			return BackendProfileSnapshot{}, err
+		}
+	}
 	if err := validateSecret(input.CredentialRef, schema.SecretRequirement); err != nil {
 		return BackendProfileSnapshot{}, err
 	}
@@ -430,7 +489,14 @@ func validateLocalQdrantConfiguration(configuration map[string]string) error {
 }
 
 func validatePostgresConfiguration(configuration map[string]string) error {
-	connectionID := configuration["connection_id"]
+	return validateConnectionID(configuration["connection_id"])
+}
+
+func validateRedisMemoryConfiguration(configuration map[string]string) error {
+	return validateConnectionID(configuration["connection_id"])
+}
+
+func validateConnectionID(connectionID string) error {
 	if len(connectionID) == 0 || len(connectionID) > 128 {
 		return runtime.ErrInvariantViolation
 	}

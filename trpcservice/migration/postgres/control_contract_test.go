@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,6 +81,49 @@ WHERE c.tenant_id=$1 AND c.migration_id=$2 AND c.control_version=2`, tenantID, m
 	aborted, err := store.Abort(ctx, migration.ControlRequest{TenantID: tenantID, MigrationID: migrationID, ExpectedVersion: resumed.Version, At: now.Add(3 * time.Minute), Metadata: metadata})
 	if err != nil || aborted.State != migration.StateAborted || aborted.Version != 4 {
 		t.Fatalf("abort=%+v err=%v", aborted, err)
+	}
+}
+
+func TestMemoryMigrationTransitionPublishesBundleInvalidationPostgreSQL16(t *testing.T) {
+	if os.Getenv("TRPC_MIGRATION_TEST") != "1" {
+		t.Skip("requires explicit disposable PostgreSQL migration test")
+	}
+	dsn := os.Getenv("TRPC_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("TRPC_POSTGRES_TEST_DSN is not set")
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, now := context.Background(), time.Now().UTC().Truncate(time.Microsecond)
+	const tenantID, migrationID = "t_01ARZ3NDEKTSV4RRFFQ69G5FAY", "memory-invalidation"
+	if _, err := db.ExecContext(ctx, `SET session_replication_role='replica'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO public.backend_migration(
+tenant_id,migration_id,domain,epoch,source_config_version,source_backend_profile_id,source_backend_version,
+target_config_version,target_backend_profile_id,target_backend_version,state,created_at,updated_at)
+VALUES($1,$2,'memory',1,1,'source',1,2,'target',1,'planned',$3,$3)`, tenantID, migrationID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `SET session_replication_role='origin'`); err != nil {
+		t.Fatal(err)
+	}
+	store := New(db)
+	next, err := store.Transition(ctx, migration.TransitionRequest{TenantID: tenantID, MigrationID: migrationID, ExpectedVersion: 1,
+		To: migration.StateSnapshot, SnapshotWatermark: "memory-snapshot", At: now.Add(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kind, payload string
+	if err := db.QueryRowContext(ctx, `SELECT kind,payload_ref FROM public.outbox WHERE tenant_id=$1 AND outbox_id=$2`, tenantID,
+		"memory-migration-invalidation:"+tenantID+":"+migrationID+":"+strconv.FormatInt(next.Version, 10)).Scan(&kind, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "config-invalidation" || !strings.HasPrefix(payload, "memory-migration://"+tenantID+"/"+migrationID+"/") {
+		t.Fatalf("outbox kind=%q payload=%q", kind, payload)
 	}
 }
 

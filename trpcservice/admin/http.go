@@ -59,6 +59,10 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveKnowledgeMigration(w, r, principal, parts)
 		return
 	}
+	if len(parts) >= 4 && parts[0] == "v1" && parts[1] == "tenants" && parts[3] == "memory-migrations" {
+		h.serveMemoryMigration(w, r, principal, parts)
+		return
+	}
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "tenants" || parts[3] != "configs" {
 		http.NotFound(w, r)
 		return
@@ -406,6 +410,83 @@ func (h Handler) serveKnowledgeMigration(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		value, err := h.Service.AbortKnowledgeMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (h Handler) serveMemoryMigration(w http.ResponseWriter, r *http.Request, principal Principal, parts []string) {
+	tenantID := parts[2]
+	controlInput := func() (MemoryMigrationControlInput, error) {
+		var input MemoryMigrationControlInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			return input, err
+		}
+		return input, nil
+	}
+	switch {
+	case r.Method == http.MethodGet && len(parts) == 4:
+		value, err := h.Service.ListMemoryMigrations(r.Context(), principal, tenantID)
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 4:
+		var input MemoryMigrationCreateInput
+		if err := decodeJSON(w, r, &input); err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.CreateMemoryMigration(r.Context(), principal, tenantID, input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusCreated, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodGet && len(parts) == 5:
+		value, err := h.Service.GetMemoryMigration(r.Context(), principal, tenantID, parts[4])
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "pause":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.PauseMemoryMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "resume":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.ResumeMemoryMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
+		if err == nil {
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		writeError(w, err)
+	case r.Method == http.MethodPost && len(parts) == 6 && parts[5] == "abort":
+		input, err := controlInput()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := h.Service.AbortMemoryMigration(r.Context(), principal, tenantID, parts[4], input, metadata(r, principal))
 		if err == nil {
 			writeJSON(w, http.StatusOK, value)
 			return

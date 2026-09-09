@@ -13,14 +13,19 @@ import (
 const workerHTTPShutdownBudget = 5 * time.Second
 
 type productionConfig struct {
-	ListenAddress              string
-	PostgresDSN                string
-	SessionPostgresConnections map[string]string
-	RedisAddress               string
-	RedisPassword              string
-	RedisDB                    int
-	SecretRoot                 string
-	SkillStagingRoot           string
+	ListenAddress               string
+	PostgresDSN                 string
+	SessionPostgresConnections  map[string]string
+	MemoryPostgresConnections   map[string]string
+	ArtifactPostgresConnections map[string]string
+	MemoryRedisConnections      map[string]string
+	MemoryMem0Connections       map[string]mem0Connection
+	MemoryAllowInMemory         bool
+	RedisAddress                string
+	RedisPassword               string
+	RedisDB                     int
+	SecretRoot                  string
+	SkillStagingRoot            string
 
 	S3Region, S3Bucket, S3Endpoint string
 	S3PathStyle, S3AllowInsecure   bool
@@ -90,6 +95,14 @@ type productionConfig struct {
 	AuditClaimTTL, AuditClaimRenew         time.Duration
 	AuditRetryDelay, AuditPollInterval     time.Duration
 	AuditLagPollInterval, AuditLagAlertAge time.Duration
+}
+
+// mem0Connection contains only deployment routing. Cloud API keys remain in
+// tenant-scoped SecretRef values and self-hosted OSS is explicitly marked so
+// a private HTTP endpoint cannot accidentally be treated as cloud API.
+type mem0Connection struct {
+	Host          string `json:"host"`
+	SelfHostedOSS bool   `json:"self_hosted_oss"`
 }
 
 func loadAuditRelayConfig(getenv func(string) string) (productionConfig, error) {
@@ -282,6 +295,33 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 	if config.RedisDB, err = envInt(getenv, "TRPC_REDIS_DB", 0); err != nil || config.RedisDB < 0 {
 		return productionConfig{}, errors.New("invalid TRPC_REDIS_DB")
 	}
+	memoryPostgresRaw := getenv("TRPC_MEMORY_POSTGRES_CONNECTIONS")
+	if strings.TrimSpace(memoryPostgresRaw) == "" {
+		config.MemoryPostgresConnections, err = parseSessionPostgresConnections(config.PostgresDSN, "")
+	} else if config.MemoryPostgresConnections, err = parseSessionPostgresConnections(config.PostgresDSN, memoryPostgresRaw); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_MEMORY_POSTGRES_CONNECTIONS")
+	}
+	if err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_MEMORY_POSTGRES_CONNECTIONS")
+	}
+	if config.MemoryRedisConnections, err = parseMemoryRedisConnections(config.RedisAddress, config.RedisPassword, config.RedisDB, getenv("TRPC_MEMORY_REDIS_CONNECTIONS")); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_MEMORY_REDIS_CONNECTIONS")
+	}
+	if config.MemoryMem0Connections, err = parseMemoryMem0Connections(getenv("TRPC_MEMORY_MEM0_CONNECTIONS")); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_MEMORY_MEM0_CONNECTIONS")
+	}
+	if config.MemoryAllowInMemory, err = envBool(getenv, "TRPC_MEMORY_ALLOW_INMEMORY", false); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_MEMORY_ALLOW_INMEMORY")
+	}
+	artifactPostgresRaw := getenv("TRPC_ARTIFACT_POSTGRES_CONNECTIONS")
+	if strings.TrimSpace(artifactPostgresRaw) == "" {
+		config.ArtifactPostgresConnections, err = parseSessionPostgresConnections(config.PostgresDSN, "")
+	} else if config.ArtifactPostgresConnections, err = parseSessionPostgresConnections(config.PostgresDSN, artifactPostgresRaw); err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_ARTIFACT_POSTGRES_CONNECTIONS")
+	}
+	if err != nil {
+		return productionConfig{}, errors.New("invalid TRPC_ARTIFACT_POSTGRES_CONNECTIONS")
+	}
 	if config.PayloadKeyVersion, err = envInt64(getenv, "TRPC_PAYLOAD_KEY_VERSION", 0); err != nil || config.PayloadKeyVersion < 1 {
 		return productionConfig{}, errors.New("invalid TRPC_PAYLOAD_KEY_VERSION")
 	}
@@ -344,6 +384,12 @@ func loadWorkerConfig(getenv func(string) string) (productionConfig, error) {
 	}
 	if config.WorkerLeaseRenew >= config.WorkerLeaseTTL || config.WorkerDrainTimeout+config.WorkerBundleCloseTimeout+workerHTTPShutdownBudget > config.ShutdownTimeout {
 		return productionConfig{}, errors.New("invalid worker lifecycle timing")
+	}
+	// InMemory is deliberately restricted to an explicitly declared local
+	// single-shard worker. It has no shared visibility, so allowing it in the
+	// normal multi-shard path would silently introduce sticky-session state.
+	if config.MemoryAllowInMemory && (config.WorkerShardCount != 1 || len(config.WorkerShards) != 1 || config.WorkerShards[0] != 0) {
+		return productionConfig{}, errors.New("in-memory memory requires one local worker shard")
 	}
 	if config.ListenAddress == "" || config.PostgresDSN == "" || config.RedisAddress == "" || config.SecretRoot == "" ||
 		config.RedisEnvironment == "" || config.WorkerGroup == "" || config.WorkerControlGroup == "" || config.WorkerProbeTenant == "" ||
@@ -411,6 +457,72 @@ func validSessionConnectionID(value string) bool {
 func validSessionPostgresDSN(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && !strings.ContainsAny(value, "\x00\r\n")
+}
+
+// parseMemoryRedisConnections mirrors the PostgreSQL deployment registry:
+// Backend Profiles select opaque IDs, while Redis URLs (and therefore
+// credentials) stay exclusively in deployment configuration. The default
+// reuses the Worker coordination plane for small deployments; production may
+// provide separate named Memory planes with TRPC_MEMORY_REDIS_CONNECTIONS.
+func parseMemoryRedisConnections(address, password string, database int, raw string) (map[string]string, error) {
+	if strings.TrimSpace(address) == "" || database < 0 {
+		return nil, errors.New("default memory redis connection is invalid")
+	}
+	defaultURL := url.URL{Scheme: "redis", Host: strings.TrimSpace(address), Path: "/" + strconv.Itoa(database)}
+	if password != "" {
+		defaultURL.User = url.UserPassword("default", password)
+	}
+	result := map[string]string{"default": defaultURL.String()}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return result, nil
+	}
+	var declared map[string]string
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil || len(declared) == 0 {
+		return nil, errors.New("memory redis connection registry must be a non-empty JSON object")
+	}
+	for connectionID, redisURL := range declared {
+		if connectionID == "default" || !validSessionConnectionID(connectionID) || !validMemoryRedisURL(redisURL) {
+			return nil, errors.New("invalid memory redis connection")
+		}
+		result[connectionID] = strings.TrimSpace(redisURL)
+	}
+	return result, nil
+}
+
+func validMemoryRedisURL(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\x00\r\n") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	return err == nil && (parsed.Scheme == "redis" || parsed.Scheme == "rediss") && parsed.Host != "" && parsed.Fragment == ""
+}
+
+// parseMemoryMem0Connections accepts an opt-in JSON registry such as
+// {"cloud":{"host":"https://api.mem0.ai"},"oss":{"host":"http://mem0:8888","self_hosted_oss":true}}.
+// It intentionally has no default: selecting an external backend must be an
+// explicit deployment decision.
+func parseMemoryMem0Connections(raw string) (map[string]mem0Connection, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return map[string]mem0Connection{}, nil
+	}
+	var declared map[string]mem0Connection
+	if err := json.Unmarshal([]byte(raw), &declared); err != nil || len(declared) == 0 {
+		return nil, errors.New("mem0 connection registry must be a non-empty JSON object")
+	}
+	result := make(map[string]mem0Connection, len(declared))
+	for id, connection := range declared {
+		connection.Host = strings.TrimSpace(connection.Host)
+		endpoint, err := url.Parse(connection.Host)
+		if !validSessionConnectionID(id) || err != nil || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" ||
+			(endpoint.Scheme != "https" && (!connection.SelfHostedOSS || endpoint.Scheme != "http")) || endpoint.Path != "" && endpoint.Path != "/" {
+			return nil, errors.New("invalid mem0 connection")
+		}
+		result[id] = connection
+	}
+	return result, nil
 }
 
 // mcpEndpoint is one reviewed, fixed MCP tool endpoint declared in worker

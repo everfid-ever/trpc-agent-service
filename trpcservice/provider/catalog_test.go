@@ -179,3 +179,25 @@ func TestPostgresBackendSchemaIsCredentialFreeAndCapabilityBound(t *testing.T) {
 		t.Fatalf("credential accepted: %v", err)
 	}
 }
+
+func TestMemoryBackendSchemasKeepEndpointAndCredentialBoundaries(t *testing.T) {
+	catalog, err := NewCatalog(InMemoryBackendSchema(), Mem0MemoryBackendSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inMemory, err := catalog.NormalizeBackend(BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "memory", ProfileKey: "memory",
+		Status: "active", Version: 1, SchemaVersion: 1, Provider: "inmemory-memory", Capabilities: CapabilitySet{"strong_ryw": true, "single_node_only": true}})
+	if err != nil || inMemory.CredentialRef != (secrets.SecretRef{}) {
+		t.Fatalf("in-memory profile/error = %#v / %v", inMemory, err)
+	}
+	mem0, err := catalog.NormalizeBackend(BackendProfileSnapshot{TenantID: "tenant-a", ProfileID: "mem0", ProfileKey: "mem0",
+		Status: "active", Version: 2, SchemaVersion: 1, Provider: "mem0-memory", Configuration: map[string]string{"connection_id": "cloud"},
+		CredentialRef: secrets.SecretRef{Ref: "secret://tenant/mem0", Version: 3}, Capabilities: CapabilitySet{"eventual_visibility": true, "external_ingest": true, "read_only_tools": true}})
+	if err != nil || mem0.Configuration["connection_id"] != "cloud" || len(mem0.ContentDigest) != 64 {
+		t.Fatalf("mem0 profile/error = %#v / %v", mem0, err)
+	}
+	mem0.Configuration["api_key"] = "forbidden"
+	if _, err := catalog.NormalizeBackend(mem0); !errors.Is(err, runtime.ErrCapabilityUnsupported) {
+		t.Fatalf("secret-bearing mem0 profile accepted: %v", err)
+	}
+}

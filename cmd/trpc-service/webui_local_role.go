@@ -29,6 +29,7 @@ import (
 	agentcondition "github.com/liuzengh/trpc-agent-service/trpcservice/agent/condition"
 	agentapp "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
+	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/artifact"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
@@ -52,6 +53,7 @@ import (
 	gatewaypostgres "github.com/liuzengh/trpc-agent-service/trpcservice/gateway/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
+	servicememory "github.com/liuzengh/trpc-agent-service/trpcservice/memory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	preprocesspostgres "github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/postgres"
@@ -72,7 +74,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
-	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
+	storageartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	serviceknowledge "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
 	knowledgepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/postgres"
@@ -84,6 +86,7 @@ import (
 	servicetool "github.com/liuzengh/trpc-agent-service/trpcservice/tool"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tool/localnote"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	agentmemory "trpc.group/trpc-go/trpc-agent-go/memory"
 	agentmemorypg "trpc.group/trpc-go/trpc-agent-go/memory/postgres"
 )
 
@@ -100,6 +103,7 @@ const (
 	webUILocalKnowledgeID      = "webui-local-knowledge"
 	webUILocalKnowledgeVersion = int64(1)
 	webUILocalEmbedderID       = "webui-local-fake-embedder"
+	webUILocalMemoryID         = "webui-local-memory"
 	webUILocalQdrantID         = "webui-local-qdrant"
 	webUILocalQdrantCollection = "webui_local_knowledge"
 	webUILocalVectorGeneration = "webui-local-v1"
@@ -268,55 +272,59 @@ func runWebUILocalRole(parent context.Context, getenv func(string) string, logge
 	}
 	tools := servicetool.Resolver{Catalog: toolCatalog, Secrets: bootstrap.SecretStore}
 	artifacts := artifactpostgres.New(db)
-	// AppName is fixed by the published control-plane profile as
-	// "tenantID/agentAppID". Recovering the tenant here keeps the framework
-	// artifact.Service on the same tenant-scoped storage contract as inbound
-	// attachments, and fails closed for a malformed AppName.
-	artifactService := &serviceartifact.SDKService{Store: artifacts, MapTenant: func(appName string) string {
-		tenantID, tenantErr := serviceartifact.TenantFromAppName(appName)
-		if tenantErr != nil {
-			return ""
-		}
-		return tenantID
-	}}
+	artifactResolver := serviceartifact.Resolver{Profiles: bootstrap.ProviderRepo,
+		PostgresConnections: map[string]string{"default": configValue.PostgresDSN}, Stores: map[string]storageartifact.Store{"default": artifacts}}
 	browser.ReplyRoutes = payloads
 	browser.Confirmations = governanceStore
 	browser.Actions = governance.ConfirmationActionService{Coordinator: governanceStore}
 	graphCheckpoints := checkpointredis.Resolver{Client: redis, TTL: 7 * 24 * time.Hour}
-	// Keep the local WebUI execution path on the same official long-term
-	// Memory implementation as the Worker role. The service baseline owns the
-	// framework schema, so the SDK must never attempt a process-startup DDL
-	// mutation here.
-	memoryService, err := agentmemorypg.NewService(
-		agentmemorypg.WithPostgresClientDSN(configValue.PostgresDSN),
-		agentmemorypg.WithSkipDBInit(true),
-	)
-	if err != nil {
-		return errors.New("memory service configuration rejected")
+	// The local role uses the same immutable Memory binding and resolver as a
+	// distributed Worker. It merely supplies one deployment-owned "default"
+	// PostgreSQL connection for its disposable Compose plane.
+	memoryResolver := servicememory.Resolver{
+		Profiles:            bootstrap.ProviderRepo,
+		PostgresConnections: map[string]string{"default": configValue.PostgresDSN},
+		BuildPostgres: func(dsn string) (agentmemory.Service, error) {
+			return agentmemorypg.NewService(agentmemorypg.WithPostgresClientDSN(dsn), agentmemorypg.WithSkipDBInit(true))
+		},
 	}
-	defer memoryService.Close()
-	// The standalone local acceptance role owns one fixed PostgreSQL volume.
-	// Distributed Worker roles use ProfileServiceResolver for per-profile
-	// routing; local bootstrap deliberately remains the single-plane fixture.
 	sdkSessions, err := sessionpostgres.NewOfficialSessionService(configValue.PostgresDSN)
 	if err != nil {
 		return errors.New("session service configuration rejected")
 	}
 	defer sdkSessions.Close()
 	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Knowledge: knowledgeResolver,
-		Conditions: agentcondition.DefaultRegistry(),
-		Memory:     memoryService, Checkpoints: graphCheckpoints,
-		Policies: governanceStore, Confirmations: governanceStore, ToolResults: payloads, Telemetry: telemetryProvider}
+		Conditions:  agentcondition.DefaultRegistry(),
+		Checkpoints: graphCheckpoints,
+		Policies:    governanceStore, Confirmations: governanceStore, ToolResults: payloads, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManager(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
 			return nil, nil, resolveErr
 		}
-		root, plugins, buildErr := agentFactory.BuildWithPlugins(ctx, snapshot)
-		if buildErr != nil {
-			return nil, nil, buildErr
+		memoryService, memoryErr := memoryResolver.Resolve(ctx, snapshot)
+		if memoryErr != nil {
+			return nil, nil, fmt.Errorf("resolve local tenant memory service: %w", memoryErr)
 		}
-		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, nil, nil
+		artifactService, artifactClose, artifactErr := artifactResolver.Resolve(ctx, snapshot)
+		if artifactErr != nil {
+			_ = memoryService.Close()
+			return nil, nil, fmt.Errorf("resolve local tenant artifact service: %w", artifactErr)
+		}
+		closeServices := func(closeCtx context.Context) error {
+			memoryCloseErr := memoryService.Close()
+			if artifactClose == nil {
+				return memoryCloseErr
+			}
+			return errors.Join(memoryCloseErr, artifactClose(closeCtx))
+		}
+		bundleFactory := agentFactory
+		bundleFactory.Memory = memoryService
+		root, plugins, buildErr := bundleFactory.BuildWithPlugins(ctx, snapshot)
+		if buildErr != nil {
+			return nil, closeServices, buildErr
+		}
+		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, closeServices, nil
 	})
 	defer bundles.Close(context.Background())
 	executor := worker.RunnerExecutor{Tasks: tasks, Profiles: profiles, Bundles: bundles,
@@ -626,7 +634,7 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema(), provider.LocalQdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.RedisMemoryBackendSchema(), provider.InMemoryBackendSchema(), provider.Mem0MemoryBackendSchema(), provider.QdrantVectorSchema(), provider.LocalQdrantVectorSchema())
 	if err != nil {
 		return webUILocalBootstrap{}, err
 	}
@@ -701,6 +709,9 @@ func bootstrapWebUILocal(ctx context.Context, db *sql.DB, configValue webUILocal
 		return webUILocalBootstrap{}, err
 	}
 	if err = ensureWebUILocalModel(ctx, providers); err != nil {
+		return webUILocalBootstrap{}, err
+	}
+	if err = ensureWebUILocalMemoryBackend(ctx, providers); err != nil {
 		return webUILocalBootstrap{}, err
 	}
 	skillRef, knowledgeRef, err := ensureWebUILocalKnowledgeFixture(ctx, db, providers, configValue)
@@ -886,6 +897,35 @@ func ensureWebUILocalModel(ctx context.Context, providers *providerpostgres.Repo
 	return err
 }
 
+// ensureWebUILocalMemoryBackend keeps the local fixture explicit: even its
+// one PostgreSQL volume is selected by a published, credential-free backend
+// profile rather than by an execution-role special case.
+func ensureWebUILocalMemoryBackend(ctx context.Context, providers *providerpostgres.Repository) error {
+	if ctx == nil || providers == nil {
+		return errors.New("invalid WebUI local memory repository")
+	}
+	current, err := providers.GetBackend(ctx, webUILocalTenantID, webUILocalMemoryID, 1)
+	if err == nil {
+		if current.Provider != "postgres" || current.SchemaVersion != 2 || current.Status != "active" ||
+			current.Configuration["connection_id"] != "default" || !current.Capabilities["strong_ryw"] ||
+			current.CredentialRef.Ref != "" || current.CredentialRef.Version != 0 {
+			return errors.New("WebUI local memory backend is incompatible")
+		}
+		return nil
+	}
+	if !errors.Is(err, runtime.ErrNotFound) {
+		return err
+	}
+	_, err = providers.PublishBackend(ctx, provider.BackendProfileSnapshot{
+		TenantID: webUILocalTenantID, ProfileID: webUILocalMemoryID, ProfileKey: "webui-local-memory",
+		DisplayName: "WebUI Local Memory", Status: "active", SchemaVersion: 2, Provider: "postgres",
+		Configuration: map[string]string{"connection_id": "default"}, Capabilities: provider.CapabilitySet{
+			"atomic_turn_commit": true, "strong_ryw": true, "summary_cas": true,
+		}, Version: 1,
+	})
+	return err
+}
+
 // ensureWebUILocalKnowledgeFixture publishes one real, small Knowledge
 // version and one Skill package through the same durable authorities used by a
 // Worker. The chat model remains the explicit local DeepSeek choice; only the
@@ -1045,6 +1085,35 @@ func webUILocalKnowledgeBindingReady(values []configdomain.BackendBinding) bool 
 	return false
 }
 
+func webUILocalMemoryBindingReady(values []configdomain.BackendBinding) bool {
+	for _, value := range values {
+		if value.Domain == "memory" && value.BackendProfileID == webUILocalMemoryID && value.BackendVersion == 1 &&
+			requiresCapability(value.Required, "strong_ryw") {
+			return true
+		}
+	}
+	return false
+}
+
+func webUILocalArtifactBindingReady(values []configdomain.BackendBinding) bool {
+	for _, value := range values {
+		if value.Domain == "artifact" && value.BackendProfileID == webUILocalMemoryID && value.BackendVersion == 1 &&
+			requiresCapability(value.Required, "strong_ryw") {
+			return true
+		}
+	}
+	return false
+}
+
+func requiresCapability(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func upsertWebUILocalKnowledgeBinding(values []configdomain.BackendBinding) []configdomain.BackendBinding {
 	result := make([]configdomain.BackendBinding, 0, len(values)+1)
 	for _, value := range values {
@@ -1053,6 +1122,26 @@ func upsertWebUILocalKnowledgeBinding(values []configdomain.BackendBinding) []co
 		}
 	}
 	return append(result, configdomain.BackendBinding{Domain: "knowledge", BackendProfileID: webUILocalQdrantID, BackendVersion: 1, Required: []string{"tenant_filter"}})
+}
+
+func upsertWebUILocalMemoryBinding(values []configdomain.BackendBinding) []configdomain.BackendBinding {
+	result := make([]configdomain.BackendBinding, 0, len(values)+1)
+	for _, value := range values {
+		if value.Domain != "memory" {
+			result = append(result, value)
+		}
+	}
+	return append(result, configdomain.BackendBinding{Domain: "memory", BackendProfileID: webUILocalMemoryID, BackendVersion: 1, Required: []string{"strong_ryw"}})
+}
+
+func upsertWebUILocalArtifactBinding(values []configdomain.BackendBinding) []configdomain.BackendBinding {
+	result := make([]configdomain.BackendBinding, 0, len(values)+1)
+	for _, value := range values {
+		if value.Domain != "artifact" {
+			result = append(result, value)
+		}
+	}
+	return append(result, configdomain.BackendBinding{Domain: "artifact", BackendProfileID: webUILocalMemoryID, BackendVersion: 1, Required: []string{"strong_ryw"}})
 }
 
 type webUILocalPolicyStore interface {
@@ -1113,7 +1202,8 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 			return tenant.Tenant{}, configdomain.Snapshot{}, publishErr
 		}
 	}
-	if webUILocalPolicyReady(policy.Policy) && (len(wanted) == 0 || webUILocalKnowledgeBindingReady(snapshot.Payload.BackendBindings)) {
+	if webUILocalPolicyReady(policy.Policy) && webUILocalMemoryBindingReady(snapshot.Payload.BackendBindings) && webUILocalArtifactBindingReady(snapshot.Payload.BackendBindings) &&
+		(len(wanted) == 0 || webUILocalKnowledgeBindingReady(snapshot.Payload.BackendBindings)) {
 		return root, snapshot, nil
 	}
 	if policy.Version == int64(^uint64(0)>>1) {
@@ -1133,6 +1223,8 @@ func ensureWebUILocalToolControlPlane(ctx context.Context, tenants tenant.Reposi
 	}
 	payload := snapshot.Payload
 	payload.PolicyVersion = policy.Version
+	payload.BackendBindings = upsertWebUILocalMemoryBinding(payload.BackendBindings)
+	payload.BackendBindings = upsertWebUILocalArtifactBinding(payload.BackendBindings)
 	if len(wanted) > 0 {
 		payload.BackendBindings = upsertWebUILocalKnowledgeBinding(payload.BackendBindings)
 	}

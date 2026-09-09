@@ -21,6 +21,7 @@ import (
 	checkpointredis "github.com/liuzengh/trpc-agent-service/trpcservice/agent/checkpointredis"
 	agentcondition "github.com/liuzengh/trpc-agent-service/trpcservice/agent/condition"
 	agentpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/agentapp/postgres"
+	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/artifact"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/broker"
 	brokerredis "github.com/liuzengh/trpc-agent-service/trpcservice/broker/redis"
 	configpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/config/postgres"
@@ -29,7 +30,11 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	governancepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/governance/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/health"
+	servicememory "github.com/liuzengh/trpc-agent-service/trpcservice/memory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/metrics"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/memorydriver"
+	memorymigrationpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/migration/memorydriver/postgres"
+	migrationpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/migration/postgres"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess/scanner/httpdlp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/profile"
 	profilecontrol "github.com/liuzengh/trpc-agent-service/trpcservice/profile/controlplane"
@@ -47,7 +52,7 @@ import (
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets/payloadkey"
 	serviceskill "github.com/liuzengh/trpc-agent-service/trpcservice/skill"
 	skillpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/skill/postgres"
-	serviceartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
+	storageartifact "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact"
 	artifactpostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/artifact/postgres"
 	serviceknowledge "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
 	knowledgepostgres "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge/postgres"
@@ -59,7 +64,9 @@ import (
 	toolcodeexec "github.com/liuzengh/trpc-agent-service/trpcservice/tool/codeexec"
 	toolmcp "github.com/liuzengh/trpc-agent-service/trpcservice/tool/mcp"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/worker"
+	agentmemory "trpc.group/trpc-go/trpc-agent-go/memory"
 	agentmemorypg "trpc.group/trpc-go/trpc-agent-go/memory/postgres"
+	agentmemoryredis "trpc.group/trpc-go/trpc-agent-go/memory/redis"
 )
 
 func runWorkerRole(parent context.Context, getenv func(string) string, logger *roleLogger) error {
@@ -103,7 +110,7 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return errors.New("payload key configuration rejected")
 	}
-	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.QdrantVectorSchema(), provider.LocalQdrantVectorSchema())
+	catalog, err := provider.NewCatalog(provider.DeepSeekModelSchema(), provider.FakeModelSchema(), provider.FakeEmbeddingSchema(), provider.OpenAIEmbeddingSchema(), provider.PostgresBackendSchema(), provider.PostgresBackendSchemaV2(), provider.RedisMemoryBackendSchema(), provider.InMemoryBackendSchema(), provider.Mem0MemoryBackendSchema(), provider.QdrantVectorSchema(), provider.LocalQdrantVectorSchema())
 	if err != nil {
 		return errors.New("provider catalog initialization failed")
 	}
@@ -112,6 +119,44 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	configRepo := configpostgres.New(db, tenantRepo)
 	providerRepo := providerpostgres.New(db, catalog)
 	profiles := profilecontrol.Resolver{Tenants: tenantRepo, Agents: agentRepo, Configs: configRepo, Models: providerRepo}
+	memoryMigrationDBs := map[string]*sql.DB{"default": db}
+	memoryMigrationExtraDBs := make([]*sql.DB, 0, len(configValue.MemoryPostgresConnections)-1)
+	for connectionID, dsn := range configValue.MemoryPostgresConnections {
+		if connectionID == "default" {
+			continue
+		}
+		client, openErr := sql.Open("pgx", dsn)
+		if openErr != nil {
+			for _, opened := range memoryMigrationExtraDBs {
+				_ = opened.Close()
+			}
+			return errors.New("memory migration postgres client initialization failed")
+		}
+		memoryMigrationDBs[connectionID] = client
+		memoryMigrationExtraDBs = append(memoryMigrationExtraDBs, client)
+	}
+	defer func() {
+		for _, client := range memoryMigrationExtraDBs {
+			_ = client.Close()
+		}
+	}()
+	memoryMigrationPlanner := servicememory.MigrationPlanner{
+		Authority: migrationpostgres.New(db), Configs: configRepo, Profiles: providerRepo, Ledger: memorymigrationpostgres.New(db),
+		BuildTarget: func(_ context.Context, backend provider.BackendProfileSnapshot) (memorydriver.UserApplier, error) {
+			if backend.Provider != "postgres" || (backend.SchemaVersion != 1 && backend.SchemaVersion != 2) {
+				return nil, runtime.ErrCapabilityUnsupported
+			}
+			connectionID := "default"
+			if backend.SchemaVersion == 2 {
+				connectionID = backend.Configuration["connection_id"]
+			}
+			client := memoryMigrationDBs[connectionID]
+			if client == nil {
+				return nil, runtime.ErrBackendUnavailable
+			}
+			return memorydriver.PostgresTarget{DB: client}, nil
+		},
+	}
 	credentialPool := generation.New(secretProvider)
 	models := modelclient.Resolver{Profiles: providerRepo, Secrets: secretProvider, Credentials: credentialPool, Subject: "worker-model"}
 	toolCatalog, err := buildWorkerToolCatalog(configValue.MCPEndpoints, configValue.CodeExecutors, configValue.CodeExecutorWorkspaceRoot)
@@ -126,16 +171,18 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	if err != nil {
 		return fmt.Errorf("knowledge resolver rejected: %w", err)
 	}
-	memoryService, err := agentmemorypg.NewService(agentmemorypg.WithPostgresClientDSN(configValue.PostgresDSN), agentmemorypg.WithSkipDBInit(true))
-	if err != nil {
-		return fmt.Errorf("memory service rejected: %w", err)
+	memoryResolver := servicememory.Resolver{
+		Profiles: providerRepo, PostgresConnections: configValue.MemoryPostgresConnections, RedisConnections: configValue.MemoryRedisConnections,
+		Mem0Connections: convertMem0Connections(configValue.MemoryMem0Connections), Secrets: secretProvider, Subject: "worker-memory", AllowInMemory: configValue.MemoryAllowInMemory,
+		BuildPostgres: func(dsn string) (agentmemory.Service, error) {
+			return agentmemorypg.NewService(agentmemorypg.WithPostgresClientDSN(dsn), agentmemorypg.WithSkipDBInit(true))
+		},
+		BuildRedis: func(redisURL, keyPrefix string) (agentmemory.Service, error) {
+			return agentmemoryredis.NewService(agentmemoryredis.WithRedisClientURL(redisURL), agentmemoryredis.WithKeyPrefix(keyPrefix))
+		},
+		BuildMem0: servicememory.NewMem0Service,
+		Decorator: memoryMigrationPlanner,
 	}
-	memoryClosed := false
-	defer func() {
-		if !memoryClosed {
-			_ = memoryService.Close()
-		}
-	}()
 	// Session/Event/State are framework-owned capabilities. The immutable
 	// session binding selects a credential-free connection_id; this resolver
 	// maps it to deployment-owned DSNs and constructs only official synchronous
@@ -151,31 +198,70 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		}
 	}()
 	artifacts := artifactpostgres.NewWithObjectStore(db, objects)
-	// AppName is encoded as "tenantID/agentAppID" by the control plane, so the
-	// SDK-facing artifact service has to recover the tenant before the
-	// tenant-scoped store will accept a write.
-	artifactService := &serviceartifact.SDKService{Store: artifacts, MapTenant: func(appName string) string {
-		// An unparseable AppName yields an empty tenant, which the
-		// tenant-scoped store rejects rather than writing under a wrong scope.
-		tenantID, err := serviceartifact.TenantFromAppName(appName)
-		if err != nil {
-			return ""
+	artifactStores := map[string]storageartifact.Store{"default": artifacts}
+	artifactStoreClients := make([]*sql.DB, 0, len(configValue.ArtifactPostgresConnections)-1)
+	for connectionID, dsn := range configValue.ArtifactPostgresConnections {
+		if connectionID == "default" {
+			continue
 		}
-		return tenantID
-	}}
+		artifactDB, openErr := sql.Open("pgx", dsn)
+		if openErr != nil {
+			for _, client := range artifactStoreClients {
+				_ = client.Close()
+			}
+			return errors.New("artifact data-plane client initialization failed")
+		}
+		if pingErr := artifactDB.PingContext(parent); pingErr != nil {
+			_ = artifactDB.Close()
+			for _, client := range artifactStoreClients {
+				_ = client.Close()
+			}
+			return errors.New("artifact data-plane unavailable")
+		}
+		artifactStores[connectionID] = artifactpostgres.NewWithObjectStore(artifactDB, objects)
+		artifactStoreClients = append(artifactStoreClients, artifactDB)
+	}
+	defer func() {
+		for _, client := range artifactStoreClients {
+			_ = client.Close()
+		}
+	}()
+	artifactResolver := serviceartifact.Resolver{
+		Profiles:            providerRepo,
+		PostgresConnections: configValue.ArtifactPostgresConnections,
+		Stores:              artifactStores,
+	}
 	agentFactory := serviceagent.Factory{Profiles: profiles, Models: models, Tools: tools, Skills: skills, Knowledge: knowledgeResolver,
-		Conditions: agentcondition.DefaultRegistry(),
-		Memory:     memoryService, Checkpoints: graphCheckpoints, Policies: governanceStore, Telemetry: telemetryProvider}
+		Conditions:  agentcondition.DefaultRegistry(),
+		Checkpoints: graphCheckpoints, Policies: governanceStore, Telemetry: telemetryProvider}
 	bundles := profilememory.NewBundleManagerWithPolicy(func(ctx context.Context, key profile.ExecutionProfileKey) (profile.RuntimeBundle, func(context.Context) error, error) {
 		snapshot, resolveErr := profiles.Resolve(ctx, key)
 		if resolveErr != nil {
 			return nil, nil, resolveErr
 		}
-		root, plugins, buildErr := agentFactory.BuildWithPlugins(ctx, snapshot)
-		if buildErr != nil {
-			return nil, nil, buildErr
+		memoryService, memoryErr := memoryResolver.Resolve(ctx, snapshot)
+		if memoryErr != nil {
+			return nil, nil, fmt.Errorf("resolve tenant memory service: %w", memoryErr)
 		}
-		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, nil, nil
+		artifactService, artifactClose, artifactErr := artifactResolver.Resolve(ctx, snapshot)
+		if artifactErr != nil {
+			_ = memoryService.Close()
+			return nil, nil, fmt.Errorf("resolve tenant artifact service: %w", artifactErr)
+		}
+		closeServices := func(closeCtx context.Context) error {
+			memoryCloseErr := memoryService.Close()
+			if artifactClose == nil {
+				return memoryCloseErr
+			}
+			return errors.Join(memoryCloseErr, artifactClose(closeCtx))
+		}
+		bundleFactory := agentFactory
+		bundleFactory.Memory = memoryService
+		root, plugins, buildErr := bundleFactory.BuildWithPlugins(ctx, snapshot)
+		if buildErr != nil {
+			return nil, closeServices, buildErr
+		}
+		return &serviceagent.Bundle{AppName: snapshot.AppName, Root: root, Memory: memoryService, Artifact: artifactService, Plugins: plugins}, closeServices, nil
 	}, profilememory.BundleManagerPolicy{FailureBackoff: configValue.WorkerBundleFailureBackoff, CloseTimeout: configValue.WorkerBundleCloseTimeout})
 	credentialInvalidator := modelclient.CredentialInvalidator{Pool: credentialPool, Bundles: bundles, Subject: "worker-model"}
 
@@ -347,6 +433,12 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 			// up the published snapshot without disrupting in-flight requests.
 			bundles.RetireTenant(event.TenantID)
 			return nil
+		case strings.HasPrefix(event.PayloadRef, "memory-migration://"):
+			// Migration state changes do not necessarily publish a new tenant
+			// ConfigSnapshot. Retire the immutable bundle so the next request
+			// re-projects dual-write/reverse-write state from PostgreSQL.
+			bundles.RetireTenant(event.TenantID)
+			return nil
 		default:
 			return nil
 		}
@@ -448,10 +540,6 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 		terminalErr = errors.New("session service shutdown failed")
 	}
 	sdkSessionsClosed = true
-	if closeErr := memoryService.Close(); closeErr != nil && terminalErr == nil {
-		terminalErr = errors.New("memory service shutdown failed")
-	}
-	memoryClosed = true
 	backgroundDone := make(chan struct{})
 	go func() { background.Wait(); close(backgroundDone) }()
 	select {
@@ -463,6 +551,14 @@ func runWorkerRole(parent context.Context, getenv func(string) string, logger *r
 	}
 	lifecycle.MarkStopped()
 	return terminalErr
+}
+
+func convertMem0Connections(values map[string]mem0Connection) map[string]servicememory.Mem0Connection {
+	converted := make(map[string]servicememory.Mem0Connection, len(values))
+	for id, value := range values {
+		converted[id] = servicememory.Mem0Connection{Host: value.Host, SelfHostedOSS: value.SelfHostedOSS}
+	}
+	return converted
 }
 
 // buildToolCatalog assembles the process-local, code-owned Tool Catalog from the

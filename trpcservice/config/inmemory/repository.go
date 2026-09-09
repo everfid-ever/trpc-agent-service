@@ -62,6 +62,9 @@ func (r *Repository) Validate(ctx context.Context, in config.ValidateInput) erro
 		}
 		seenDomains[binding.Domain] = struct{}{}
 	}
+	if err := config.ValidateBackendTopology(in.Payload.BackendBindings); err != nil {
+		return err
+	}
 	return nil
 }
 func (r *Repository) validateApp(ctx context.Context, tenantID, appID string) error {

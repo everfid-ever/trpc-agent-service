@@ -142,6 +142,9 @@ WHERE tenant_id=$1 AND migration_id=$2 AND version=$19`, next.TenantID, next.Mig
 	if rows, _ := result.RowsAffected(); rows != 1 {
 		return migration.Migration{}, runtime.ErrVersionConflict
 	}
+	if err := writeMemoryMigrationInvalidation(ctx, tx, next, ""); err != nil {
+		return migration.Migration{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return migration.Migration{}, err
 	}
@@ -291,10 +294,36 @@ VALUES($1,$2,'audit',$3,$4,$2,$5,$6)`, next.TenantID, outboxID, next.MigrationID
 		"backend-migration-control://"+next.TenantID+"/"+next.MigrationID+"/"+strconv.FormatInt(next.Version, 10), in.Metadata.Traceparent); err != nil {
 		return migration.Migration{}, err
 	}
+	if err := writeMemoryMigrationInvalidation(ctx, tx, next, in.Metadata.Traceparent); err != nil {
+		return migration.Migration{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return migration.Migration{}, err
 	}
 	return next, nil
+}
+
+// writeMemoryMigrationInvalidation makes active migration state visible to
+// stateless Worker bundle caches. The authority remains PostgreSQL; this
+// outbox event only causes a safe tenant bundle retirement so the next turn
+// reruns MigrationPlanner against the new state.
+func writeMemoryMigrationInvalidation(ctx context.Context, tx *sql.Tx, value migration.Migration, traceparent string) error {
+	if value.Domain != "memory" {
+		return nil
+	}
+	outboxID := "memory-migration-invalidation:" + value.TenantID + ":" + value.MigrationID + ":" + strconv.FormatInt(value.Version, 10)
+	_, err := tx.ExecContext(ctx, `INSERT INTO public.outbox(
+tenant_id,outbox_id,kind,aggregate_id,event_seq,idempotency_key,payload_ref,traceparent)
+VALUES($1,$2,'config-invalidation',$3,$4,$2,$5,$6)`, value.TenantID, outboxID, value.MigrationID, value.Version,
+		"memory-migration://"+value.TenantID+"/"+value.MigrationID+"/"+strconv.FormatInt(value.Version, 10), nullableTraceparent(traceparent))
+	return err
+}
+
+func nullableTraceparent(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 const selectMigration = `SELECT tenant_id,migration_id,domain,epoch,

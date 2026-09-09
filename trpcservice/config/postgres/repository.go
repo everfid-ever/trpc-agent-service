@@ -64,6 +64,9 @@ WHERE p.tenant_id=$1 AND p.backend_profile_id=$2 AND v.profile_version=$3`, in.T
 			return config.ErrInvalid
 		}
 	}
+	if err := config.ValidateBackendTopology(in.Payload.BackendBindings); err != nil {
+		return err
+	}
 	for appID := range apps {
 		var status string
 		var revision sql.NullInt64
