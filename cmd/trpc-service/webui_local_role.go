@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -956,7 +957,12 @@ func ensureWebUILocalKnowledgeFixture(ctx context.Context, db *sql.DB, providers
 	if _, err = manifests.BeginManifest(ctx, serviceknowledge.BeginManifestInput{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, Version: webUILocalKnowledgeVersion, SourceURI: "fixture://webui-local-guide", SourceDigest: sourceDigest, ChunkingPipelineVersion: "webui-local-v1", EmbedderProfileID: webUILocalEmbedderID, EmbedderVersion: 1, VectorCollectionGeneration: webUILocalVectorGeneration, MetadataSchema: []string{"title"}, ContentWatermark: "webui-local-snapshot-v1", CreatedAt: now}); err != nil {
 		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
 	}
-	chunk := serviceknowledge.ChunkRecord{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, KnowledgeVersion: webUILocalKnowledgeVersion, ChunkID: "guide", SourceDigest: sourceDigest, ContentDigest: localFixtureDigest(text), MetadataDigest: localFixtureDigest("title=WebUI Local Guide"), EmbeddingProfileID: webUILocalEmbedderID, EmbeddingVersion: 1, VectorGeneration: webUILocalVectorGeneration, Content: text, Metadata: map[string]string{"title": "WebUI Local Guide"}, Vector: vector, CreatedAt: now}
+	metadata := map[string]string{"title": "WebUI Local Guide"}
+	metadataDigest, err := localFixtureMetadataDigest(metadata)
+	if err != nil {
+		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
+	}
+	chunk := serviceknowledge.ChunkRecord{TenantID: webUILocalTenantID, KnowledgeID: webUILocalKnowledgeID, KnowledgeVersion: webUILocalKnowledgeVersion, ChunkID: "guide", SourceDigest: sourceDigest, ContentDigest: localFixtureDigest(text), MetadataDigest: metadataDigest, EmbeddingProfileID: webUILocalEmbedderID, EmbeddingVersion: 1, VectorGeneration: webUILocalVectorGeneration, Content: text, Metadata: metadata, Vector: vector, CreatedAt: now}
 	if _, err = manifests.StageChunk(ctx, chunk); err != nil {
 		return agentapp.SkillRef{}, agentapp.VersionedRef{}, err
 	}
@@ -1016,6 +1022,18 @@ func ensureWebUILocalQdrantCollection(ctx context.Context, endpoint, collection 
 func localFixtureDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+// localFixtureMetadataDigest uses the exact canonical representation checked
+// by knowledge ingestion and migration images. Human-readable shorthand (for
+// example "title=value") would stage successfully nowhere and must not be
+// used as an integrity digest.
+func localFixtureMetadataDigest(value map[string]string) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return localFixtureDigest(string(encoded)), nil
 }
 
 func webUILocalKnowledgeBindingReady(values []configdomain.BackendBinding) bool {

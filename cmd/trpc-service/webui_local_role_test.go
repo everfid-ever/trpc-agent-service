@@ -14,12 +14,32 @@ import (
 	configmemory "github.com/liuzengh/trpc-agent-service/trpcservice/config/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/governance"
 	governancememory "github.com/liuzengh/trpc-agent-service/trpcservice/governance/inmemory"
+	"github.com/liuzengh/trpc-agent-service/trpcservice/migration/knowledgedriver"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/secrets"
 	secretfs "github.com/liuzengh/trpc-agent-service/trpcservice/secrets/filesystem"
+	serviceknowledge "github.com/liuzengh/trpc-agent-service/trpcservice/storage/knowledge"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tenant"
 	tenantmemory "github.com/liuzengh/trpc-agent-service/trpcservice/tenant/inmemory"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/tool/localnote"
 )
+
+func TestLocalFixtureMetadataDigestMatchesKnowledgeImage(t *testing.T) {
+	content := "fixture content"
+	metadata := map[string]string{"title": "Fixture title"}
+	digest, err := localFixtureMetadataDigest(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := serviceknowledge.ChunkRecord{
+		TenantID: "tenant", KnowledgeID: "knowledge", KnowledgeVersion: 1, ChunkID: "chunk",
+		SourceDigest: localFixtureDigest("source"), ContentDigest: localFixtureDigest(content), MetadataDigest: digest,
+		EmbeddingProfileID: "embedder", EmbeddingVersion: 1, VectorGeneration: "generation",
+		Content: content, Metadata: metadata, Vector: []float32{0.5}, CreatedAt: time.Now().UTC(),
+	}.ChunkImage()
+	if _, err := knowledgedriver.ImageDigest(image); err != nil {
+		t.Fatalf("fixture image violates the durable metadata digest contract: %v", err)
+	}
+}
 
 func TestLoadWebUILocalConfigDefaultsAndRejectsUnsafeInput(t *testing.T) {
 	base := map[string]string{"TRPC_POSTGRES_DSN": "postgres://local", "TRPC_REDIS_ADDRESS": "redis:6379"}
