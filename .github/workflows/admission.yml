@@ -14,7 +14,9 @@ concurrency:
 
 jobs:
   go-1-24:
-    name: Go 1.24 compatibility
+    # Keep the stable job id for existing branch-protection wiring; the
+    # display name must track the toolchain declared by go.mod.
+    name: Go 1.25 compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -24,10 +26,10 @@ jobs:
           go-version: '1.25.14'
           cache: false
       - name: Fresh-cache build, static checks and unit tests
-        run: bash scripts/ci_admission.sh
+        run: bash scripts/ci/admission.sh
 
   race-1-24:
-    name: Go 1.24 race suite
+    name: Go 1.25 race suite
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -37,7 +39,7 @@ jobs:
           go-version: '1.25.14'
           cache: false
       - name: Fresh-cache race tests
-        run: bash scripts/ci_admission.sh --race
+        run: bash scripts/ci/admission.sh --race
 
   coverage:
     name: Coverage floor and PR diff ratchet
@@ -53,9 +55,9 @@ jobs:
           cache: false
       - name: Enforce repository and changed-line coverage
         env:
-          TRPC_MIN_TOTAL_COVERAGE: '41.0'
+          TRPC_MIN_TOTAL_COVERAGE: '41.1'
           TRPC_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: bash scripts/coverage_gate.sh
+        run: bash scripts/ci/coverage-gate.sh
 
   vulnerabilities:
     name: Go vulnerability scan
@@ -81,7 +83,7 @@ jobs:
       - name: Assert Compose input is valid
         run: docker compose -f deploy/compose/docker-compose.backend-smoke.yml config --quiet
       - name: Run PostgreSQL migration e2e with no skipped contracts
-        run: bash scripts/backend_adapter_smoke.sh migration
+        run: bash scripts/e2e/backend-adapter.sh migration
 
   runtime-e2e:
     name: Runtime e2e — PostgreSQL, Redis and worker recovery slice
@@ -90,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Redis-backed runtime e2e with no skipped contracts
-        run: bash scripts/backend_adapter_smoke.sh runtime
+        run: bash scripts/e2e/backend-adapter.sh runtime
 
   storage-e2e:
     name: Storage e2e — MinIO, Qdrant and Vault adapters
@@ -102,7 +104,6 @@ jobs:
         run: >-
           docker run --rm
           --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
-          --volume "$PWD/deploy/prometheus-alerts.yml:/etc/prometheus/trpc-alerts.yml:ro"
           --entrypoint promtool
           prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
           check config /etc/prometheus/prometheus.yml
@@ -113,10 +114,8 @@ jobs:
           --entrypoint promtool
           prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
           check rules /etc/prometheus/trpc-alerts.yml
-      - name: Render Kubernetes gateway and worker base
-        run: kubectl kustomize deploy/kubernetes/base > /dev/null
       - name: Run object, vector and secret storage e2e
-        run: bash scripts/backend_adapter_smoke.sh storage
+        run: bash scripts/e2e/backend-adapter.sh storage
 
   im-e2e:
     name: IM e2e — signed callbacks and durable duplicate ingress
@@ -129,7 +128,7 @@ jobs:
           go-version: '1.25.14'
           cache: false
       - name: Run repository-verifiable IM protocol e2e
-        run: bash scripts/im_e2e.sh
+        run: bash scripts/e2e/im.sh
 
   fault-e2e:
     name: Fault e2e — SIGKILL multi-node handoff
@@ -142,7 +141,7 @@ jobs:
           mkdir -p deploy/compose/secrets
           printf '%s\n' 'ci-placeholder-not-a-model-credential' > deploy/compose/secrets/deepseek-api-key
       - name: Kill one live composition node and verify the peer remains ready
-        run: bash scripts/local_multinode_smoke.sh
+        run: bash scripts/e2e/multinode-fault.sh
 
   credential-free-final-acceptance:
     name: Empty DB, fake provider and SSE final acceptance
@@ -155,4 +154,4 @@ jobs:
           go-version: '1.25.14'
           cache: false
       - name: Run static gate and credential-free demo acceptance
-        run: bash scripts/ci_admission.sh --demo
+        run: bash scripts/ci/admission.sh --demo

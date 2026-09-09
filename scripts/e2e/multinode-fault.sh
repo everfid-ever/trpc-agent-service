@@ -3,7 +3,7 @@
 # composition nodes sharing those authorities, and single-node continuity.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="${repo_root}/deploy/compose/docker-compose.local.yml"
 secret_file="${repo_root}/deploy/compose/secrets/deepseek-api-key"
 project="trpc-local-multinode-${RANDOM}${RANDOM}"

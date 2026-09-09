@@ -3,7 +3,7 @@
 # Redis outage, then recover without restarting either application node.
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="${repo_root}/deploy/compose/docker-compose.local.yml"
 secret_file="${repo_root}/deploy/compose/secrets/deepseek-api-key"
 project="trpc-local-recovery-${RANDOM}${RANDOM}"

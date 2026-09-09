@@ -5,7 +5,7 @@ case "${suite}" in
   all|migration|runtime|storage) ;;
   *) echo "usage: $0 [all|migration|runtime|storage]" >&2; exit 2 ;;
 esac
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="${repo_root}/deploy/compose/docker-compose.backend-smoke.yml"
 project="trpc-${suite}-e2e-${RANDOM}${RANDOM}"
 diagnostics="$(mktemp -d "${TMPDIR:-/tmp}/trpc-backend-smoke.XXXXXX")"

@@ -14,5 +14,5 @@ if ! command -v go >/dev/null 2>&1; then
   exit 2
 fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-go -C "${repo_root}" run ./cmd/postgres-migration-test
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+go -C "${repo_root}" run ./cmd/compliance-migration-test

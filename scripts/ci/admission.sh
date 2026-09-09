@@ -8,7 +8,7 @@ case "${1:-}" in
   *) echo "usage: $0 [--race|--demo]" >&2; exit 2 ;;
 esac
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
 go_version="$(go env GOVERSION)"
@@ -56,8 +56,9 @@ while IFS= read -r -d '' script; do
   bash -n "${script}"
 done < <(find scripts -type f -name '*.sh' -print0)
 
-bash scripts/check-format.sh
-bash scripts/check-dependency-boundaries.sh
+bash scripts/ci/check-format.sh
+bash scripts/ci/check-dependency-boundaries.sh
+bash scripts/ci/check-doc-links.sh
 go build ./...
 go vet ./...
 go test -count=1 ./...
@@ -65,5 +66,5 @@ git diff --check
 
 if [[ "${1:-}" == "--demo" ]]; then
   echo "Running credential-free final acceptance path"
-  bash scripts/quickstart.sh --demo
+  bash scripts/compose/quickstart.sh --demo
 fi

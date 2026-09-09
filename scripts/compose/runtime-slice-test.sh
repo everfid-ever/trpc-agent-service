@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
 if [[ "${TRPC_MIGRATION_TEST:-}" != "1" ]]; then
   echo "refusing: set TRPC_MIGRATION_TEST=1" >&2
   exit 1

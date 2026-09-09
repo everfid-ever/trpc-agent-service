@@ -1,7 +1,5 @@
 global:
   scrape_interval: 10s
-rule_files:
-  - /etc/prometheus/trpc-alerts.yml
 scrape_configs:
   - job_name: otel-collector
     # Collector self-observability lives on its telemetry endpoint. The 9464

@@ -4,6 +4,9 @@
 # not passed here; CI must never silently skip a test it claims to exercise.
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <go-test-package> [...]" >&2
   exit 2

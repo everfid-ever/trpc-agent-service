@@ -10,4 +10,4 @@
 
 这是一份首次交付基线，不兼容本仓库压缩前的历史数据库。此后若继续开发，必须从 `000002_*.up.sql` / `000002_*.down.sql` 开始追加新版本：不得改写或删除已发布基线，Runner 会用 `schema_migrations` checksum 拒绝漂移。`down` 仅用于可丢弃的本地测试数据库；合规库在已完成销毁后会拒绝回滚。
 
-本地从零验证入口是 `bash scripts/ci_admission.sh` 或 Compose 的 `runtime-test` profile。数据库卷如需重置，必须使用 README 中声明的显式 `docker compose ... down -v` 命令。
+本地从零验证入口是 `bash scripts/ci/admission.sh` 或 Compose 的 `runtime-test` profile。数据库卷如需重置，必须使用 [根目录 README](../README.md#快速开始) 中声明的显式 `docker compose ... down -v` 命令。

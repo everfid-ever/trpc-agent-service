@@ -43,7 +43,7 @@ run_runtime() {
   [[ -n "${TRPC_REDIS_TEST_ADDR:-}" ]] || { echo "TRPC_REDIS_TEST_ADDR is required" >&2; exit 2; }
   # Do not permit opt-in contracts to turn into green builds because a Redis
   # address or the runtime slice was accidentally omitted.
-  bash scripts/test_no_skip.sh ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
+  bash scripts/lib/test-no-skip.sh ./trpcservice/broker/redis ./trpcservice/coordination/redis ./trpcservice/relay/redis
   TRPC_RUNTIME_TEST=1 go run ./cmd/postgres-migration-test
   go test -count=1 ./trpcservice/admin ./trpcservice/agent ./trpcservice/agent/condition
 }
@@ -66,7 +66,7 @@ run_storage() {
   curl -fsS "${TRPC_MINIO_TEST_ENDPOINT}/minio/health/live" >/dev/null
   curl -fsS -X POST -H "X-Vault-Token: ${TRPC_VAULT_TEST_TOKEN}" -H "Content-Type: application/json" \
     -d '{"data":{"value":"integration-secret"}}' "${TRPC_VAULT_TEST_ENDPOINT}/v1/secret/data/model" >/dev/null
-  bash scripts/test_no_skip.sh ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant ./trpcservice/storage/objectstore/s3
+  bash scripts/lib/test-no-skip.sh ./trpcservice/secrets/vault ./trpcservice/storage/knowledge/qdrant ./trpcservice/storage/objectstore/s3
   go test -count=1 ./trpcservice/skill ./trpcservice/storage/knowledge ./trpcservice/tool/codeexec
 }
 

@@ -1,6 +1,6 @@
 # 可靠性、发布与容量验收 Runbook
 
-本文把现有的 durable runtime 能力整理为可执行的本地 Docker 验收口径。全部验证在 Docker Desktop 的 PostgreSQL、Redis、Worker、OTel 与 IM profile 上完成；不要求 Kubernetes、云数据库或生产运维资源。仓库同时提供仅含 `gateway`/`worker` role 的 Kubernetes base 和可由 `promtool` 校验的告警规则，二者均不携带生产凭据，也不构成远端发布或告警送达证据。
+本文把现有的 durable runtime 能力整理为可执行的本地 Docker Compose 验收口径。全部验证在 Docker Desktop 的 PostgreSQL、Redis、Worker、OTel 与 IM profile 上完成；不要求 Kubernetes、云数据库或生产运维资源。仓库提供的 Kubernetes 文件和告警规则仅辅助验收者审阅运行契约；不构成远端发布、告警送达或验收证据。
 
 ## 1. 验收范围与不可变规则
 
@@ -107,10 +107,10 @@ go run ./cmd/local-webui-load \
 最小本地验收顺序：
 
 ```bash
-bash scripts/ci_admission.sh
-bash scripts/backend_adapter_smoke.sh
-bash scripts/local_multinode_smoke.sh
-bash scripts/local_dependency_recovery_smoke.sh
+bash scripts/ci/admission.sh
+bash scripts/e2e/backend-adapter.sh
+bash scripts/e2e/multinode-fault.sh
+bash scripts/e2e/dependency-recovery.sh
 ```
 
 随后按 getting-started 的步骤串行完成 WebUI、Feishu 与 WeCom 的 real-account smoke。每次只启动一个 standalone IM profile。
@@ -125,15 +125,16 @@ bash scripts/local_dependency_recovery_smoke.sh
 - 网络仅放行角色所需方向：Channel→官方 IM、Worker→Model/Tool/Storage、所有角色→PostgreSQL/Redis/OTel；默认拒绝其余流量；
 - 发布按第 4 节 canary 扩大。PDB 保证 gateway/worker 至少一个 ready 副本，Worker 不能因 HPA 缩容直接中断未 drain work。
 
-仓库提供 [`deploy/kubernetes/base`](../../deploy/kubernetes/base/README.md) 作为 gateway/worker
-的 Kustomize 骨架，以及 [`deploy/prometheus-alerts.yml`](../../deploy/prometheus-alerts.yml)
-的六条 durable-runtime 告警规则。它们不包含云数据库、Alertmanager 路由、生产凭据或
-可直接 apply 的环境 overlay，因此不属于本项目的远端发布验收条件。
+[`deploy/kubernetes/base`](../../deploy/kubernetes/base/README.md) 以 gateway/worker
+展示 Kubernetes 的 role、drain 与 deny-ingress 设计；
+[`deploy/prometheus-alerts.yml`](../../deploy/prometheus-alerts.yml) 展示六条 durable-runtime
+告警的指标语义。两者没有云数据库、Alertmanager 路由、生产凭据或环境 overlay，不能
+替代本 runbook 中的 Docker Compose 验收命令，也不得作为发布资产宣称。
 
 ## 7. 最终验收清单
 
-- [ ] `ci_admission.sh` 和最小后端 smoke 通过。
-- [ ] 两租户、两 Worker、节点 A 被 `SIGKILL`（exit 137）后节点 B 存活的 `local_multinode_smoke.sh` 通过。
+- [ ] `bash scripts/ci/admission.sh` 和 `bash scripts/e2e/backend-adapter.sh` 通过。
+- [ ] `bash scripts/e2e/multinode-fault.sh` 证明两租户、两 Worker 下，节点 A 被 `SIGKILL`（exit 137）后节点 B 仍存活。
 - [ ] 下列定向恢复契约通过：
 
   ```bash
@@ -143,7 +144,7 @@ bash scripts/local_dependency_recovery_smoke.sh
   ```
 
   其中覆盖 Worker drain、bounded Runner event drain、ACK 前崩溃 reclaim、relay publish/mark 间退出、callback/reply 重复投递、lease reclaim 与真实 PostgreSQL/Redis Runtime Slice。
-- [ ] `local_dependency_recovery_smoke.sh` 证明 PostgreSQL/Redis 短断会使两个节点 unready，恢复后两个节点无需重启即可重新 ready；durable work 不发生半提交。
+- [ ] `bash scripts/e2e/dependency-recovery.sh` 证明 PostgreSQL/Redis 短断会使两个节点 unready，恢复后两个节点无需重启即可重新 ready；durable work 不发生半提交。
 - [ ] WebUI 真实 DeepSeek、Feishu 私聊/群 @、WeCom 单聊各自留下脱敏证据；standalone profile 串行切换。
 - [ ] Feishu 私聊与 WeCom 单聊各发送一张不超过 10 MiB 的新 JPEG、PNG、GIF 或 WebP 图片，确认该 standalone profile 的 `/readyz`、ClamAV 容器健康、provider media download、tenant-scoped artifact、视觉模型输入与最终文本回复均有脱敏证据。非图片文件只验证安全接收、扫描和审计；当前本地 DeepSeek Profile 不把 PDF/Office 文件伪装为可理解的模型输入。飞书 media-only 群消息按缺少可验证 @mention 的安全规则忽略，不作为失败。
 - [ ] 本地 fixture 的 ConfigSnapshot copy-forward rollback 与 schema migration 观察窗契约通过，并记录发布门禁。

@@ -6,7 +6,7 @@ cd "$ROOT"
 
 if [[ "${1:-}" == "--demo" ]]; then
   [[ $# -eq 1 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
-  exec "$ROOT/scripts/quickstart.sh" --demo
+  exec "$ROOT/scripts/compose/quickstart.sh" --demo
 fi
 [[ $# -eq 0 ]] || { echo "usage: $0 [--demo]" >&2; exit 2; }
 

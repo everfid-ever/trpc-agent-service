@@ -3,6 +3,9 @@
 # substitutes for a vendor-account or public-callback acceptance record.
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${repo_root}"
+
 go test -count=1 ./trpcservice/integration -run '^TestIMFeishuAndWeComDurableHTTPIngressContract$'
 go test -count=1 \
   ./trpcservice/channels/feishu \

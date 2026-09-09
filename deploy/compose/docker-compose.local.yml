@@ -116,7 +116,7 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
-    command: ["bash", "scripts/runtime_slice_test.sh"]
+    command: ["bash", "scripts/compose/runtime-slice-test.sh"]
 
   # Docker creates named-volume roots as root-owned. The application image is
   # deliberately distroless/nonroot and refuses to weaken its 0700 Skill

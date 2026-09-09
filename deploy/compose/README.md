@@ -5,30 +5,30 @@
 完整启动、验证与清理步骤见 [`docs/runbook/getting-started.md`](../../docs/runbook/getting-started.md)。
 
 - `webui` profile：PostgreSQL、Redis、Jaeger、OTel Collector 和 `webui-local`；需要本机 Docker secret 中的 DeepSeek Key。它还创建隔离的 `webui-local-skills` volume，供已发布 Skill 的受保护 staging 使用。
-- `webui-multinode` profile：先运行一次性 `webui-local-bootstrap`，再启动两个独立的 WebUI composition node；它们共享 PostgreSQL/Redis 及同一个只用于 Skill staging 的 volume，使用不同 Worker、relay、delivery 和 wakeup consumer ID。运行 `bash scripts/local_multinode_smoke.sh` 会先执行真实 PostgreSQL/Redis 的两租户、两 Worker 集成 slice，再验证一个 WebUI 节点停止后另一个节点仍然 ready。
+- `webui-multinode` profile：先运行一次性 `webui-local-bootstrap`，再启动两个独立的 WebUI composition node；它们共享 PostgreSQL/Redis 及同一个只用于 Skill staging 的 volume，使用不同 Worker、relay、delivery 和 wakeup consumer ID。运行 `bash scripts/e2e/multinode-fault.sh` 会先执行真实 PostgreSQL/Redis 的两租户、两 Worker 集成 slice，再验证一个 WebUI 节点停止后另一个节点仍然 ready。
 - `feishu-local` profile：开发者显式提供本地忽略的 `secrets/feishu.env` 与 DeepSeek Key 后，启动真实飞书 callback、验签、durable ingress、Worker 和 Reply API 投递。它只用于本机 Docker 验收；外部事件订阅还需要把宿主机的 `58086` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/feishu?route_key=local-feishu`。
 - `wecom-local` profile：同 feishu-local 的组合方式，改用本地忽略的 `secrets/wecom.env`（Corp ID、Agent ID、回调 Token/EncodingAESKey、应用 Secret），启动真实企业微信回调验签、durable ingress、Worker 和官方 Reply API 投递。外部回调需要把宿主机的 `58087` 端口通过临时 HTTPS tunnel 暴露为 `/callbacks/wecom?route_key=local-wecom`。
 - `runtime-test` profile：本地 PostgreSQL/Redis migration 与恢复契约。
-- `docker-compose.backend-smoke.yml`：由 `bash scripts/backend_adapter_smoke.sh` 创建并自动销毁的 PostgreSQL、Redis、Qdrant、Vault smoke 环境。
+- `docker-compose.backend-smoke.yml`：由 `bash scripts/e2e/backend-adapter.sh` 创建并自动销毁的 PostgreSQL、Redis、Qdrant、Vault smoke 环境。
 
 ## 本地 Admin 控制面
 
 `gateway-worker` profile 还会启动只供内部使用的 `admin` 服务（默认宿主机端口 `58083`）。它需要独立的 HMAC 密钥，不能复用 Gateway 密钥。先选择一个已经初始化、未禁用的 tenant，再从仓库根目录创建本地文件型 Secret Provider 投放：
 
-~~~
+```bash
 go run ./cmd/admin-bootstrap secret \
   -secret-root deploy/compose/secrets \
   -tenant-id <tenant-id>
-~~~
+```
 
 命令会输出应写入忽略文件 `deploy/compose/.env.local` 的三项 `TRPC_ADMIN_*` 配置，但绝不输出原始密钥，也拒绝覆盖已有投放文件。获取目标 tenant 的当前 version 后，显式签发一个最长 15 分钟的本地测试 token：
 
-~~~
+```bash
 go run ./cmd/admin-bootstrap token \
   -secret-root deploy/compose/secrets \
   -tenant-id <tenant-id> \
   -tenant-version <current-version>
-~~~
+```
 
 token 会输出到标准输出；应只在本机短期使用，并通过 `Authorization: Bearer <token>` 调用 Admin API。生产环境必须由 Vault/CSI 与身份系统分别投放密钥和签发 token，不能使用这个本地 bootstrap 工具。
 

@@ -26,7 +26,7 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
    ./start.sh --demo
    ```
 
-命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci_admission.sh --demo`（需要本机 Go 1.25）。
+命令成功时会打印可访问的 HTTP 地址及其专属资源的清理命令。若还需执行格式、依赖、build、vet 与全量单测门禁，使用 `bash scripts/ci/admission.sh --demo`（需要本机 Go 1.25）。
 
 3. 只有需要真实模型闭环时，才创建仅本机可读的 DeepSeek 模型密钥文件。`/absolute/path/to/deepseek-api-key` 是保存**单行 API Key 内容**的现有文件路径，不是字面量；密钥不要加引号，也不要提交：
 
@@ -52,11 +52,11 @@ DeepSeek 是唯一默认启用的外部调用。API Key 只用于本机容器中
 
    ```bash
    # 无凭据的最终验收：空库单一基线、fake chat 与 SSE
-   bash scripts/ci_admission.sh --demo
-   bash scripts/ci_admission.sh
-   bash scripts/backend_adapter_smoke.sh
-   bash scripts/local_multinode_smoke.sh
-   bash scripts/local_dependency_recovery_smoke.sh
+   bash scripts/ci/admission.sh --demo
+   bash scripts/ci/admission.sh
+   bash scripts/e2e/backend-adapter.sh
+   bash scripts/e2e/multinode-fault.sh
+   bash scripts/e2e/dependency-recovery.sh
    ```
 
 6. 只有需要真实 IM 验收时，才停止 WebUI standalone runtime，改按第 4 节或第 5 节配置飞书/企业微信。每种 IM 都必须使用开发者自己的应用凭据和新的临时 HTTPS tunnel；Quick Tunnel 重启会更换域名，因此需把新的完整回调 URL 重新保存到平台后台。
@@ -329,7 +329,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 多租户/节点化代码不会因本地验收而被简化。`webui-multinode` profile 先建立同一套本地 tenant、ConfigSnapshot、Graph 与 scoped secret fixture，再启动两个独立容器；两个容器共享 PostgreSQL 和 Redis、分别使用唯一 Worker/relay/delivery consumer ID。
 
 ```bash
-bash scripts/local_multinode_smoke.sh
+bash scripts/e2e/multinode-fault.sh
 ```
 
 该 smoke 使用随机 Compose 项目和随机本机端口。它先在临时 PostgreSQL 16 数据库中创建两个 tenant、运行两个 Redis-backed Worker 并验证 tenant scope，再依次确认 node A、node B 的 `/readyz`，向 node A 的真实容器发送 `SIGKILL` 并断言 exit code 为 137，随后确认 node B 保持 ready。成功后自动删除本次容器和卷；失败日志路径会打印到终端。若要手动查看两个节点页面：
@@ -358,11 +358,11 @@ docker compose -f deploy/compose/docker-compose.local.yml \
 
 ```bash
 # 纯 Go 静态、单元与 race 检查（Go 1.25）
-bash scripts/ci_admission.sh
-bash scripts/ci_admission.sh --race
+bash scripts/ci/admission.sh
+bash scripts/ci/admission.sh --race
 
 # Disposable PostgreSQL 16、Redis 7、Qdrant、Vault 真适配器 smoke
-bash scripts/backend_adapter_smoke.sh
+bash scripts/e2e/backend-adapter.sh
 
 # PostgreSQL / Redis runtime slice
 docker compose -f deploy/compose/docker-compose.local.yml up -d postgres redis
@@ -370,7 +370,7 @@ docker compose -f deploy/compose/docker-compose.local.yml \
   --profile runtime-test run --rm runtime-test
 ```
 
-`backend_adapter_smoke.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 4、5 节中开发者亲自完成的 Feishu 与 WeCom real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为云对象存储、DLP 或生产集群已通过。
+`bash scripts/e2e/backend-adapter.sh` 成功后会删除它创建的容器和卷；失败时会保留临时 Compose 日志路径。除第 4、5 节中开发者亲自完成的 Feishu 与 WeCom real-account smoke 外，所有验收都只针对本机 Docker 环境，不得把 WebUI、fixture 或 fake adapter 的成功表述为云对象存储、DLP 或生产集群已通过。
 
 每个验证项的命令、所需资源和成功证据汇总见 [verification-matrix.md](verification-matrix.md)。
 
