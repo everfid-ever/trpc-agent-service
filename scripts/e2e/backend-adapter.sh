@@ -23,6 +23,14 @@ compose() {
   TRPC_E2E_SUITE="${suite}" docker compose --project-name "${project}" -f "${compose_file}" "$@"
 }
 
+# The smoke image runs as root and writes coverage profiles to the host bind
+# mount. Make successful profiles readable by the GitHub Actions runner before
+# upload-artifact packages them; /out contains only coverage metadata, never
+# source payloads or credentials.
+publish_coverage() {
+  compose run --rm --no-deps --entrypoint bash smoke -c 'chmod -R a+rX /out'
+}
+
 wait_healthy() {
   local service="$1" container state
   container="$(compose ps -q "${service}")"
@@ -58,6 +66,7 @@ case "${suite}" in
     compose up --detach postgres
     wait_healthy postgres
     compose run --rm --no-deps smoke
+    publish_coverage
     ;;
   runtime|storage|artifact)
     if [[ "${TRPC_E2E_COVERAGE:-}" == "1" ]]; then
@@ -93,6 +102,9 @@ case "${suite}" in
         ;;
     esac
     compose run --rm --no-deps smoke
+    if [[ "${TRPC_E2E_COVERAGE:-}" == "1" ]]; then
+      publish_coverage
+    fi
     ;;
   all)
     # Do not pass --abort-on-container-exit: vault-init is a one-shot container
