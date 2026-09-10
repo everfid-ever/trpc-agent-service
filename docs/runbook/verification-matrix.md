@@ -17,6 +17,7 @@
 | 最终无凭据验收 | `bash scripts/ci/admission.sh --demo` | Go 1.25、Docker Desktop/CI Docker daemon、curl | 空 PostgreSQL 只记录完整的压缩基线 `000001`；demo bootstrap、fake chat、SSE delta、health/ready 全部通过 | 本地/CI | CI | 不需要 |
 | Migration e2e | `bash scripts/e2e/backend-adapter.sh migration` | Docker Desktop 或 CI Docker daemon | PostgreSQL 16 Up/Down/回放、schema probes、迁移 control/journal 零-skip contract | 本地/CI | CI | 不需要 |
 | Runtime e2e | `bash scripts/e2e/backend-adapter.sh runtime` | Docker Desktop 或 CI Docker daemon | PostgreSQL/Redis worker slice、lease、relay、recovery 零-skip contract | 本地/CI | CI | 不需要 |
+| Framework telemetry metrics bridge | `go test ./trpcservice/telemetry/otel` | Go 1.25.x | tRPC-Agent-Go 公开 metric 初始化入口与 service metrics 使用同一 Provider；SDK 自动 trace 未启用，以避免未经公开策略配置的 payload 导出 | 本地/CI | CI | 不需要 |
 | Storage e2e | `bash scripts/e2e/backend-adapter.sh storage` | Docker Desktop 或 CI Docker daemon | MinIO、Qdrant、Vault 的真实协议 adapter 均零-skip；临时资源自动清理 | 本地/CI | CI | 不需要 |
 | IM e2e | `bash scripts/e2e/im.sh` | Go 1.25.x | Feishu/WeCom 签名 callback、1000 并发重复投递与 durable ingress 契约 | 本地/CI | CI | 真实渠道另需人工 |
 | Prometheus 配置 | `docker run --rm --volume "$PWD/deploy/compose/prometheus.yml:/etc/prometheus/prometheus.yml:ro" --entrypoint promtool prom/prometheus:v2.54.1 check config /etc/prometheus/prometheus.yml` | Docker daemon | `promtool` 成功解析 scrape 配置 | 本地/CI | CI | 不需要 |

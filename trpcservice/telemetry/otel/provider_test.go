@@ -14,7 +14,7 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
-	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
+	agentmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
 )
 
 func TestProviderExportsTraceAndMetricsWithPersistedParent(t *testing.T) {
@@ -105,18 +105,18 @@ func TestOperationChainPropagatesOneTraceAcrossAsyncBoundaries(t *testing.T) {
 	}
 }
 
-func TestFrameworkInstrumentationUsesServicePipeline(t *testing.T) {
+func TestFrameworkMetricsUseServicePipeline(t *testing.T) {
 	previousTracerProvider := gootel.GetTracerProvider()
 	previousMeterProvider := gootel.GetMeterProvider()
 	previousPropagator := gootel.GetTextMapPropagator()
-	previousAgentTracerProvider := agenttrace.TracerProvider
-	previousAgentTracer := agenttrace.Tracer
+	previousFrameworkMeterProvider := agentmetric.GetMeterProvider()
 	t.Cleanup(func() {
 		gootel.SetTracerProvider(previousTracerProvider)
 		gootel.SetMeterProvider(previousMeterProvider)
 		gootel.SetTextMapPropagator(previousPropagator)
-		agenttrace.TracerProvider = previousAgentTracerProvider
-		agenttrace.Tracer = previousAgentTracer
+		if err := agentmetric.InitMeterProvider(previousFrameworkMeterProvider); err != nil {
+			t.Errorf("restore framework meter provider: %v", err)
+		}
 	})
 
 	traces, metrics := &traceSink{}, &metricSink{}
@@ -127,19 +127,15 @@ func TestFrameworkInstrumentationUsesServicePipeline(t *testing.T) {
 	if err := installFrameworkTelemetry(provider); err != nil {
 		t.Fatal(err)
 	}
-	_, span := agenttrace.Tracer.Start(context.Background(), "framework.llm")
-	span.End()
+	if agentmetric.GetMeterProvider() != provider.metrics {
+		t.Fatal("framework metric provider does not match service provider")
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := provider.Shutdown(shutdownCtx); err != nil {
 		t.Fatal(err)
 	}
 
-	traces.mu.Lock()
-	defer traces.mu.Unlock()
-	if len(traces.spans) != 1 || traces.spans[0].Name() != "framework.llm" {
-		t.Fatalf("framework spans=%v", traces.spans)
-	}
 }
 
 func TestProviderRejectsUnsafeEndpointAndDoesNotDialOnOperation(t *testing.T) {

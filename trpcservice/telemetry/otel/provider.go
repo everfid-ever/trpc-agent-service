@@ -25,14 +25,9 @@ import (
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicetelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
 	agentmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
-	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 const instrumentationName = "github.com/liuzengh/trpc-agent-service"
-
-// agentInstrumentationName is the stable name used by trpc-agent-go's
-// automatic llm, agent and tool instrumentation.
-const agentInstrumentationName = "trpc.agent.go"
 
 type Config struct {
 	Endpoint, ServiceName, ServiceVersion, Role string
@@ -81,11 +76,13 @@ func New(ctx context.Context, config Config) (*Provider, error) {
 }
 
 // installFrameworkTelemetry makes the service exporter the single OTel
-// pipeline for both service-owned boundaries and trpc-agent-go's automatic
-// instrumentation. The SDK version used here caches telemetry/trace.Tracer at
-// package initialization, so setting OTel's global provider alone would leave
-// those spans on its initial noop tracer. Its metric package likewise keeps
-// framework instruments behind an explicit initialization hook.
+// pipeline for service-owned boundaries and trpc-agent-go's framework metrics.
+// The SDK keeps its metric instruments behind an explicit initialization hook.
+// Its cached tracing API is deliberately not rebound here: v1.11.2 defaults to
+// capturing prompt, response and tool payload attributes, but exposes no
+// public policy builder that can safely suppress them while reusing this
+// provider. Service-owned model and tool spans remain the safe trace surface
+// until that upstream capability is available.
 func installFrameworkTelemetry(provider *Provider) error {
 	if provider == nil || provider.traces == nil || provider.metrics == nil {
 		return errors.New("invalid telemetry provider")
@@ -96,10 +93,6 @@ func installFrameworkTelemetry(provider *Provider) error {
 	gootel.SetTracerProvider(provider.traces)
 	gootel.SetMeterProvider(provider.metrics)
 	gootel.SetTextMapPropagator(propagation.TraceContext{})
-	// trpc-agent-go v1.11.2 calls this cached tracer from its internal agent,
-	// model and tool paths. Point it at the same global pipeline after install.
-	agenttrace.TracerProvider = gootel.GetTracerProvider()
-	agenttrace.Tracer = gootel.Tracer(agentInstrumentationName)
 	return nil
 }
 

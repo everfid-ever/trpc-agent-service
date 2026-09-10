@@ -89,7 +89,7 @@ Gateway、Worker、Relay 和 Adapter 可独立部署，Worker 无需 sticky sess
 
 ## 6. tRPC-Agent-Go 复用边界与验收
 
-服务实际复用 tRPC-Agent-Go 的 Runner、Agent、Session contract、Graph checkpoint、Model、Tool、Skill、Knowledge、Callback 与 OpenAI/A2A/tRPC-Agent 协议公共 API。上游 `tool/mcp` client 已通过 service 的 tenant-scoped 适配层接入：仅允许经发布 ToolRef 固定的 HTTPS SSE/streamable 端点、固定远端工具名和已审阅 declaration/binding digest；stdio、动态 URL、`mcpbroker` 与通用 `mcp_call` 一律不在能力面内。Memory 与 Artifact 目前由 service-owned Store 承担多租户原子性和生命周期，`plugin.Manager` 也仅保留升级兼容锚点。平台新增可信租户控制面、Profile/Secret 路由、Inbox/Outbox/relay、lease/fence、IM Adapter、治理装配与审计；不依赖上游 `internal` 包。OpenClaw Channel 的 `ID/Run` 生命周期和 sender 语义由服务 Adapter 兼容扩展。
+服务实际复用 tRPC-Agent-Go 的 Runner、Agent、Session contract、Graph checkpoint、Model、Tool、Skill、Knowledge、Callback、`telemetry/metric` 与 OpenAI/A2A/tRPC-Agent 协议公共 API。组合根将 service 的 OTel Provider 绑定到 SDK 的公开 metric 初始化入口，因此框架指标与服务指标共用同一导出管线。当前 SDK `telemetry/trace` 的公开 API 无法在复用该 Provider 时配置全局 payload drop policy，故框架内部 Agent、LLM 与 Tool 自动 span 保持禁用；服务的脱敏边界 span 是唯一 trace 语义，且不会通过 SDK `trace.Start` 创建第二套 exporter/provider。上游 `tool/mcp` client 已通过 service 的 tenant-scoped 适配层接入：仅允许经发布 ToolRef 固定的 HTTPS SSE/streamable 端点、固定远端工具名和已审阅 declaration/binding digest；stdio、动态 URL、`mcpbroker` 与通用 `mcp_call` 一律不在能力面内。Memory 与 Artifact 目前由 service-owned Store 承担多租户原子性和生命周期，`plugin.Manager` 也仅保留升级兼容锚点。平台新增可信租户控制面、Profile/Secret 路由、Inbox/Outbox/relay、lease/fence、IM Adapter、治理装配与审计；不依赖上游 `internal` 包。OpenClaw Channel 的 `ID/Run` 生命周期和 sender 语义由服务 Adapter 兼容扩展。
 
 本地 Docker 的命令、资源与成功证据见 [`runbook/verification-matrix.md`](./runbook/verification-matrix.md)；详细规范见 [`design/`](./design/README.md)。
 
