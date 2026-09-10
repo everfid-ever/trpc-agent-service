@@ -2,8 +2,8 @@
 set -euo pipefail
 suite="${TRPC_E2E_SUITE:-all}"
 case "${suite}" in
-  all|migration|runtime|storage|artifact) ;;
-  *) echo "TRPC_E2E_SUITE must be all, migration, runtime, storage, or artifact" >&2; exit 2 ;;
+  all|migration|migration-coverage|runtime|storage|artifact) ;;
+  *) echo "TRPC_E2E_SUITE must be all, migration, migration-coverage, runtime, storage, or artifact" >&2; exit 2 ;;
 esac
 
 for name in TRPC_MIGRATION_TEST TRPC_POSTGRES_ADMIN_DSN; do
@@ -37,6 +37,14 @@ run_migration() {
   # disposable environment. Its transition/journal suite is nevertheless a
   # required real-backend gate, never an optional developer-only check.
   go test -count=1 ./cmd/trpc-service ./trpcservice/migration/...
+}
+
+run_migration_coverage() {
+  # This is intentionally opt-in: the normal migration job remains a fast
+  # contract gate. The migration runner creates the random database, keeps it
+  # alive for the contract matrix, and attributes those executions to the
+  # adapter packages before it tears the database down.
+  TRPC_RUNTIME_TEST=0 TRPC_POSTGRES_ADAPTER_COVERAGE=1 go run ./cmd/postgres-migration-test
 }
 
 run_runtime() {
@@ -82,6 +90,7 @@ run_artifact() {
 
 case "${suite}" in
   migration) run_migration ;;
+  migration-coverage) run_migration_coverage ;;
   runtime) run_runtime ;;
   storage) run_storage ;;
   artifact) run_artifact ;;

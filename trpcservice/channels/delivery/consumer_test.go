@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	oteltrace "go.opentelemetry.io/otel/trace"
 
@@ -13,11 +14,15 @@ import (
 )
 
 type replyQueueStub struct {
-	reclaimed []channel.ReplyDelivery
-	acked     []channel.ReplyDelivery
+	reclaimed      []channel.ReplyDelivery
+	acked          []channel.ReplyDelivery
+	consumeStarted chan struct{}
 }
 
-func (*replyQueueStub) ConsumeReplies(ctx context.Context, _ channel.ReplyDestination, _ channel.ReplyConsumerOptions, _ func(context.Context, channel.ReplyDelivery) error) error {
+func (q *replyQueueStub) ConsumeReplies(ctx context.Context, _ channel.ReplyDestination, _ channel.ReplyConsumerOptions, _ func(context.Context, channel.ReplyDelivery) error) error {
+	if q.consumeStarted != nil {
+		close(q.consumeStarted)
+	}
 	<-ctx.Done()
 	return ctx.Err()
 }
@@ -143,5 +148,32 @@ func TestConsumerRestoresDurableTraceParentBeforeIMDelivery(t *testing.T) {
 	}
 	if deliverer.traceParent != traceParent {
 		t.Fatalf("adapter traceparent=%q want=%q", deliverer.traceParent, traceParent)
+	}
+}
+
+func TestConsumerRunCancelsBothQueueLoops(t *testing.T) {
+	destination := channel.ReplyDestination{TenantID: "tenant", Channel: "fake", ChannelBindingID: "binding", ExternalAccountID: "account"}
+	queue := &replyQueueStub{consumeStarted: make(chan struct{})}
+	consumer := Consumer{
+		Queue:           queue,
+		Deliverer:       &eventDelivererStub{},
+		Destination:     destination,
+		ConsumerID:      "adapter-1",
+		ReclaimInterval: time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- consumer.Run(ctx) }()
+	<-queue.consumeStarted
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error=%v, want context cancellation", err)
+	}
+}
+
+func TestConsumerRejectsIncompleteConfiguration(t *testing.T) {
+	consumer := Consumer{Queue: &replyQueueStub{}, Deliverer: &eventDelivererStub{}}
+	if _, err := consumer.ReclaimOnce(context.Background()); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("ReclaimOnce error=%v", err)
 	}
 }

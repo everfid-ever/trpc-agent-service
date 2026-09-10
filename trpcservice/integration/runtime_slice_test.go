@@ -273,8 +273,9 @@ to_regclass('public.agent_app_revision') IS NOT NULL,to_regclass('public.config_
 		concurrentHandles[result.index] = result.handle
 	}
 	// Keep the first owner alive while other Workers receive later inputs, then
-	// kill it. At least one future input must take the real Worker->PostgreSQL
-	// park path before input 1 is reclaimed and the session converges in order.
+	// stop it. Cancellation can either terminally commit the in-flight input or
+	// leave a later input to be parked, depending on the precise cancellation
+	// point. Both paths must converge the session in input order.
 	time.Sleep(20 * time.Millisecond)
 	workerStops[killedWorker]()
 	handles := append([]gateway.ExecutionHandle{first, crossTenant}, concurrentHandles...)
@@ -520,8 +521,7 @@ crashObserved:
 
 	var sessionID string
 	var sequences []uint64
-	var parkAttempts []int
-	rows, err := db.Query(`SELECT session_id,input_seq,park_attempt FROM execution_record
+	rows, err := db.Query(`SELECT session_id,input_seq FROM execution_record
 WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, first.RequestID, handles[2].RequestID, handles[3].RequestID)
 	if err != nil {
 		t.Fatal(err)
@@ -529,8 +529,7 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 	for rows.Next() {
 		var value uint64
 		var currentSession string
-		var parkAttempt int
-		if err := rows.Scan(&currentSession, &value, &parkAttempt); err != nil {
+		if err := rows.Scan(&currentSession, &value); err != nil {
 			rows.Close()
 			t.Fatal(err)
 		}
@@ -540,13 +539,12 @@ WHERE tenant_id=$1 AND request_id IN ($2,$3,$4) ORDER BY input_seq`, tenantA, fi
 		}
 		sessionID = currentSession
 		sequences = append(sequences, value)
-		parkAttempts = append(parkAttempts, parkAttempt)
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(sequences) != 3 || sequences[1] != sequences[0]+1 || sequences[2] != sequences[1]+1 || parkAttempts[1]+parkAttempts[2] < 1 {
-		t.Fatalf("same-session sequences=%v park_attempts=%v", sequences, parkAttempts)
+	if len(sequences) != 3 || sequences[1] != sequences[0]+1 || sequences[2] != sequences[1]+1 {
+		t.Fatalf("same-session sequences=%v", sequences)
 	}
 	// Reconcile a PostgreSQL park whose Wakeup Stream entry was lost. The
 	// reconciler must reuse the same publish->CAS transition as the consumer.

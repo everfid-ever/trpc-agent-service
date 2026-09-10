@@ -188,10 +188,34 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 	// database and some fixtures truncate cross-domain tables. Run them
 	// serially; the default package parallelism otherwise creates test-order
 	// races that look like random foreign-key/version conflicts.
-	output, err := goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
-		"-p=1", "./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres", "./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres", "./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/migration/memorydriver/postgres", "./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres", "./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres", "./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres")
+	contractPackages := postgresContractPackages()
+	contractArguments := []string{"-p=1"}
+	coverageFile := ""
+	if os.Getenv("TRPC_POSTGRES_ADAPTER_COVERAGE") == "1" {
+		file, err := os.CreateTemp("", "trpc-postgres-adapter-coverage.XXXXXX")
+		if err != nil {
+			return fmt.Errorf("create PostgreSQL adapter coverage file: %w", err)
+		}
+		coverageFile = file.Name()
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close PostgreSQL adapter coverage file: %w", err)
+		}
+		defer os.Remove(coverageFile)
+		contractArguments = append(contractArguments,
+			"-covermode=atomic",
+			"-coverpkg="+strings.Join(contractPackages, ","),
+			"-coverprofile="+coverageFile,
+		)
+	}
+	contractArguments = append(contractArguments, contractPackages...)
+	output, err := goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_MIGRATION_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn), contractArguments...)
 	if err != nil {
 		return fmt.Errorf("PostgreSQL repository contracts: %w\n%s", err, output)
+	}
+	if coverageFile != "" {
+		if err := reportPostgresAdapterCoverage(ctx, repoRoot, coverageFile); err != nil {
+			return err
+		}
 	}
 	if os.Getenv("TRPC_RUNTIME_TEST") == "1" {
 		// The package also contains intentionally manual provider-smoke tests.
@@ -204,6 +228,40 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 		}
 	}
 	return nil
+}
+
+// postgresContractPackages deliberately stays explicit. These packages form
+// the PostgreSQL 16 repository-contract matrix and use one disposable schema
+// serially, so their coverage is a meaningful adapter-level signal rather
+// than a package-local unit-test accounting artifact.
+func postgresContractPackages() []string {
+	return []string{
+		"./trpcservice/agentapp/postgres", "./trpcservice/audit/postgres", "./trpcservice/audit/purgebusiness/postgres",
+		"./trpcservice/config/postgres", "./trpcservice/governance/postgres", "./trpcservice/migration/postgres",
+		"./trpcservice/migration/knowledgedriver/postgres", "./trpcservice/migration/memorydriver/postgres",
+		"./trpcservice/provider/postgres", "./trpcservice/skill/postgres", "./trpcservice/storage/artifact/postgres",
+		"./trpcservice/storage/knowledge/postgres", "./trpcservice/storage/messaging/postgres",
+		"./trpcservice/storage/session/postgres", "./trpcservice/storage/summary/postgres", "./trpcservice/tenant/postgres",
+	}
+}
+
+func reportPostgresAdapterCoverage(ctx context.Context, repoRoot, coverageFile string) error {
+	command := exec.CommandContext(ctx, "go", "tool", "cover", "-func="+coverageFile)
+	command.Dir = repoRoot
+	output, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("read PostgreSQL adapter coverage: %w", err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "total:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				fmt.Printf("PostgreSQL 16 adapter contract coverage: %s\n", fields[2])
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("PostgreSQL adapter coverage total is missing")
 }
 
 // goTestWithoutSkips makes the disposable contract matrix a real admission

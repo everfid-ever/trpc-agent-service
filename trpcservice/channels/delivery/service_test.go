@@ -23,6 +23,7 @@ type adapterStub struct {
 	delay            time.Duration
 	maxTextBytes     int
 	errorsByCall     map[int]error
+	result           *channel.DeliveryResult
 }
 
 func (*adapterStub) ID() string                { return "fake" }
@@ -48,6 +49,9 @@ func (s *adapterStub) Deliver(_ context.Context, request channel.DeliveryRequest
 	}
 	if s.err != nil {
 		return channel.DeliveryResult{}, s.err
+	}
+	if s.result != nil {
+		return *s.result, nil
 	}
 	return channel.DeliveryResult{ProviderMessageID: "provider-message", Delivered: true}, nil
 }
@@ -405,5 +409,85 @@ func TestResultReferenceMismatchUsesVersionError(t *testing.T) {
 	event := testReplyEvent("result://stale")
 	if err := service.Deliver(context.Background(), event); !errors.Is(err, runtime.ErrVersionMismatch) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDeliveryRejectsInvalidEventBeforeAnyStorageAccess(t *testing.T) {
+	service := Service{Results: memory.New(), Ledger: memory.New(), Adapters: resolverStub{adapter: &adapterStub{}}, Owner: "adapter-1"}
+	if err := service.Deliver(context.Background(), channel.ReplyEvent{}); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("Deliver error=%v", err)
+	}
+}
+
+func TestDeliveryDoesNotMarkProviderResponsesWithoutDeliveryEvidenceAsSent(t *testing.T) {
+	for name, result := range map[string]channel.DeliveryResult{
+		"not-delivered":               {Delivered: false},
+		"missing-provider-message-id": {Delivered: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := memory.New()
+			resultRecord := messaging.ResultRecord{TenantID: "tenant", RequestID: "request", ResultRef: "result://request", ContentDigest: "digest", Content: []byte("done"), KeyVersion: 1}
+			if err := store.PutResult(context.Background(), resultRecord); err != nil {
+				t.Fatal(err)
+			}
+			adapter := &adapterStub{result: &result}
+			service := Service{Results: store, Ledger: store, Adapters: resolverStub{adapter: adapter}, Owner: "adapter-1", DefaultRetryDelay: time.Hour}
+			err := service.Deliver(context.Background(), testReplyEvent(resultRecord.ResultRef))
+			if err == nil {
+				t.Fatal("expected delivery failure")
+			}
+			record, getErr := store.GetDelivery(context.Background(), messaging.DeliveryKey{TenantID: "tenant", DeliveryKey: "r1_reply", SegmentNo: 0})
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if name == "not-delivered" && record.State != messaging.DeliveryRetryWait {
+				t.Fatalf("record=%#v, want retry wait", record)
+			}
+			if name == "missing-provider-message-id" && record.State != messaging.DeliveryAmbiguous {
+				t.Fatalf("record=%#v, want ambiguous", record)
+			}
+		})
+	}
+}
+
+func TestDeliveryUtilityPolicies(t *testing.T) {
+	service := Service{}
+	if got := (DeferredError{}).Error(); got != "reply delivery is deferred" {
+		t.Fatalf("DeferredError=%q", got)
+	}
+	if got := (TerminalError{}).Error(); got != "reply delivery permanently failed" {
+		t.Fatalf("TerminalError=%q", got)
+	}
+	cause := errors.New("provider failed")
+	terminal := TerminalError{Err: cause}
+	if terminal.Error() != "provider failed" || !errors.Is(terminal, cause) {
+		t.Fatalf("terminal=%v", terminal)
+	}
+	if service.rendererVersion() != "terminal-text-v1" || service.formatVersion(messaging.ContentTypeCard, 1) != "card-v1" ||
+		service.formatVersion("image/png", 1) != "image-v1" || service.formatVersion(messaging.ContentTypeText, 2) != "text-segment-v1" ||
+		service.formatVersion(messaging.ContentTypeText, 1) != "text-v1" {
+		t.Fatal("unexpected default renderer or format policy")
+	}
+	service = Service{RendererVersion: "renderer-v2", FormatVersion: "format-v2", DefaultRetryDelay: 2 * time.Second, MaxRetryDelay: 5 * time.Second}
+	if service.rendererVersion() != "renderer-v2" || service.formatVersion(messaging.ContentTypeText, 1) != "format-v2" {
+		t.Fatal("explicit renderer policy ignored")
+	}
+	for _, test := range []struct {
+		attempt   int
+		requested time.Duration
+		want      time.Duration
+	}{
+		{attempt: 1, want: 2 * time.Second},
+		{attempt: 2, want: 4 * time.Second},
+		{attempt: 3, want: 5 * time.Second},
+		{attempt: 1, requested: 4 * time.Second, want: 4 * time.Second},
+		{attempt: 1, requested: 10 * time.Second, want: 5 * time.Second},
+	} {
+		if got := service.backoff(test.attempt, test.requested); got != test.want {
+			t.Fatalf("backoff(%d, %s)=%s want %s", test.attempt, test.requested, got, test.want)
+		}
+	}
+	if got := normalizeErrorClass("tenant blocked"); got != "permanent" {
+		t.Fatalf("normalized class=%q", got)
 	}
 }

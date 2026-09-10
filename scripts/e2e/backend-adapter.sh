@@ -2,8 +2,8 @@
 set -euo pipefail
 suite="${1:-all}"
 case "${suite}" in
-  all|migration|runtime|storage|artifact) ;;
-  *) echo "usage: $0 [all|migration|runtime|storage|artifact]" >&2; exit 2 ;;
+  all|migration|migration-coverage|runtime|storage|artifact) ;;
+  *) echo "usage: $0 [all|migration|migration-coverage|runtime|storage|artifact]" >&2; exit 2 ;;
 esac
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 compose_file="${repo_root}/deploy/compose/docker-compose.backend-smoke.yml"
@@ -38,6 +38,11 @@ wait_healthy() {
 
 case "${suite}" in
   migration)
+    compose up --detach postgres
+    wait_healthy postgres
+    compose run --rm --no-deps smoke
+    ;;
+  migration-coverage)
     compose up --detach postgres
     wait_healthy postgres
     compose run --rm --no-deps smoke

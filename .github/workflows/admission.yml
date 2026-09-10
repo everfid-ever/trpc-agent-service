@@ -53,11 +53,13 @@ jobs:
         with:
           go-version: '1.25.14'
           cache: false
-      - name: Enforce repository and changed-line coverage
+      - name: Enforce repository, changed-line and core-package coverage
         env:
           TRPC_MIN_TOTAL_COVERAGE: '42.0'
           TRPC_DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: bash scripts/ci/coverage-gate.sh
+        run: |
+          bash scripts/ci/coverage-gate.sh
+          bash scripts/ci/core-coverage-gate.sh
 
   vulnerabilities:
     name: Go vulnerability scan
