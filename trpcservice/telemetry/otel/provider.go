@@ -24,9 +24,15 @@ import (
 
 	servicelog "github.com/liuzengh/trpc-agent-service/trpcservice/log"
 	servicetelemetry "github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
+	agentmetric "trpc.group/trpc-go/trpc-agent-go/telemetry/metric"
+	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 const instrumentationName = "github.com/liuzengh/trpc-agent-service"
+
+// agentInstrumentationName is the stable name used by trpc-agent-go's
+// automatic llm, agent and tool instrumentation.
+const agentInstrumentationName = "trpc.agent.go"
 
 type Config struct {
 	Endpoint, ServiceName, ServiceVersion, Role string
@@ -67,10 +73,34 @@ func New(ctx context.Context, config Config) (*Provider, error) {
 		_ = metricExporter.Shutdown(ctx)
 		return nil, err
 	}
+	if err := installFrameworkTelemetry(provider); err != nil {
+		_ = provider.Shutdown(ctx)
+		return nil, err
+	}
+	return provider, nil
+}
+
+// installFrameworkTelemetry makes the service exporter the single OTel
+// pipeline for both service-owned boundaries and trpc-agent-go's automatic
+// instrumentation. The SDK version used here caches telemetry/trace.Tracer at
+// package initialization, so setting OTel's global provider alone would leave
+// those spans on its initial noop tracer. Its metric package likewise keeps
+// framework instruments behind an explicit initialization hook.
+func installFrameworkTelemetry(provider *Provider) error {
+	if provider == nil || provider.traces == nil || provider.metrics == nil {
+		return errors.New("invalid telemetry provider")
+	}
+	if err := agentmetric.InitMeterProvider(provider.metrics); err != nil {
+		return fmt.Errorf("initialize trpc-agent-go metrics: %w", err)
+	}
 	gootel.SetTracerProvider(provider.traces)
 	gootel.SetMeterProvider(provider.metrics)
 	gootel.SetTextMapPropagator(propagation.TraceContext{})
-	return provider, nil
+	// trpc-agent-go v1.11.2 calls this cached tracer from its internal agent,
+	// model and tool paths. Point it at the same global pipeline after install.
+	agenttrace.TracerProvider = gootel.GetTracerProvider()
+	agenttrace.Tracer = gootel.Tracer(agentInstrumentationName)
+	return nil
 }
 
 func newProvider(ctx context.Context, config Config, traceExporter sdktrace.SpanExporter, metricExporter metric.Exporter) (*Provider, error) {

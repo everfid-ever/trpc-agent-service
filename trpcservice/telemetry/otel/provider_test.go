@@ -7,12 +7,14 @@ import (
 	"testing"
 	"time"
 
+	gootel "go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/liuzengh/trpc-agent-service/trpcservice/telemetry"
+	agenttrace "trpc.group/trpc-go/trpc-agent-go/telemetry/trace"
 )
 
 func TestProviderExportsTraceAndMetricsWithPersistedParent(t *testing.T) {
@@ -100,6 +102,43 @@ func TestOperationChainPropagatesOneTraceAcrossAsyncBoundaries(t *testing.T) {
 		parents[string(telemetry.OperationRelayReply)] != spanIDs[string(telemetry.OperationWorkerExecute)] ||
 		parents[string(telemetry.OperationChannelDeliver)] != spanIDs[string(telemetry.OperationRelayReply)] {
 		t.Fatalf("broken parent chain parents=%v spans=%v", parents, spanIDs)
+	}
+}
+
+func TestFrameworkInstrumentationUsesServicePipeline(t *testing.T) {
+	previousTracerProvider := gootel.GetTracerProvider()
+	previousMeterProvider := gootel.GetMeterProvider()
+	previousPropagator := gootel.GetTextMapPropagator()
+	previousAgentTracerProvider := agenttrace.TracerProvider
+	previousAgentTracer := agenttrace.Tracer
+	t.Cleanup(func() {
+		gootel.SetTracerProvider(previousTracerProvider)
+		gootel.SetMeterProvider(previousMeterProvider)
+		gootel.SetTextMapPropagator(previousPropagator)
+		agenttrace.TracerProvider = previousAgentTracerProvider
+		agenttrace.Tracer = previousAgentTracer
+	})
+
+	traces, metrics := &traceSink{}, &metricSink{}
+	provider, err := newProvider(context.Background(), testConfig("http://collector:4318"), traces, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installFrameworkTelemetry(provider); err != nil {
+		t.Fatal(err)
+	}
+	_, span := agenttrace.Tracer.Start(context.Background(), "framework.llm")
+	span.End()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := provider.Shutdown(shutdownCtx); err != nil {
+		t.Fatal(err)
+	}
+
+	traces.mu.Lock()
+	defer traces.mu.Unlock()
+	if len(traces.spans) != 1 || traces.spans[0].Name() != "framework.llm" {
+		t.Fatalf("framework spans=%v", traces.spans)
 	}
 }
 
