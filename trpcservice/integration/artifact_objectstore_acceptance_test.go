@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -34,10 +35,17 @@ func TestComposeArtifactObjectStoreTenantIsolation(t *testing.T) {
 	objects := composeMinIOObjectStore(t)
 	store := artifactpostgres.NewWithObjectStore(db, objects)
 	stamp := time.Now().UTC().UnixNano()
-	tenantA, tenantB := fmt.Sprintf("compose_artifact_a_%d", stamp), fmt.Sprintf("compose_artifact_b_%d", stamp)
+	// tenant_id must satisfy tenant_id_format_ck (t_ + 26-char Crockford ULID)
+	// and agent_app_id must satisfy agent_app_agent_app_id_check (app_ + 26-char
+	// Crockford ULID); tenant_key / agent_app_key must be lowercase kebab-case.
+	// Random IDs keep reruns collision-free on shared databases.
+	tenantA, tenantB := composeCrockfordID(t, "t_"), composeCrockfordID(t, "t_")
+	appA, appB := composeCrockfordID(t, "app_"), composeCrockfordID(t, "app_")
 	requestA, requestB := fmt.Sprintf("request-a-%d", stamp), fmt.Sprintf("request-b-%d", stamp)
-	for _, value := range []struct{ tenantID, requestID string }{{tenantA, requestA}, {tenantB, requestB}} {
-		prepareComposeArtifactTenant(t, db, value.tenantID, value.requestID)
+	for _, value := range []struct{ tenantID, appID, appKey, requestID string }{
+		{tenantA, appA, "artifact-acceptance-a", requestA}, {tenantB, appB, "artifact-acceptance-b", requestB},
+	} {
+		prepareComposeArtifactTenant(t, db, value.tenantID, value.appID, value.appKey, value.requestID)
 	}
 	t.Cleanup(func() {
 		for _, value := range []struct{ tenantID string }{{tenantA}, {tenantB}} {
@@ -126,17 +134,35 @@ func composeMinIOObjectStore(t *testing.T) objectstore.Store {
 	return store
 }
 
-func prepareComposeArtifactTenant(t *testing.T, db *sql.DB, tenantID, requestID string) {
+// composeCrockfordID mints a constraint-conformant identifier: prefix followed
+// by 26 Crockford-Base32 characters (no I/L/O/U), with the first character in
+// [0-7] to match the migration CHECK regexes for tenant_id and agent_app_id.
+func composeCrockfordID(t *testing.T, prefix string) string {
+	t.Helper()
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	raw := make([]byte, 26)
+	if _, err := crand.Read(raw); err != nil {
+		t.Fatalf("read random bytes: %v", err)
+	}
+	chars := make([]byte, 26)
+	chars[0] = '0' + raw[0]%8
+	for index := 1; index < 26; index++ {
+		chars[index] = alphabet[int(raw[index])%32]
+	}
+	return prefix + string(chars)
+}
+
+func prepareComposeArtifactTenant(t *testing.T, db *sql.DB, tenantID, appID, appKey, requestID string) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := db.ExecContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES($1,$2,$2)`, tenantID, tenantID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO tenant(tenant_id,tenant_key,display_name) VALUES($1,$2,$3)`, tenantID, appKey, "Artifact Acceptance"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO agent_app(tenant_id,agent_app_id,agent_app_key,display_name) VALUES($1,'artifact-app','artifact-app','Artifact App')`, tenantID); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO agent_app(tenant_id,agent_app_id,agent_app_key,display_name) VALUES($1,$2,$3,'Artifact App')`, tenantID, appID, appKey); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO inbox(tenant_id,channel,external_account_id,external_message_id,request_id,agent_app_id,session_id,state,payload_ref,payload_digest,key_version)
-VALUES($1,'artifact','account',$2,$2,'artifact-app','session','dispatch_pending','inbound://artifact',repeat('a',64),1)`, tenantID, requestID); err != nil {
+VALUES($1,'artifact','account',$2,$2,$3,'session','dispatch_pending','inbound://artifact',repeat('a',64),1)`, tenantID, requestID, appID); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -88,9 +88,22 @@ services:
   smoke:
     image: golang:1.25-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437
     working_dir: /src
-    volumes: [../..:/src:ro]
+    volumes:
+      - ../..:/src:ro
+      # Coverage suites persist raw go cover profiles here; the adapter script
+      # creates the host directory and reads the profile back after the run.
+      - ${TRPC_COVERAGE_DIR:-/tmp/trpc-coverage-out}:/out
     environment:
       TRPC_E2E_SUITE: ${TRPC_E2E_SUITE:-all}
+      TRPC_E2E_COVERAGE: ${TRPC_E2E_COVERAGE:-}
+      TRPC_COVERAGE_OUT: /out/postgres-adapter.out
+      TRPC_RUNTIME_COVERAGE_OUT: /out/runtime-slice.out
+      TRPC_STORAGE_COVERAGE_OUT: /out/storage-e2e.out
+      TRPC_ARTIFACT_COVERAGE_OUT: /out/artifact-e2e.out
+      TRPC_MIN_POSTGRES_ADAPTER_COVERAGE: ${TRPC_MIN_POSTGRES_ADAPTER_COVERAGE:-}
+      TRPC_MIN_RUNTIME_SLICE_COVERAGE: ${TRPC_MIN_RUNTIME_SLICE_COVERAGE:-}
+      TRPC_MIN_STORAGE_E2E_COVERAGE: ${TRPC_MIN_STORAGE_E2E_COVERAGE:-}
+      TRPC_MIN_ARTIFACT_E2E_COVERAGE: ${TRPC_MIN_ARTIFACT_E2E_COVERAGE:-}
       TRPC_MIGRATION_TEST: "1"
       TRPC_RUNTIME_TEST: "1"
       TRPC_POSTGRES_ADMIN_DSN: postgres://trpc:trpc_test_password@postgres:5432/postgres?sslmode=disable

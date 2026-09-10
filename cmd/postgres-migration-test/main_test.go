@@ -36,3 +36,47 @@ func TestQuoteConninfoValue(t *testing.T) {
 		t.Fatalf("quoteConninfoValue()=%s", got)
 	}
 }
+
+func TestAssertPostgresAdapterCoverageFloor(t *testing.T) {
+	cases := []struct {
+		name      string
+		floor     string
+		coverage  string
+		expectErr bool
+	}{
+		{name: "empty floor is report only", floor: "", coverage: "0.0%", expectErr: false},
+		{name: "at floor passes", floor: "53.0", coverage: "53.6%", expectErr: false},
+		{name: "above floor passes", floor: "50", coverage: "53.6%", expectErr: false},
+		{name: "percent suffix accepted", floor: "53.0%", coverage: "53.6%", expectErr: false},
+		{name: "below floor fails", floor: "60", coverage: "53.6%", expectErr: true},
+		{name: "invalid floor fails closed", floor: "abc", coverage: "53.6%", expectErr: true},
+		{name: "invalid coverage fails closed", floor: "50", coverage: "N/A", expectErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TRPC_MIN_POSTGRES_ADAPTER_COVERAGE", tc.floor)
+			err := assertPostgresAdapterCoverageFloor(tc.coverage)
+			if (err != nil) != tc.expectErr {
+				t.Fatalf("coverage %q floor %q: err=%v, expectErr=%v", tc.coverage, tc.floor, err, tc.expectErr)
+			}
+		})
+	}
+}
+
+func TestAssertRuntimeSliceCoverageFloorDelegatesGenericAssertion(t *testing.T) {
+	t.Setenv("TRPC_MIN_RUNTIME_SLICE_COVERAGE", "40.0")
+	if err := assertCoverageFloor("Runtime slice coordination core", "TRPC_MIN_RUNTIME_SLICE_COVERAGE", "41.5%"); err != nil {
+		t.Fatalf("above floor: unexpected error %v", err)
+	}
+	err := assertCoverageFloor("Runtime slice coordination core", "TRPC_MIN_RUNTIME_SLICE_COVERAGE", "39.9%")
+	if err == nil {
+		t.Fatal("below floor: expected error")
+	}
+	if !strings.Contains(err.Error(), "Runtime slice coordination core coverage 39.9% is below required 40.0%") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	t.Setenv("TRPC_MIN_POSTGRES_ADAPTER_COVERAGE", "60.0")
+	if err := assertPostgresAdapterCoverageFloor("0.0%"); err == nil {
+		t.Fatal("adapter floor must stay independent of the runtime slice floor env")
+	}
+}

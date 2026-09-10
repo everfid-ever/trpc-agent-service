@@ -3,12 +3,22 @@
 # baseline, and pull requests must cover at least 80% of changed executable Go
 # lines.  The latter is intentionally scoped to PRs because push/workflow runs
 # do not have a trustworthy base revision.
+#
+# The profile is built with -coverpkg=./trpcservice/... so a single profile
+# attributes cross-package execution: subpackage tests (for example the
+# storage/session contract harnesses) count toward the parent packages they
+# exercise instead of only their own package.  cmd/ mains are excluded from
+# the denominator on purpose — they carry no unit-attributable logic and are
+# exercised by the backend-adapter e2e jobs; the diff ratchet below is
+# therefore explicitly scoped to trpcservice/ paths as well.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-42.0}"
+# Baseline measured locally on 2026-09-10 (54.2% actual).  The floor is a
+# ratchet: raise it whenever the measured total exceeds it by ~0.5%.
+minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-54.0}"
 base_sha="${TRPC_DIFF_BASE_SHA:-}"
 coverage_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage.XXXXXX")"
 changed_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage-diff.XXXXXX")"
@@ -21,12 +31,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! go test -count=1 -covermode=atomic -coverprofile="$coverage_file" ./... >"$test_log" 2>&1; then
+valid_coverage_percent() {
+  local value="${1%\%}"
+  [[ "${value}" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+  awk -v value="${value}" 'BEGIN { exit !(value >= 0 && value <= 100) }'
+}
+
+if ! valid_coverage_percent "$minimum_total"; then
+  echo "TRPC_MIN_TOTAL_COVERAGE must be a decimal percentage from 0 to 100, got ${minimum_total}" >&2
+  exit 2
+fi
+minimum_total="${minimum_total%\%}"
+
+if ! go test -count=1 -covermode=atomic -coverpkg=./trpcservice/... -coverprofile="$coverage_file" ./... >"$test_log" 2>&1; then
   cat "$test_log" >&2
   exit 1
 fi
 total="$(go tool cover -func="$coverage_file" | awk '/^total:/ { gsub("%", "", $3); print $3 }')"
-awk -v actual="$total" -v minimum="$minimum_total" 'BEGIN { exit !(actual + 0 >= minimum + 0) }' || {
+if ! valid_coverage_percent "$total"; then
+  echo "repository coverage is invalid: ${total:-missing}" >&2
+  exit 1
+fi
+awk -v actual="$total" -v minimum="$minimum_total" 'BEGIN { exit !(actual >= minimum) }' || {
   echo "repository coverage ${total}% is below required ${minimum_total}%" >&2
   exit 1
 }
@@ -38,14 +64,18 @@ git cat-file -e "${base_sha}^{commit}" 2>/dev/null || {
   exit 2
 }
 git diff --unified=0 "$base_sha"...HEAD -- '*.go' >"$changed_file"
+# The ratchet only gates trpcservice/ changes: the coverage profile is scoped
+# to ./trpcservice/..., and cmd/ glue is validated by the backend-adapter e2e
+# jobs instead of unit diff coverage.
 awk '
-  /^\+\+\+ b\// { file=substr($0, 7); next }
+  /^\+\+\+ b\// { file=""; if (substr($0, 7, 12) == "trpcservice/") file=substr($0, 7); next }
   /^@@ / {
+    if (file == "") next
     split($0, pieces, "+"); split(pieces[2], range, " "); split(range[1], coords, ",")
     line=coords[1]; next
   }
   /^\+/ && !/^\+\+\+/ { if (file != "") print file ":" line; line++; next }
-  /^ / { line++ }
+  /^ / { if (file != "") line++ }
 ' "$changed_file" >"$lines_file"
 
 [[ -s "$lines_file" ]] || exit 0

@@ -43,24 +43,55 @@ case "${suite}" in
     compose run --rm --no-deps smoke
     ;;
   migration-coverage)
+    # The smoke container persists the raw PostgreSQL adapter coverage
+    # profile under /out (bind-mounted from TRPC_COVERAGE_DIR).  CI reads the
+    # directory back via GITHUB_ENV to upload the profile as a workflow
+    # artifact; locally it stays in TMPDIR for inspection.
+    coverage_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-adapter-coverage.XXXXXX")"
+    export TRPC_COVERAGE_DIR="${coverage_dir}"
+    # Baseline measured on the disposable contract matrix (2026-09-10).  The
+    # floor ratchets upward as adapter contracts grow; override via env.
+    export TRPC_MIN_POSTGRES_ADAPTER_COVERAGE="${TRPC_MIN_POSTGRES_ADAPTER_COVERAGE:-53.0}"
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      echo "TRPC_ADAPTER_COVERAGE_DIR=${coverage_dir}" >>"${GITHUB_ENV}"
+    fi
     compose up --detach postgres
     wait_healthy postgres
     compose run --rm --no-deps smoke
     ;;
-  runtime)
-    compose up --detach postgres redis
-    wait_healthy postgres
-    wait_healthy redis
-    compose run --rm --no-deps smoke
-    ;;
-  storage)
-    compose up --detach qdrant minio vault
-    wait_healthy vault
-    compose run --rm --no-deps smoke
-    ;;
-  artifact)
-    compose up --detach postgres minio
-    wait_healthy postgres
+  runtime|storage|artifact)
+    if [[ "${TRPC_E2E_COVERAGE:-}" == "1" ]]; then
+      # Opt-in coverage attribution: the smoke container persists raw go
+      # cover profiles under /out (bind-mounted from TRPC_COVERAGE_DIR) and
+      # asserts the per-suite floors below.  CI reads the directory back via
+      # GITHUB_ENV to upload the profiles as workflow artifacts; locally they
+      # stay in TMPDIR for inspection.
+      coverage_dir="$(mktemp -d "${TMPDIR:-/tmp}/trpc-e2e-coverage.XXXXXX")"
+      export TRPC_COVERAGE_DIR="${coverage_dir}"
+      # Baselines measured on the disposable smoke matrix (2026-09-10).  The
+      # floors ratchet upward as the e2e matrices grow; override via env.
+      export TRPC_MIN_RUNTIME_SLICE_COVERAGE="${TRPC_MIN_RUNTIME_SLICE_COVERAGE:-39.5}"
+      export TRPC_MIN_STORAGE_E2E_COVERAGE="${TRPC_MIN_STORAGE_E2E_COVERAGE:-67.0}"
+      export TRPC_MIN_ARTIFACT_E2E_COVERAGE="${TRPC_MIN_ARTIFACT_E2E_COVERAGE:-27.0}"
+      if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        echo "TRPC_E2E_COVERAGE_DIR_${suite^^}=${coverage_dir}" >>"${GITHUB_ENV}"
+      fi
+    fi
+    case "${suite}" in
+      runtime)
+        compose up --detach postgres redis
+        wait_healthy postgres
+        wait_healthy redis
+        ;;
+      storage)
+        compose up --detach qdrant minio vault
+        wait_healthy vault
+        ;;
+      artifact)
+        compose up --detach postgres minio
+        wait_healthy postgres
+        ;;
+    esac
     compose run --rm --no-deps smoke
     ;;
   all)

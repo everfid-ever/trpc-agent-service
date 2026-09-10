@@ -9,10 +9,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -106,11 +108,81 @@ func run() error {
 	if err := cleanupAuditRetentionTestRole(ctx, db); err != nil {
 		return fmt.Errorf("clean audit retention test role after replay: %w", err)
 	}
+	if err := runArtifactComposeE2E(ctx, repoRoot, testDSN); err != nil {
+		return err
+	}
 	if err := runner.DownAll(ctx); err != nil {
 		return err
 	}
 	fmt.Printf("PostgreSQL 16 migration matrix passed for %s\n", databaseName)
 	return nil
+}
+
+// runArtifactComposeE2E composes the still-alive disposable migrated database
+// with real MinIO. It is opt-in (TRPC_ARTIFACT_E2E=1) because the storage
+// dependencies only exist in the smoke image. Running it here — instead of as
+// a separate `go test` from the smoke shell — is what makes it real: the test
+// requires TRPC_POSTGRES_TEST_DSN, which only this command can supply for a
+// database that does not exist yet at script start. Without this wiring the
+// test silently skipped in every backend-adapter run. When coverage
+// attribution is enabled (TRPC_ARTIFACT_E2E_COVERAGE=1) the execution is
+// measured against the artifact/object-store adapter seam and gated by
+// TRPC_MIN_ARTIFACT_E2E_COVERAGE.
+func runArtifactComposeE2E(ctx context.Context, repoRoot, testDSN string) error {
+	if os.Getenv("TRPC_ARTIFACT_E2E") != "1" {
+		return nil
+	}
+	arguments := []string{"-run", "^TestComposeArtifactObjectStoreTenantIsolation$"}
+	coverageFile := ""
+	if os.Getenv("TRPC_ARTIFACT_E2E_COVERAGE") == "1" {
+		file, err := os.CreateTemp("", "trpc-artifact-e2e-coverage.XXXXXX")
+		if err != nil {
+			return fmt.Errorf("create artifact e2e coverage file: %w", err)
+		}
+		coverageFile = file.Name()
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close artifact e2e coverage file: %w", err)
+		}
+		if os.Getenv("TRPC_ARTIFACT_COVERAGE_OUT") == "" {
+			defer os.Remove(coverageFile)
+		}
+		arguments = append(arguments,
+			"-covermode=atomic",
+			"-coverpkg="+strings.Join(artifactCoveragePackages(), ","),
+			"-coverprofile="+coverageFile,
+		)
+	}
+	arguments = append(arguments, "./trpcservice/integration")
+	output, err := goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_POSTGRES_TEST_DSN="+testDSN), arguments...)
+	if err != nil {
+		return fmt.Errorf("artifact compose e2e: %w\n%s", err, output)
+	}
+	if coverageFile != "" {
+		coverage, err := coverageTotal(ctx, repoRoot, coverageFile)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Artifact object-store e2e coverage: %s\n", coverage)
+		if err := assertCoverageFloor("Artifact object store", "TRPC_MIN_ARTIFACT_E2E_COVERAGE", coverage); err != nil {
+			return err
+		}
+		if coverageOut := os.Getenv("TRPC_ARTIFACT_COVERAGE_OUT"); coverageOut != "" {
+			if err := persistCoverageProfile(coverageFile, coverageOut); err != nil {
+				return fmt.Errorf("persist artifact e2e coverage: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// artifactCoveragePackages deliberately stays explicit. The compose test
+// lives in ./trpcservice/integration but the attribution target is the
+// artifact/object-store adapter seam it drives.
+func artifactCoveragePackages() []string {
+	return []string{
+		"./trpcservice/storage/artifact/...",
+		"./trpcservice/storage/objectstore/s3",
+	}
 }
 
 // cleanupAuditRetentionTestRole removes global-role state created by the
@@ -200,7 +272,13 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 		if err := file.Close(); err != nil {
 			return fmt.Errorf("close PostgreSQL adapter coverage file: %w", err)
 		}
-		defer os.Remove(coverageFile)
+		// TRPC_COVERAGE_OUT persists the raw profile for the admission gate to
+		// assert a contract-coverage floor; without it the profile stays
+		// disposable and only the reported total survives.
+		coverageOut := os.Getenv("TRPC_COVERAGE_OUT")
+		if coverageOut == "" {
+			defer os.Remove(coverageFile)
+		}
 		contractArguments = append(contractArguments,
 			"-covermode=atomic",
 			"-coverpkg="+strings.Join(contractPackages, ","),
@@ -216,15 +294,56 @@ func verifyUp(ctx context.Context, runner *migrations.Runner, db *sql.DB, probes
 		if err := reportPostgresAdapterCoverage(ctx, repoRoot, coverageFile); err != nil {
 			return err
 		}
+		if coverageOut := os.Getenv("TRPC_COVERAGE_OUT"); coverageOut != "" {
+			if err := persistCoverageProfile(coverageFile, coverageOut); err != nil {
+				return fmt.Errorf("persist PostgreSQL adapter coverage: %w", err)
+			}
+		}
 	}
 	if os.Getenv("TRPC_RUNTIME_TEST") == "1" {
 		// The package also contains intentionally manual provider-smoke tests.
 		// Select the disposable two-worker contract explicitly, so CI can make
 		// every test it claims to exercise a no-skip requirement.
-		output, err = goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn),
-			"-run", "^Test(HTTPPostgreSQLRedisTwoWorkerSlice|ComposeTenantMemoryBackendRouting|ComposeRedisMemoryBackfillToPostgres|ComposeRedisMemoryDualWriteToPostgres)$", "./trpcservice/integration")
+		sliceArguments := []string{
+			"-run", "^Test(HTTPPostgreSQLRedisTwoWorkerSlice|ComposeTenantMemoryBackendRouting|ComposeRedisMemoryBackfillToPostgres|ComposeRedisMemoryDualWriteToPostgres)$",
+		}
+		sliceCoverageFile := ""
+		if os.Getenv("TRPC_RUNTIME_SLICE_COVERAGE") == "1" {
+			file, err := os.CreateTemp("", "trpc-runtime-slice-coverage.XXXXXX")
+			if err != nil {
+				return fmt.Errorf("create runtime slice coverage file: %w", err)
+			}
+			sliceCoverageFile = file.Name()
+			if err := file.Close(); err != nil {
+				return fmt.Errorf("close runtime slice coverage file: %w", err)
+			}
+			// TRPC_RUNTIME_COVERAGE_OUT persists the raw profile for the
+			// admission gate to assert a coordination-core floor; without it
+			// the profile stays disposable and only the reported total
+			// survives.
+			if os.Getenv("TRPC_RUNTIME_COVERAGE_OUT") == "" {
+				defer os.Remove(sliceCoverageFile)
+			}
+			sliceArguments = append(sliceArguments,
+				"-covermode=atomic",
+				"-coverpkg="+strings.Join(runtimeSliceCoveragePackages(), ","),
+				"-coverprofile="+sliceCoverageFile,
+			)
+		}
+		sliceArguments = append(sliceArguments, "./trpcservice/integration")
+		output, err = goTestWithoutSkips(ctx, repoRoot, append(os.Environ(), "TRPC_RUNTIME_TEST=1", "TRPC_POSTGRES_TEST_DSN="+dsn), sliceArguments...)
 		if err != nil {
 			return fmt.Errorf("runtime slice: %w\n%s", err, output)
+		}
+		if sliceCoverageFile != "" {
+			if err := reportRuntimeSliceCoverage(ctx, repoRoot, sliceCoverageFile); err != nil {
+				return err
+			}
+			if coverageOut := os.Getenv("TRPC_RUNTIME_COVERAGE_OUT"); coverageOut != "" {
+				if err := persistCoverageProfile(sliceCoverageFile, coverageOut); err != nil {
+					return fmt.Errorf("persist runtime slice coverage: %w", err)
+				}
+			}
 		}
 	}
 	return nil
@@ -245,23 +364,107 @@ func postgresContractPackages() []string {
 	}
 }
 
+func persistCoverageProfile(source, destination string) error {
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	output, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		output.Close()
+		return err
+	}
+	return output.Close()
+}
+
 func reportPostgresAdapterCoverage(ctx context.Context, repoRoot, coverageFile string) error {
+	coverage, err := coverageTotal(ctx, repoRoot, coverageFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("PostgreSQL 16 adapter contract coverage: %s\n", coverage)
+	return assertPostgresAdapterCoverageFloor(coverage)
+}
+
+func reportRuntimeSliceCoverage(ctx context.Context, repoRoot, coverageFile string) error {
+	coverage, err := coverageTotal(ctx, repoRoot, coverageFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Runtime slice coordination-core coverage: %s\n", coverage)
+	return assertCoverageFloor("Runtime slice coordination core", "TRPC_MIN_RUNTIME_SLICE_COVERAGE", coverage)
+}
+
+// coverageTotal parses the "total:" line out of `go tool cover -func`.
+func coverageTotal(ctx context.Context, repoRoot, coverageFile string) (string, error) {
 	command := exec.CommandContext(ctx, "go", "tool", "cover", "-func="+coverageFile)
 	command.Dir = repoRoot
 	output, err := command.Output()
 	if err != nil {
-		return fmt.Errorf("read PostgreSQL adapter coverage: %w", err)
+		return "", fmt.Errorf("read coverage profile: %w", err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		if strings.HasPrefix(line, "total:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 3 {
-				fmt.Printf("PostgreSQL 16 adapter contract coverage: %s\n", fields[2])
-				return nil
+				return fields[2], nil
 			}
 		}
 	}
-	return fmt.Errorf("PostgreSQL adapter coverage total is missing")
+	return "", fmt.Errorf("coverage total is missing")
+}
+
+func assertPostgresAdapterCoverageFloor(coverage string) error {
+	return assertCoverageFloor("PostgreSQL adapter contract", "TRPC_MIN_POSTGRES_ADAPTER_COVERAGE", coverage)
+}
+
+// assertCoverageFloor turns reported coverage into an admission gate when a
+// floor is configured. The assertion runs inside the disposable smoke image
+// so the comparison uses the pinned toolchain instead of the host runner's
+// Go version.
+func assertCoverageFloor(label, envVar, coverage string) error {
+	floor := strings.TrimSpace(os.Getenv(envVar))
+	if floor == "" {
+		return nil
+	}
+	actual, err := strconv.ParseFloat(strings.TrimSuffix(coverage, "%"), 64)
+	if err != nil {
+		return fmt.Errorf("parse %s coverage %q: %w", label, coverage, err)
+	}
+	required, err := strconv.ParseFloat(strings.TrimSuffix(floor, "%"), 64)
+	if err != nil {
+		return fmt.Errorf("parse %s %q: %w", envVar, floor, err)
+	}
+	if actual+1e-9 < required {
+		return fmt.Errorf("%s coverage %.1f%% is below required %.1f%%", label, actual, required)
+	}
+	return nil
+}
+
+// runtimeSliceCoveragePackages deliberately stays explicit. The runtime
+// slice drives the cross-node coordination core — Redis relay, PostgreSQL
+// session/messaging stores, coordination lease, broker and worker — so its
+// coverage is a meaningful distributed-seam signal rather than a package-
+// local unit-test accounting artifact.
+func runtimeSliceCoveragePackages() []string {
+	return []string{
+		"./trpcservice/broker",
+		"./trpcservice/broker/redis",
+		"./trpcservice/coordination",
+		"./trpcservice/coordination/redis",
+		"./trpcservice/relay",
+		"./trpcservice/relay/redis",
+		"./trpcservice/storage/messaging/postgres",
+		"./trpcservice/storage/session/postgres",
+		"./trpcservice/worker",
+	}
 }
 
 // goTestWithoutSkips makes the disposable contract matrix a real admission
