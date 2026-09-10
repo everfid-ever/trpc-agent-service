@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/liuzengh/trpc-agent-service/trpcservice/preprocess"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/runtime"
 )
 
@@ -88,5 +89,63 @@ func TestDangerousToolAsksOnlyWithDurableConfirmationCapability(t *testing.T) {
 	decision = ToolDecision(policy, VersionedRef{ID: "danger", Version: 1})
 	if decision.Action != ActionAsk || decision.ReasonCode != ReasonConfirmationRequired {
 		t.Fatalf("decision=%#v", decision)
+	}
+}
+
+func TestStableConfirmationAndGrantIDsBindTheirScope(t *testing.T) {
+	first, err := StableConfirmationID("tenant", "request", "tool-call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := StableConfirmationID("tenant", "request", "tool-call")
+	if err != nil || first != second || len(first) != 37 {
+		t.Fatalf("first=%q second=%q err=%v", first, second, err)
+	}
+	changed, err := StableConfirmationID("tenant", "request", "other-tool-call")
+	if err != nil || changed == first {
+		t.Fatalf("changed=%q err=%v", changed, err)
+	}
+	grant, err := StableGrantID(first)
+	if err != nil || grant != "grant_"+first[5:] {
+		t.Fatalf("grant=%q err=%v", grant, err)
+	}
+	if _, err := StableConfirmationID("", "request", "tool-call"); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("invalid confirmation err=%v", err)
+	}
+	if _, err := StableGrantID("not-a-confirmation"); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("invalid grant err=%v", err)
+	}
+}
+
+type scannerGuardStub struct {
+	result preprocess.ScanResult
+	err    error
+}
+
+func (s scannerGuardStub) ScanMediaInput(context.Context, string, []byte, string) (preprocess.ScanResult, error) {
+	return s.result, s.err
+}
+
+func TestScannerContentGuardMapsScannerVerdictsWithoutLeakingContent(t *testing.T) {
+	tests := []struct {
+		name string
+		stub scannerGuardStub
+		want DLPVerdict
+	}{
+		{"clean", scannerGuardStub{result: preprocess.ScanResult{Verdict: preprocess.ScanClean, Version: "v1"}}, DLPVerdictClean},
+		{"rejected", scannerGuardStub{result: preprocess.ScanResult{Verdict: preprocess.ScanRejected, Version: "v1"}}, DLPVerdictRejected},
+		{"unknown", scannerGuardStub{result: preprocess.ScanResult{Verdict: preprocess.ScanUnknown, Version: "v1"}}, DLPVerdictUnknown},
+		{"scanner error", scannerGuardStub{result: preprocess.ScanResult{Version: "v1"}, err: errors.New("scanner unavailable")}, DLPVerdictUnknown},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			verdict, version, err := (ScannerContentGuard{Scanner: test.stub}).Inspect(context.Background(), "tenant", "request", "input", []byte("secret"))
+			if verdict != test.want || version != "v1" {
+				t.Fatalf("verdict=%q version=%q err=%v", verdict, version, err)
+			}
+			if (test.stub.err != nil) != (err != nil) {
+				t.Fatalf("err=%v want=%v", err, test.stub.err)
+			}
+		})
 	}
 }

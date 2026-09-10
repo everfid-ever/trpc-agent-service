@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo_root}"
 
-minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-41.1}"
+minimum_total="${TRPC_MIN_TOTAL_COVERAGE:-42.0}"
 base_sha="${TRPC_DIFF_BASE_SHA:-}"
 coverage_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage.XXXXXX")"
 changed_file="$(mktemp "${TMPDIR:-/tmp}/trpc-coverage-diff.XXXXXX")"

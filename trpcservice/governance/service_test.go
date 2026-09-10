@@ -95,6 +95,68 @@ func TestServiceEmitsLowCardinalityBudgetAndUsageMetrics(t *testing.T) {
 	}
 }
 
+func TestServiceRefundAbortAndValidatesFrozenModelCandidates(t *testing.T) {
+	now := time.Now().UTC()
+	store := governancememory.New(0, 1_000)
+	policy := governance.PolicyV1{SchemaVersion: 1, DefaultAction: governance.ActionAllow,
+		AllowedModels: []governance.VersionedRef{{ID: "primary", Version: 1}}, InputDLP: governance.DLPDisabled, OutputDLP: governance.DLPDisabled,
+		Budget: governance.BudgetPolicy{MaxInputTokens: 100, MaxOutputTokens: 100}}
+	publishTestPolicy(t, store, now, policy)
+	service := governance.Service{Repository: store, Ledger: store, Decisions: store, Now: func() time.Time { return now }}
+	model := governance.VersionedRef{ID: "primary", Version: 1}
+	envelope := runtime.ExecutionEnvelope{TenantID: "tenant", RequestID: "refund", UserID: "user", PolicyVersion: 1}
+	permit, err := service.Begin(context.Background(), envelope, model, []byte("input"))
+	if err != nil || permit.Reservation.State != governance.ReservationReserved {
+		t.Fatalf("permit=%#v err=%v", permit, err)
+	}
+	if err := service.Refund(context.Background(), permit, "caller canceled"); err != nil {
+		t.Fatal(err)
+	}
+	refunded, err := store.GetReservation(context.Background(), "tenant", permit.Reservation.ReservationID)
+	if err != nil || refunded.State != governance.ReservationRefunded {
+		t.Fatalf("refunded=%#v err=%v", refunded, err)
+	}
+	if err := service.Refund(context.Background(), governance.RunPermit{}, "nothing reserved"); err != nil {
+		t.Fatalf("empty refund err=%v", err)
+	}
+
+	envelope.RequestID = "abort"
+	abortPermit, err := service.Begin(context.Background(), envelope, model, []byte("input"))
+	if err != nil || abortPermit.Reservation.State != governance.ReservationReserved {
+		t.Fatalf("abort permit=%#v err=%v", abortPermit, err)
+	}
+	if err := service.Abort(context.Background(), envelope, model, "worker lost lease"); err != nil {
+		t.Fatal(err)
+	}
+	aborted, err := store.GetReservation(context.Background(), "tenant", abortPermit.Reservation.ReservationID)
+	if err != nil || aborted.State != governance.ReservationRefunded {
+		t.Fatalf("aborted=%#v err=%v", aborted, err)
+	}
+	if err := service.Abort(context.Background(), envelope, model, "replay"); err != nil {
+		t.Fatalf("idempotent abort err=%v", err)
+	}
+
+	envelope.RequestID = "models"
+	modelPermit, err := service.Begin(context.Background(), envelope, model, []byte("input"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := service.ValidateModelCandidates(context.Background(), modelPermit, []governance.VersionedRef{model})
+	if err != nil || allowed.Action != governance.ActionAllow {
+		t.Fatalf("allowed=%#v err=%v", allowed, err)
+	}
+	denied, err := service.ValidateModelCandidates(context.Background(), modelPermit, []governance.VersionedRef{model, {ID: "fallback", Version: 1}})
+	if err != nil || denied.Action != governance.ActionDeny || denied.ReasonCode != governance.ReasonModelDenied {
+		t.Fatalf("denied=%#v err=%v", denied, err)
+	}
+	if _, err := service.ValidateModelCandidates(context.Background(), modelPermit, nil); !errors.Is(err, runtime.ErrInvariantViolation) {
+		t.Fatalf("empty candidates err=%v", err)
+	}
+	if err := service.Record(context.Background(), governance.Decision{DecisionID: "manual", TenantID: "tenant", RequestID: "models", Stage: "manual", Action: governance.ActionAllow, ReasonCode: governance.ReasonAllowed, PolicyVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func publishTestPolicy(t *testing.T, store *governancememory.Store, now time.Time, value governance.PolicyV1) {
 	t.Helper()
 	digest, _, err := governance.PolicyDigest(value)

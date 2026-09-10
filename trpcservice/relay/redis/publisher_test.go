@@ -8,18 +8,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+
 	channel "github.com/liuzengh/trpc-agent-service/trpcservice/channels/contract"
 	"github.com/liuzengh/trpc-agent-service/trpcservice/relay"
 	redisclient "github.com/redis/go-redis/v9"
 )
 
 func TestPublisherRedis7Contract(t *testing.T) {
-	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
-	if address == "" {
-		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
-	}
-	client := redisclient.NewClient(&redisclient.Options{Addr: address})
-	t.Cleanup(func() { _ = client.Close() })
+	client, cleanup := redisContractClient(t)
+	t.Cleanup(cleanup)
 	publisher, err := NewPublisher(client, Config{Environment: "relay-contract"})
 	if err != nil {
 		t.Fatal(err)
@@ -73,12 +71,8 @@ func TestPublisherRedis7Contract(t *testing.T) {
 }
 
 func TestWakeupQueueDeadLettersPoisonWithoutStopping(t *testing.T) {
-	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
-	if address == "" {
-		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
-	}
-	client := redisclient.NewClient(&redisclient.Options{Addr: address})
-	t.Cleanup(func() { _ = client.Close() })
+	client, cleanup := redisContractClient(t)
+	t.Cleanup(cleanup)
 	publisher, err := NewPublisher(client, Config{Environment: fmt.Sprintf("wakeup_poison_%d", time.Now().UnixNano())})
 	if err != nil {
 		t.Fatal(err)
@@ -126,12 +120,8 @@ func TestWakeupQueueDeadLettersPoisonWithoutStopping(t *testing.T) {
 }
 
 func TestReplyQueueReclaimsAdapterCrashWithoutEarlyACK(t *testing.T) {
-	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
-	if address == "" {
-		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
-	}
-	client := redisclient.NewClient(&redisclient.Options{Addr: address})
-	t.Cleanup(func() { _ = client.Close() })
+	client, cleanup := redisContractClient(t)
+	t.Cleanup(cleanup)
 	publisher, err := NewPublisher(client, Config{Environment: fmt.Sprintf("reply_reclaim_%d", time.Now().UnixNano())})
 	if err != nil {
 		t.Fatal(err)
@@ -156,10 +146,20 @@ func TestReplyQueueReclaimsAdapterCrashWithoutEarlyACK(t *testing.T) {
 	if err != nil || pending.Count != 1 {
 		t.Fatalf("pending=%#v err=%v", pending, err)
 	}
-	time.Sleep(10 * time.Millisecond)
-	reclaimed, err := queue.ReclaimReplies(context.Background(), destination, channel.ReplyConsumerOptions{ConsumerID: "owner-2"})
-	if err != nil || len(reclaimed) != 1 || reclaimed[0].Event != event {
-		t.Fatalf("reclaimed=%#v err=%v", reclaimed, err)
+	var reclaimed []channel.ReplyDelivery
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		reclaimed, err = queue.ReclaimReplies(context.Background(), destination, channel.ReplyConsumerOptions{ConsumerID: "owner-2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reclaimed) == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].Event != event {
+		t.Fatalf("reclaimed=%#v", reclaimed)
 	}
 	if err := queue.AckReply(context.Background(), destination, reclaimed[0]); err != nil {
 		t.Fatal(err)
@@ -174,12 +174,8 @@ func TestReplyQueueReclaimsAdapterCrashWithoutEarlyACK(t *testing.T) {
 }
 
 func TestReplyQueueDeadLettersCrossBindingEntry(t *testing.T) {
-	address := os.Getenv("TRPC_REDIS_TEST_ADDR")
-	if address == "" {
-		t.Skip("TRPC_REDIS_TEST_ADDR is not set")
-	}
-	client := redisclient.NewClient(&redisclient.Options{Addr: address})
-	t.Cleanup(func() { _ = client.Close() })
+	client, cleanup := redisContractClient(t)
+	t.Cleanup(cleanup)
 	publisher, err := NewPublisher(client, Config{Environment: fmt.Sprintf("reply_poison_%d", time.Now().UnixNano())})
 	if err != nil {
 		t.Fatal(err)
@@ -220,4 +216,26 @@ func TestReplyQueueDeadLettersCrossBindingEntry(t *testing.T) {
 		t.Fatal("reply consumer did not stop")
 	}
 	t.Cleanup(func() { _ = client.Del(context.Background(), stream, stream+":dead-letter").Err() })
+}
+
+// redisContractClient keeps the Redis 7 path available through
+// TRPC_REDIS_TEST_ADDR while making stream and reclaim contracts part of the
+// ordinary unit/coverage suite. miniredis implements the Redis Stream and
+// consumer-group operations used here; production Redis compatibility remains
+// verified by the Compose admission job.
+func redisContractClient(t *testing.T) (*redisclient.Client, func()) {
+	t.Helper()
+	if address := os.Getenv("TRPC_REDIS_TEST_ADDR"); address != "" {
+		client := redisclient.NewClient(&redisclient.Options{Addr: address})
+		return client, func() { _ = client.Close() }
+	}
+	server, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := redisclient.NewClient(&redisclient.Options{Addr: server.Addr()})
+	return client, func() {
+		_ = client.Close()
+		server.Close()
+	}
 }
